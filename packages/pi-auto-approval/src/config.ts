@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export type RuleLevel = "guarded" | "convention";
 
@@ -16,8 +16,32 @@ export interface ConfigUi {
   readonly status: boolean;
 }
 
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "low";
+export const REVIEW_TIMEOUT_DEFAULT_MS = 30_000;
+export const REVIEW_TIMEOUT_MIN_MS = 1_000;
+export const REVIEW_TIMEOUT_MAX_MS = 300_000;
+
+export interface ReviewerConfig {
+  readonly model?: { readonly provider: string; readonly id: string }; // undefined => active model
+  readonly reasoningEffort: ReasoningEffort;
+  readonly timeoutMs: number;
+  readonly extraInstructions?: string; // resolved text (inline or file contents), non-blank when present
+}
+
+export const DEFAULT_REVIEWER: ReviewerConfig = { reasoningEffort: DEFAULT_REASONING_EFFORT, timeoutMs: REVIEW_TIMEOUT_DEFAULT_MS };
+
 export type ConfigResult =
-  | { readonly ok: true; readonly rules: readonly Rule[]; readonly source: string | null; readonly ui: ConfigUi }
+  | {
+      readonly ok: true;
+      readonly rules: readonly Rule[];
+      readonly source: string | null;
+      readonly ui: ConfigUi;
+      readonly guardian: boolean;
+      readonly reviewer: ReviewerConfig;
+    }
   | { readonly ok: false; readonly error: string };
 
 export const CONFIG_FILENAME = "auto-permissions.json";
@@ -92,8 +116,76 @@ function parseUi(ui: unknown, source: string): Parsed<ConfigUi> {
   return { ok: true, value: { status: ui.status } };
 }
 
-/** Pure. Validates parsed JSON and compiles regexes. Never throws; returns { ok:false } instead. */
-export function parseConfig(raw: unknown, source: string): ConfigResult {
+function parseGuardian(value: unknown, source: string): Parsed<boolean> {
+  if (value === undefined || value === "on") return { ok: true, value: true };
+  if (value === "off") return { ok: true, value: false };
+  return fail(`${source}: guardian must be "on" or "off"`);
+}
+
+function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<ReviewerConfig> {
+  if (raw === undefined) return { ok: true, value: DEFAULT_REVIEWER };
+  if (!isObject(raw)) return fail(`${source}: reviewer must be an object`);
+
+  if ((raw.provider === undefined) !== (raw.model === undefined)) {
+    return fail(`${source}: reviewer.provider and reviewer.model must be set together`);
+  }
+  if (raw.provider !== undefined && (!isNonBlank(raw.provider) || !isNonBlank(raw.model))) {
+    return fail(`${source}: reviewer.provider and reviewer.model must be non-empty strings`);
+  }
+
+  let reasoningEffort: ReasoningEffort = DEFAULT_REASONING_EFFORT;
+  if (raw.reasoningEffort !== undefined) {
+    if (!REASONING_EFFORTS.includes(raw.reasoningEffort as ReasoningEffort)) {
+      return fail(`${source}: reviewer.reasoningEffort must be one of ${REASONING_EFFORTS.join(", ")}`);
+    }
+    reasoningEffort = raw.reasoningEffort as ReasoningEffort;
+  }
+
+  let timeoutMs = REVIEW_TIMEOUT_DEFAULT_MS;
+  if (raw.timeoutMs !== undefined) {
+    const t = raw.timeoutMs;
+    if (typeof t !== "number" || !Number.isInteger(t) || t < REVIEW_TIMEOUT_MIN_MS || t > REVIEW_TIMEOUT_MAX_MS) {
+      return fail(`${source}: reviewer.timeoutMs must be an integer from ${REVIEW_TIMEOUT_MIN_MS} to ${REVIEW_TIMEOUT_MAX_MS}`);
+    }
+    timeoutMs = t;
+  }
+
+  if (raw.extraInstructions !== undefined && raw.extraInstructionsFile !== undefined) {
+    return fail(`${source}: reviewer.extraInstructions and reviewer.extraInstructionsFile are mutually exclusive`);
+  }
+  let extraInstructions: string | undefined;
+  if (raw.extraInstructions !== undefined) {
+    if (!isNonBlank(raw.extraInstructions)) return fail(`${source}: reviewer.extraInstructions must be a non-empty string`);
+    extraInstructions = raw.extraInstructions;
+  } else if (raw.extraInstructionsFile !== undefined) {
+    if (!isNonBlank(raw.extraInstructionsFile)) return fail(`${source}: reviewer.extraInstructionsFile must be a non-empty string`);
+    const path = resolve(baseDir, raw.extraInstructionsFile);
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      return fail(`${source}: reviewer.extraInstructionsFile cannot be read (${path})`);
+    }
+    if (text.trim() === "") return fail(`${source}: reviewer.extraInstructionsFile is empty (${path})`);
+    extraInstructions = text;
+  }
+
+  return {
+    ok: true,
+    value: {
+      ...(raw.provider !== undefined ? { model: { provider: raw.provider as string, id: raw.model as string } } : {}),
+      reasoningEffort,
+      timeoutMs,
+      ...(extraInstructions !== undefined ? { extraInstructions } : {}),
+    },
+  };
+}
+
+/**
+ * Validates parsed JSON and compiles regexes. Never throws; returns { ok:false } instead.
+ * Sync-reads `reviewer.extraInstructionsFile` (relative to baseDir) when set; the only I/O here.
+ */
+export function parseConfig(raw: unknown, source: string, baseDir = "."): ConfigResult {
   if (!isObject(raw)) return fail(`${source}: root must be an object`);
   if (!Array.isArray(raw.rules)) return fail(`${source}: rules must be an array`);
 
@@ -107,7 +199,13 @@ export function parseConfig(raw: unknown, source: string): ConfigResult {
   const ui = parseUi(raw.ui, source);
   if (!ui.ok) return ui;
 
-  return { ok: true, rules, source, ui: ui.value };
+  const guardian = parseGuardian(raw.guardian, source);
+  if (!guardian.ok) return guardian;
+
+  const reviewer = parseReviewer(raw.reviewer, source, baseDir);
+  if (!reviewer.ok) return reviewer;
+
+  return { ok: true, rules, source, ui: ui.value, guardian: guardian.value, reviewer: reviewer.value };
 }
 
 /**
@@ -135,10 +233,17 @@ export function loadConfig(cwd: string, globalDir: string): ConfigResult {
     } catch (err) {
       return { ok: false, error: `${path}: invalid JSON (${(err as Error).message})` };
     }
-    return parseConfig(raw, path);
+    return parseConfig(raw, path, dirname(path));
   }
 
-  return { ok: true, rules: [], source: null, ui: { status: true } };
+  return {
+    ok: true,
+    rules: [],
+    source: null,
+    ui: { status: true },
+    guardian: true,
+    reviewer: DEFAULT_REVIEWER,
+  };
 }
 
 /** Reads `<cwd>/.pi/trusted-ops`. Lines trimmed, blanks dropped, no comment syntax. Any read error (incl. ENOENT) => empty set. Never throws. Sync, read per call. */

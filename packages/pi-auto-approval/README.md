@@ -42,7 +42,7 @@ List trusted group names, one per line, in the project file `.pi/trusted-ops`. N
 
 ## Status widget
 
-For matched rules, the temporary widget shows `reviewing` while confirmation is pending, then `approved` or `blocked`. A trusted guarded match shows `approved`; convention matches show `blocked`. Set `"ui": { "status": false }` in `.pi/auto-permissions.json` to hide the widget. It is shown by default. This setting does not change enforcement.
+For matched rules, the temporary widget shows `reviewing` during model review or confirmation, then `approved` or `blocked`. A trusted guarded match shows `approved`; convention matches show `blocked`. Set `"ui": { "status": false }` in `.pi/auto-permissions.json` to hide the widget. It is shown by default. This setting does not change enforcement.
 
 ## Starter rules
 
@@ -50,9 +50,13 @@ Copy [`examples/auto-permissions.json`](examples/auto-permissions.json) to `.pi/
 
 ## Behaviour
 
-Rules are checked in order against the raw bash command; the first match wins. `guarded` prompts for approval and blocks if approval is denied or unavailable. `convention` blocks and displays its configured message. Invalid configuration and gate errors block bash calls. With no config or no matching rule, the command is allowed. Non-bash tools are unaffected.
+Rules are checked in order against the raw bash command; the first match wins. `guarded` commands are reviewed by the configured model by default. An approval runs the command; a revision blocks it; uncertain or failed reviews require user confirmation and block when confirmation is unavailable. `convention` blocks and displays its configured message. Invalid configuration and gate errors block bash calls. With no config or no matching rule, the command is allowed. Non-bash tools are unaffected.
 
 ## Limits
+
+Guardian relies on model judgment and is advisory, not a security boundary. Every untrusted guarded command incurs a model request and its latency. The request includes the command, cwd, rule label and group, plus up to 40,000 characters of session history. No manual real-model check has been done. History is taken from the active branch, not Pi's compaction-trimmed context; compaction summaries and assistant/tool records are context only, and only structured user records authorize. Images are placeholders. Provenance is not a security boundary because configuration and other extensions can inject user messages.
+
+Set `"guardian": "off"` to restore plain confirmation for guarded commands. Reviewer settings are optional: `provider` and `model` must be supplied together (otherwise the active model is used), `reasoningEffort` defaults to `"low"`, and `timeoutMs` defaults to `30000` (valid range 1000–300000). Supply either non-blank `extraInstructions` or `extraInstructionsFile`, not both; file paths are relative to the config file and their text is appended as additional constraints.
 
 This checks raw command text with regular expressions only. It is evadable via quoting, variable expansion, aliases, `eval`, generated or downloaded scripts, shell wrappers, and subshells. It does no command parsing or path resolution. Only the `bash` tool is gated: other tools (including MCP and subprocess-based subagents), user `!`/`!!` commands, and extension `pi.exec` are not. Nested `ctx.executeTool("bash", ...)` does go through `tool_call`. Config is trusted input. This is **not a sandbox and not a security boundary**.
 

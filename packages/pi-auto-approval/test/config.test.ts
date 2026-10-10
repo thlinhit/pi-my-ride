@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseConfig, loadConfig, loadTrustedGroups, CONFIG_FILENAME, TRUSTED_FILENAME } from "../src/config.ts";
+import {
+  parseConfig,
+  loadConfig,
+  loadTrustedGroups,
+  CONFIG_FILENAME,
+  TRUSTED_FILENAME,
+  DEFAULT_REVIEWER,
+} from "../src/config.ts";
 
 function errorOf(raw: unknown): string {
   const r = parseConfig(raw, "cfg.json");
@@ -266,7 +273,14 @@ describe("loadConfig: precedence and failure handling", () => {
   test("no files -> ok with no rules and null source", () => {
     const t = setup();
     try {
-      assert.deepEqual(loadConfig(t.cwd, t.globalDir), { ok: true, rules: [], source: null, ui: { status: true } });
+      assert.deepEqual(loadConfig(t.cwd, t.globalDir), {
+        ok: true,
+        rules: [],
+        source: null,
+        ui: { status: true },
+        guardian: true,
+        reviewer: DEFAULT_REVIEWER,
+      });
     } finally {
       t.cleanup();
     }
@@ -346,6 +360,133 @@ describe("loadConfig: precedence and failure handling", () => {
       writeFileSync(t.globalFile, JSON.stringify({ rules: [validRule] }));
       const r = loadConfig(t.cwd, t.globalDir);
       assert.equal(r.ok, false);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
+function reviewerOf(reviewer: unknown, baseDir?: string) {
+  const r = parseConfig({ rules: [], reviewer }, "cfg.json", baseDir);
+  if (!r.ok) assert.fail(r.error);
+  return r.reviewer;
+}
+
+describe("parseConfig: guardian and reviewer", () => {
+  test("defaults: guardian on and DEFAULT_REVIEWER when absent", () => {
+    const r = parseConfig({ rules: [] }, "cfg.json");
+    assert.deepEqual(r, { ok: true, rules: [], source: "cfg.json", ui: { status: true }, guardian: true, reviewer: DEFAULT_REVIEWER });
+  });
+
+  test("guardian on and off are accepted; other values are rejected", () => {
+    const on = parseConfig({ rules: [], guardian: "on" }, "cfg.json");
+    assert.equal(on.ok && on.guardian, true);
+    const off = parseConfig({ rules: [], guardian: "off" }, "cfg.json");
+    assert.equal(off.ok && off.guardian, false);
+    for (const bad of [false, "OFF", 1]) {
+      assert.equal(errorOf({ rules: [], guardian: bad }), 'cfg.json: guardian must be "on" or "off"');
+    }
+  });
+
+  test("reviewer must be an object", () => {
+    assert.match(errorOf({ rules: [], reviewer: "gpt" }), /reviewer must be an object/);
+    assert.match(errorOf({ rules: [], reviewer: [] }), /reviewer must be an object/);
+  });
+
+  test("provider and model must be set together and non-blank", () => {
+    assert.match(errorOf({ rules: [], reviewer: { provider: "openai" } }), /set together/);
+    assert.match(errorOf({ rules: [], reviewer: { model: "gpt" } }), /set together/);
+    assert.match(errorOf({ rules: [], reviewer: { provider: " ", model: "gpt" } }), /non-empty strings/);
+    assert.match(errorOf({ rules: [], reviewer: { provider: "openai", model: "" } }), /non-empty strings/);
+  });
+
+  test("provider and model together produce a model reference", () => {
+    assert.deepEqual(reviewerOf({ provider: "openai", model: "gpt-x" }).model, { provider: "openai", id: "gpt-x" });
+    assert.equal(reviewerOf({}).model, undefined);
+  });
+
+  test("reasoningEffort accepts each level and rejects others", () => {
+    for (const level of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
+      assert.equal(reviewerOf({ reasoningEffort: level }).reasoningEffort, level);
+    }
+    assert.equal(reviewerOf({}).reasoningEffort, "low");
+    assert.match(errorOf({ rules: [], reviewer: { reasoningEffort: "none" } }), /reasoningEffort/);
+    assert.match(errorOf({ rules: [], reviewer: { reasoningEffort: 3 } }), /reasoningEffort/);
+  });
+
+  test("timeoutMs is an integer from 1000 to 300000", () => {
+    assert.equal(reviewerOf({ timeoutMs: 1000 }).timeoutMs, 1000);
+    assert.equal(reviewerOf({ timeoutMs: 300000 }).timeoutMs, 300000);
+    assert.equal(reviewerOf({}).timeoutMs, 30000);
+    for (const bad of [999, 300001, 1500.5, "5000", NaN]) {
+      assert.match(errorOf({ rules: [], reviewer: { timeoutMs: bad } }), /timeoutMs/);
+    }
+  });
+
+  test("inline extraInstructions is kept; blank is rejected", () => {
+    assert.equal(reviewerOf({ extraInstructions: "Never touch prod" }).extraInstructions, "Never touch prod");
+    assert.match(errorOf({ rules: [], reviewer: { extraInstructions: "  " } }), /extraInstructions must be/);
+  });
+
+  test("extraInstructions and extraInstructionsFile are mutually exclusive", () => {
+    assert.match(
+      errorOf({ rules: [], reviewer: { extraInstructions: "a", extraInstructionsFile: "b.md" } }),
+      /mutually exclusive/,
+    );
+  });
+});
+
+describe("parseConfig: extraInstructionsFile", () => {
+  function dirWith(files: Record<string, string>) {
+    const dir = mkdtempSync(join(tmpdir(), "aa-review-"));
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content);
+    return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  test("relative path resolves against baseDir and file text is stored", () => {
+    const t = dirWith({ "extra.md": "Be strict.\n" });
+    try {
+      assert.equal(reviewerOf({ extraInstructionsFile: "extra.md" }, t.dir).extraInstructions, "Be strict.\n");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("absolute path works", () => {
+    const t = dirWith({ "extra.md": "Abs." });
+    try {
+      const abs = join(t.dir, "extra.md");
+      assert.equal(reviewerOf({ extraInstructionsFile: abs }, "/nowhere").extraInstructions, "Abs.");
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("missing file, directory, and blank file are rejected", () => {
+    const t = dirWith({ "blank.md": " \n\t" });
+    try {
+      mkdirSync(join(t.dir, "folder"));
+      const missing = parseConfig({ rules: [], reviewer: { extraInstructionsFile: "nope.md" } }, "cfg.json", t.dir);
+      const dir = parseConfig({ rules: [], reviewer: { extraInstructionsFile: "folder" } }, "cfg.json", t.dir);
+      const blank = parseConfig({ rules: [], reviewer: { extraInstructionsFile: "blank.md" } }, "cfg.json", t.dir);
+      assert.equal(missing.ok || dir.ok || blank.ok, false);
+      if (!missing.ok) assert.match(missing.error, /cannot be read/);
+      if (!dir.ok) assert.match(dir.error, /cannot be read/);
+      if (!blank.ok) assert.match(blank.error, /is empty/);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("loadConfig resolves the file relative to the loaded config directory", () => {
+    const t = dirWith({});
+    try {
+      const cwd = join(t.dir, "project");
+      mkdirSync(join(cwd, ".pi"), { recursive: true });
+      writeFileSync(join(cwd, ".pi", "guard.md"), "From project.");
+      writeFileSync(join(cwd, ".pi", CONFIG_FILENAME), JSON.stringify({ rules: [], reviewer: { extraInstructionsFile: "guard.md" } }));
+      const r = loadConfig(cwd, join(t.dir, "global"));
+      assert.equal(r.ok && r.reviewer.extraInstructions, "From project.");
     } finally {
       t.cleanup();
     }
