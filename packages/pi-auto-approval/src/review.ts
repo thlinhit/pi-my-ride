@@ -15,7 +15,7 @@ export interface EvidenceRecord {
 }
 export interface Evidence {
   readonly records: readonly EvidenceRecord[]; // chronological, newest kept
-  readonly userDropped: boolean; // true iff trimming removed at least one user record
+  readonly userDropped: boolean; // true if trimming removed at least one user record
 }
 export interface ReviewRequest {
   readonly tool: "bash";
