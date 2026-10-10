@@ -137,7 +137,9 @@ export function collectEvidence(
   let total = 0;
   let start = all.length;
   for (let i = all.length - 1; i >= 0; i--) {
-    const size = recordLine(all[i]!).length + 1;
+    const entry = all[i];
+    if (entry === undefined) break;
+    const size = recordLine(entry).length + 1;
     if (total + size > cap) break;
     total += size;
     start = i;

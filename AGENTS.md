@@ -59,6 +59,14 @@ For multi-step tasks, state a plan with a check for each step:
 
 </important>
 
+<important if="you are writing or formatting TypeScript object literals">
+
+- Keep short objects inline when they fit on one line, e.g. `{ id, name }` in a return or a small argument.
+- Expand objects with several properties, or ones likely to grow, one property per line. Biome keeps the expanded form when there is a newline after `{`.
+- Run `npm run format` before committing formatting changes.
+
+</important>
+
 <important if="you are doing GitHub operations, authenticating, or using git over HTTPS">
 
 - Use the GitHub CLI (`gh`) for GitHub operations, including authentication and repo actions.

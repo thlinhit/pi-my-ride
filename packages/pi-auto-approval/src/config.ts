@@ -31,7 +31,10 @@ export interface ReviewerConfig {
   readonly extraInstructions?: string; // resolved text (inline or file contents), non-blank when present
 }
 
-export const DEFAULT_REVIEWER: ReviewerConfig = { reasoningEffort: DEFAULT_REASONING_EFFORT, timeoutMs: REVIEW_TIMEOUT_DEFAULT_MS };
+export const DEFAULT_REVIEWER: ReviewerConfig = {
+  reasoningEffort: DEFAULT_REASONING_EFFORT,
+  timeoutMs: REVIEW_TIMEOUT_DEFAULT_MS,
+};
 
 export type ConfigResult =
   | {
@@ -66,7 +69,8 @@ function parseFlags(flags: unknown, where: string): Parsed<string> {
   if (flags === undefined) return { ok: true, value: "" };
   if (typeof flags !== "string") return fail(`${where}: flags must be a string`);
   if (/[gy]/.test(flags)) return fail(`${where}: flags must not include g or y (stateful matching)`);
-  if ([...flags].some((f) => !ALLOWED_FLAGS.includes(f))) return fail(`${where}: flags contain an unsupported character`);
+  if ([...flags].some((f) => !ALLOWED_FLAGS.includes(f)))
+    return fail(`${where}: flags contain an unsupported character`);
   return { ok: true, value: flags };
 }
 
@@ -92,8 +96,10 @@ function parseRule(entry: unknown, where: string): Parsed<Rule> {
   const pattern = compilePattern(entry.pattern, flags.value, where);
   if (!pattern.ok) return pattern;
 
-  if (entry.message !== undefined && !isNonBlank(entry.message)) return fail(`${where}: message must be a non-empty string`);
-  if (entry.level === "convention" && entry.message === undefined) return fail(`${where}: convention rules require a message`);
+  if (entry.message !== undefined && !isNonBlank(entry.message))
+    return fail(`${where}: message must be a non-empty string`);
+  if (entry.level === "convention" && entry.message === undefined)
+    return fail(`${where}: convention rules require a message`);
   if (entry.group !== undefined && !isNonBlank(entry.group)) return fail(`${where}: group must be a non-empty string`);
 
   return {
@@ -145,7 +151,9 @@ function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<Re
   if (raw.timeoutMs !== undefined) {
     const t = raw.timeoutMs;
     if (typeof t !== "number" || !Number.isInteger(t) || t < REVIEW_TIMEOUT_MIN_MS || t > REVIEW_TIMEOUT_MAX_MS) {
-      return fail(`${source}: reviewer.timeoutMs must be an integer from ${REVIEW_TIMEOUT_MIN_MS} to ${REVIEW_TIMEOUT_MAX_MS}`);
+      return fail(
+        `${source}: reviewer.timeoutMs must be an integer from ${REVIEW_TIMEOUT_MIN_MS} to ${REVIEW_TIMEOUT_MAX_MS}`,
+      );
     }
     timeoutMs = t;
   }
@@ -155,10 +163,12 @@ function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<Re
   }
   let extraInstructions: string | undefined;
   if (raw.extraInstructions !== undefined) {
-    if (!isNonBlank(raw.extraInstructions)) return fail(`${source}: reviewer.extraInstructions must be a non-empty string`);
+    if (!isNonBlank(raw.extraInstructions))
+      return fail(`${source}: reviewer.extraInstructions must be a non-empty string`);
     extraInstructions = raw.extraInstructions;
   } else if (raw.extraInstructionsFile !== undefined) {
-    if (!isNonBlank(raw.extraInstructionsFile)) return fail(`${source}: reviewer.extraInstructionsFile must be a non-empty string`);
+    if (!isNonBlank(raw.extraInstructionsFile))
+      return fail(`${source}: reviewer.extraInstructionsFile must be a non-empty string`);
     const path = resolve(baseDir, raw.extraInstructionsFile);
     let text: string;
     try {

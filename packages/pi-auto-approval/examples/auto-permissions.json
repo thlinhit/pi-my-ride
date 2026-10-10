@@ -1,7 +1,11 @@
 {
   "rules": [
     { "pattern": "\\bgit\\s+push\\b", "level": "guarded", "label": "git push" },
-    { "pattern": "\\brm\\s+-[a-zA-Z]*r[a-zA-Z]*f|\\brm\\s+-[a-zA-Z]*f[a-zA-Z]*r", "level": "guarded", "label": "rm -rf" },
+    {
+      "pattern": "\\brm\\s+-[a-zA-Z]*r[a-zA-Z]*f|\\brm\\s+-[a-zA-Z]*f[a-zA-Z]*r",
+      "level": "guarded",
+      "label": "rm -rf"
+    },
     { "pattern": "\\bterraform\\s+apply\\b", "level": "guarded", "label": "terraform apply" }
   ]
 }

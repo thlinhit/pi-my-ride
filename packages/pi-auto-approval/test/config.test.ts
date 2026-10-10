@@ -139,7 +139,10 @@ function uiOf(raw: unknown) {
 
 describe("parseConfig: group and ui", () => {
   test("group must be a non-blank string when present", () => {
-    assert.equal(errorOf({ rules: [{ ...validRule, group: "" }] }), "cfg.json: rules[0]: group must be a non-empty string");
+    assert.equal(
+      errorOf({ rules: [{ ...validRule, group: "" }] }),
+      "cfg.json: rules[0]: group must be a non-empty string",
+    );
     assert.match(errorOf({ rules: [{ ...validRule, group: "  " }] }), /group/);
     assert.match(errorOf({ rules: [{ ...validRule, group: 5 }] }), /group/);
   });
@@ -375,7 +378,14 @@ function reviewerOf(reviewer: unknown, baseDir?: string) {
 describe("parseConfig: guardian and reviewer", () => {
   test("defaults: guardian on and DEFAULT_REVIEWER when absent", () => {
     const r = parseConfig({ rules: [] }, "cfg.json");
-    assert.deepEqual(r, { ok: true, rules: [], source: "cfg.json", ui: { status: true }, guardian: true, reviewer: DEFAULT_REVIEWER });
+    assert.deepEqual(r, {
+      ok: true,
+      rules: [],
+      source: "cfg.json",
+      ui: { status: true },
+      guardian: true,
+      reviewer: DEFAULT_REVIEWER,
+    });
   });
 
   test("guardian on and off are accepted; other values are rejected", () => {
@@ -484,7 +494,10 @@ describe("parseConfig: extraInstructionsFile", () => {
       const cwd = join(t.dir, "project");
       mkdirSync(join(cwd, ".pi"), { recursive: true });
       writeFileSync(join(cwd, ".pi", "guard.md"), "From project.");
-      writeFileSync(join(cwd, ".pi", CONFIG_FILENAME), JSON.stringify({ rules: [], reviewer: { extraInstructionsFile: "guard.md" } }));
+      writeFileSync(
+        join(cwd, ".pi", CONFIG_FILENAME),
+        JSON.stringify({ rules: [], reviewer: { extraInstructionsFile: "guard.md" } }),
+      );
       const r = loadConfig(cwd, join(t.dir, "global"));
       assert.equal(r.ok && r.reviewer.extraInstructions, "From project.");
     } finally {

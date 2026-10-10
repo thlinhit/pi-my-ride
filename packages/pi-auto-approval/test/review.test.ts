@@ -73,7 +73,14 @@ describe("collectEvidence: sources", () => {
   });
 
   test("malformed and unknown entries are skipped without throwing", () => {
-    const ev = collectEvidence([null, "x", 3, [], { type: "message" }, { type: "message", message: { role: "user", content: 5 } }]);
+    const ev = collectEvidence([
+      null,
+      "x",
+      3,
+      [],
+      { type: "message" },
+      { type: "message", message: { role: "user", content: 5 } },
+    ]);
     assert.deepEqual(ev.records, []);
     assert.equal(ev.userDropped, false);
   });
@@ -114,7 +121,11 @@ describe("collectEvidence: cap", () => {
   });
 
   test("a newest record that does not fit empties the suffix and keeps nothing older", () => {
-    const ev = collectEvidence([userMsg("old"), assistantMsg([{ type: "text", text: "z".repeat(500) }])], undefined, 100);
+    const ev = collectEvidence(
+      [userMsg("old"), assistantMsg([{ type: "text", text: "z".repeat(500) }])],
+      undefined,
+      100,
+    );
     assert.deepEqual(ev.records, []);
     assert.equal(ev.userDropped, true);
   });
@@ -148,7 +159,10 @@ describe("buildReviewPrompt", () => {
   });
 
   test("truncation marker is the first line inside the evidence block", () => {
-    const prompt = buildReviewPrompt({ records: [{ source: "assistant", text: "ASSISTANT: hi" }], userDropped: true }, request);
+    const prompt = buildReviewPrompt(
+      { records: [{ source: "assistant", text: "ASSISTANT: hi" }], userDropped: true },
+      request,
+    );
     assert.ok(prompt.includes(`<EVIDENCE>\n${TRUNCATION_MARKER}\n`));
   });
 });
@@ -165,12 +179,21 @@ describe("applyTruncation", () => {
   });
 
   test("revise and ask_user are unchanged when user records were dropped", () => {
-    assert.deepEqual(applyTruncation({ decision: "revise", reason: "r" }, dropped), { decision: "revise", reason: "r" });
-    assert.deepEqual(applyTruncation({ decision: "ask_user", reason: "a" }, dropped), { decision: "ask_user", reason: "a" });
+    assert.deepEqual(applyTruncation({ decision: "revise", reason: "r" }, dropped), {
+      decision: "revise",
+      reason: "r",
+    });
+    assert.deepEqual(applyTruncation({ decision: "ask_user", reason: "a" }, dropped), {
+      decision: "ask_user",
+      reason: "a",
+    });
   });
 
   test("approve is unchanged when no user record was dropped", () => {
-    assert.deepEqual(applyTruncation({ decision: "approve", reason: "ok" }, kept), { decision: "approve", reason: "ok" });
+    assert.deepEqual(applyTruncation({ decision: "approve", reason: "ok" }, kept), {
+      decision: "approve",
+      reason: "ok",
+    });
   });
 });
 
@@ -202,7 +225,10 @@ describe("parseVerdict", () => {
       ok: false,
       error: "reviewer returned an invalid decision",
     });
-    assert.deepEqual(parseVerdict('{"decision":"approve","reason":" "}'), { ok: false, error: "reviewer returned no reason" });
+    assert.deepEqual(parseVerdict('{"decision":"approve","reason":" "}'), {
+      ok: false,
+      error: "reviewer returned no reason",
+    });
   });
 
   test("tolerates chatter and json fences, trims reason, ignores extra keys", () => {
