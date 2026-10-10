@@ -1,0 +1,39 @@
+{
+  "name": "@thlinhit/pi-auto-approval",
+  "version": "0.1.0",
+  "description": "",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thlinhit/pi-my-ride.git",
+    "directory": "packages/pi-auto-approval"
+  },
+  "bugs": {
+    "url": "https://github.com/thlinhit/pi-my-ride/issues"
+  },
+  "homepage": "https://github.com/thlinhit/pi-my-ride/tree/main/packages/pi-auto-approval#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.7",
+    "@earendil-works/pi-coding-agent": ">=0.80.7",
+    "@earendil-works/pi-tui": ">=0.80.7"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": []
+  },
+  "files": [
+    "README.md",
+    "LICENSE"
+  ]
+}
