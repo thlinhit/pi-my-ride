@@ -34,73 +34,80 @@ function isNonBlank(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-/** Pure. Validates parsed JSON and compiles regexes. Never throws; returns { ok:false } instead. */
-export function parseConfig(raw: unknown, source: string): ConfigResult {
-  if (!isObject(raw)) return { ok: false, error: `${source}: root must be an object` };
-  if (!Array.isArray(raw.rules)) return { ok: false, error: `${source}: rules must be an array` };
+type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string };
 
-  const rules: Rule[] = [];
-  for (let i = 0; i < raw.rules.length; i++) {
-    const where = `${source}: rules[${i}]`;
-    const entry: unknown = raw.rules[i];
-    if (!isObject(entry)) return { ok: false, error: `${where} must be an object` };
+const fail = (error: string): { ok: false; error: string } => ({ ok: false, error });
 
-    if (!isNonBlank(entry.pattern)) return { ok: false, error: `${where}: pattern must be a non-empty string` };
-    if (!isNonBlank(entry.label)) return { ok: false, error: `${where}: label must be a non-empty string` };
-    if (typeof entry.level !== "string" || !LEVELS.includes(entry.level)) {
-      return { ok: false, error: `${where}: level must be "guarded" or "convention"` };
-    }
+function parseFlags(flags: unknown, where: string): Parsed<string> {
+  if (flags === undefined) return { ok: true, value: "" };
+  if (typeof flags !== "string") return fail(`${where}: flags must be a string`);
+  if (/[gy]/.test(flags)) return fail(`${where}: flags must not include g or y (stateful matching)`);
+  if ([...flags].some((f) => !ALLOWED_FLAGS.includes(f))) return fail(`${where}: flags contain an unsupported character`);
+  return { ok: true, value: flags };
+}
 
-    let flags = "";
-    if (entry.flags !== undefined) {
-      if (typeof entry.flags !== "string") return { ok: false, error: `${where}: flags must be a string` };
-      if (/[gy]/.test(entry.flags)) {
-        return { ok: false, error: `${where}: flags must not include g or y (stateful matching)` };
-      }
-      if ([...entry.flags].some((f) => !ALLOWED_FLAGS.includes(f))) {
-        return { ok: false, error: `${where}: flags contain an unsupported character` };
-      }
-      flags = entry.flags;
-    }
+function compilePattern(source: string, flags: string, where: string): Parsed<RegExp> {
+  try {
+    return { ok: true, value: new RegExp(source, flags) };
+  } catch (err) {
+    return fail(`${where}: invalid regex (${(err as Error).message})`);
+  }
+}
 
-    let pattern: RegExp;
-    try {
-      pattern = new RegExp(entry.pattern, flags);
-    } catch (err) {
-      return { ok: false, error: `${where}: invalid regex (${(err as Error).message})` };
-    }
+function parseRule(entry: unknown, where: string): Parsed<Rule> {
+  if (!isObject(entry)) return fail(`${where} must be an object`);
 
-    if (entry.message !== undefined && !isNonBlank(entry.message)) {
-      return { ok: false, error: `${where}: message must be a non-empty string` };
-    }
-    if (entry.level === "convention" && entry.message === undefined) {
-      return { ok: false, error: `${where}: convention rules require a message` };
-    }
-    if (entry.group !== undefined && !isNonBlank(entry.group)) {
-      return { ok: false, error: `${where}: group must be a non-empty string` };
-    }
+  if (!isNonBlank(entry.pattern)) return fail(`${where}: pattern must be a non-empty string`);
+  if (!isNonBlank(entry.label)) return fail(`${where}: label must be a non-empty string`);
+  if (typeof entry.level !== "string" || !LEVELS.includes(entry.level)) {
+    return fail(`${where}: level must be "guarded" or "convention"`);
+  }
 
-    rules.push({
-      pattern,
+  const flags = parseFlags(entry.flags, where);
+  if (!flags.ok) return flags;
+  const pattern = compilePattern(entry.pattern, flags.value, where);
+  if (!pattern.ok) return pattern;
+
+  if (entry.message !== undefined && !isNonBlank(entry.message)) return fail(`${where}: message must be a non-empty string`);
+  if (entry.level === "convention" && entry.message === undefined) return fail(`${where}: convention rules require a message`);
+  if (entry.group !== undefined && !isNonBlank(entry.group)) return fail(`${where}: group must be a non-empty string`);
+
+  return {
+    ok: true,
+    value: {
+      pattern: pattern.value,
       level: entry.level as RuleLevel,
       label: entry.label,
       message: entry.message as string | undefined,
       group: entry.group as string | undefined,
-    });
+    },
+  };
+}
+
+function parseUi(ui: unknown, source: string): Parsed<ConfigUi> {
+  if (ui === undefined) return { ok: true, value: { status: true } };
+  if (!isObject(ui)) return fail(`${source}: ui must be an object`);
+  if (ui.status === undefined) return { ok: true, value: { status: true } };
+  if (typeof ui.status !== "boolean") return fail(`${source}: ui.status must be a boolean`);
+  return { ok: true, value: { status: ui.status } };
+}
+
+/** Pure. Validates parsed JSON and compiles regexes. Never throws; returns { ok:false } instead. */
+export function parseConfig(raw: unknown, source: string): ConfigResult {
+  if (!isObject(raw)) return fail(`${source}: root must be an object`);
+  if (!Array.isArray(raw.rules)) return fail(`${source}: rules must be an array`);
+
+  const rules: Rule[] = [];
+  for (let i = 0; i < raw.rules.length; i++) {
+    const rule = parseRule(raw.rules[i], `${source}: rules[${i}]`);
+    if (!rule.ok) return rule;
+    rules.push(rule.value);
   }
 
-  let status = true;
-  if (raw.ui !== undefined) {
-    if (!isObject(raw.ui)) return { ok: false, error: `${source}: ui must be an object` };
-    if (raw.ui.status !== undefined) {
-      if (typeof raw.ui.status !== "boolean") {
-        return { ok: false, error: `${source}: ui.status must be a boolean` };
-      }
-      status = raw.ui.status;
-    }
-  }
+  const ui = parseUi(raw.ui, source);
+  if (!ui.ok) return ui;
 
-  return { ok: true, rules, source, ui: { status } };
+  return { ok: true, rules, source, ui: ui.value };
 }
 
 /**

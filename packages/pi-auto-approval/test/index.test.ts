@@ -1,27 +1,28 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import type { TestContext } from "node:test";
 import { afterEach, mock } from "node:test";
 import { parseConfig } from "../src/config.ts";
 import { matchRule } from "../src/gates.ts";
 import { createWidgetReporter, handleToolCall } from "../src/index.ts";
 import type { ConfigLoader, GateContext } from "../src/index.ts";
-import type { ConfigResult } from "../src/config.ts";
+import type { ConfigResult, Rule } from "../src/config.ts";
 
 afterEach(() => mock.timers.reset());
 import type { ExtensionAPI, ExtensionHandler, ToolCallEvent, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 type ToolCallHandler = ExtensionHandler<ToolCallEvent, ToolCallEventResult>;
 
-const rule = (level: "guarded" | "convention" = "guarded", group?: string) => ({
+const rule = (level: "guarded" | "convention" = "guarded", group?: string): Rule => ({
   pattern: /danger/i,
   level,
   label: "danger command",
   ...(group === undefined ? {} : { group }),
   ...(level === "convention" ? { message: "Use the approved workflow." } : { message: undefined }),
 });
-const ruleSet = (level: "guarded" | "convention" = "guarded") => [Object.assign(rule(level), { pattern: new RegExp("danger", "i") }) as import("../src/config.ts").Rule];
+const ruleSet = (level: "guarded" | "convention" = "guarded"): Rule[] => [rule(level)];
 const config = (rules = ruleSet()): ConfigResult => ({ ok: true, rules, source: "mock", ui: { status: true } });
 const loadConfig: ConfigLoader = () => config();
 function context(overrides: Partial<GateContext> = {}) {
@@ -79,7 +80,7 @@ test("no UI blocks guarded command", async () => {
 test("trusted guarded rule bypasses confirmation and reports status", async () => {
   const statuses: string[] = [];
   const { ctx, calls } = context();
-  assert.equal(await handleToolCall(event(), ctx, () => config([rule("guarded", "git") as import("../src/config.ts").Rule]), {
+  assert.equal(await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
     trusted: () => new Set(["git"]), status: (state) => statuses.push(state),
   }), undefined);
   assert.equal(calls.length, 0);
@@ -89,7 +90,7 @@ test("trusted guarded rule bypasses confirmation and reports status", async () =
 test("trusted guarded rule allows without UI and reports no status", async () => {
   const statuses: string[] = [];
   const noUi = context({ hasUI: false });
-  assert.equal(await handleToolCall(event(), noUi.ctx, () => config([rule("guarded", "git") as import("../src/config.ts").Rule]), {
+  assert.equal(await handleToolCall(event(), noUi.ctx, () => config([rule("guarded", "git")]), {
     trusted: () => new Set(["git"]), status: (state) => statuses.push(state),
   }), undefined);
   assert.equal(noUi.calls.length, 0);
@@ -113,7 +114,7 @@ test("trusted guarded rule blocks when aborted during trust membership", async (
   const trusted = new Set<string>();
   Object.defineProperty(trusted, "has", { value: () => { controller.abort(); return true; } });
   const { ctx, calls } = context({ signal: controller.signal });
-  const result = await handleToolCall(event(), ctx, () => config([rule("guarded", "git") as import("../src/config.ts").Rule]), {
+  const result = await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
     trusted: () => trusted,
   });
   assert.match(result!.reason, /confirmation failed/);
@@ -123,7 +124,7 @@ test("trusted guarded rule blocks when aborted during trust membership", async (
 test("trusted guarded rule blocks when aborted during status reporting", async () => {
   const controller = new AbortController();
   const { ctx, calls } = context({ signal: controller.signal });
-  const result = await handleToolCall(event(), ctx, () => config([rule("guarded", "git") as import("../src/config.ts").Rule]), {
+  const result = await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
     trusted: () => new Set(["git"]), status: () => { controller.abort(); },
   });
   assert.match(result!.reason, /confirmation failed/);
@@ -133,11 +134,11 @@ test("trusted guarded rule blocks when aborted during status reporting", async (
 test("untrusted guarded rule confirms; convention cannot bypass", async () => {
   const statuses: string[] = [];
   const { ctx, calls } = context();
-  assert.equal(await handleToolCall(event(), ctx, () => config([rule("guarded", "git") as import("../src/config.ts").Rule]), {
+  assert.equal(await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
     trusted: () => new Set(["other"]), status: (state) => statuses.push(state),
   }), undefined);
   assert.equal(calls.length, 1);
-  const blocked = await handleToolCall(event(), ctx, () => config([rule("convention", "git") as import("../src/config.ts").Rule]), {
+  const blocked = await handleToolCall(event(), ctx, () => config([rule("convention", "git")]), {
     trusted: () => new Set(["git"]), status: (state) => statuses.push(state),
   });
   assert.equal(blocked?.reason, "Use the approved workflow.");
@@ -155,7 +156,7 @@ test("status disabled hides reports without changing enforcement", async () => {
   assert.equal(statuses.length, 0);
 
   const trusted = context();
-  assert.equal(await handleToolCall(event(), trusted.ctx, () => hiddenConfig([rule("guarded", "git") as import("../src/config.ts").Rule]), {
+  assert.equal(await handleToolCall(event(), trusted.ctx, () => hiddenConfig([rule("guarded", "git")]), {
     trusted: () => new Set(["git"]), status: (state) => statuses.push(state),
   }), undefined);
   assert.equal(trusted.calls.length, 0);
@@ -172,11 +173,11 @@ test("trust loader and membership failures fall back to confirmation", async () 
   const { ctx, calls } = context();
   const trusted = new Set<string>();
   Object.defineProperty(trusted, "has", { value: () => { throw Error("membership failed"); } });
-  assert.equal(await handleToolCall(event(), ctx, () => config([rule("guarded", "git") as import("../src/config.ts").Rule]), {
+  assert.equal(await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
     trusted: () => { throw Error("loader failed"); },
   }), undefined);
   assert.equal(calls.length, 1);
-  assert.equal(await handleToolCall(event(), ctx, () => config([rule("guarded", "git") as import("../src/config.ts").Rule]), {
+  assert.equal(await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
     trusted: () => trusted,
   }), undefined);
   assert.equal(calls.length, 2);
@@ -291,29 +292,18 @@ test("widget reporter cleanup survives throwing show and clear calls", () => {
   assert.equal(calls, 2);
 });
 
-test("factory registers exactly one tool_call handler", async () => {
-  const { default: autoApproval } = await import("../src/index.ts");
-  const registrations: Array<{ eventName: "tool_call"; callback: ToolCallHandler }> = [];
-  const pi = { on: ((eventName: "tool_call", callback: ToolCallHandler) => { registrations.push({ eventName, callback }); return () => {}; }) as ExtensionAPI["on"] } as ExtensionAPI;
-  autoApproval(pi);
+test("factory registers exactly one tool_call handler", async (t) => {
+  const { registrations } = await factoryHarness(t, async () => true);
   assert.equal(registrations.length, 1);
   assert.equal(registrations[0]?.eventName, "tool_call");
   assert.equal(typeof registrations[0]?.callback, "function");
 });
 
-test("factory rereads trusted-ops and confirms after trust is revoked", async () => {
-  const { default: autoApproval } = await import("../src/index.ts");
-  let callback: ToolCallHandler | undefined;
-  const pi = { on: ((eventName: "tool_call", registered: ToolCallHandler) => { callback = registered; return () => {}; }) as ExtensionAPI["on"] } as ExtensionAPI;
-  autoApproval(pi);
-  const cwd = mkdtempSync(join(tmpdir(), "auto-approval-trust-"));
-  mkdirSync(join(cwd, ".pi"));
-  writeFileSync(join(cwd, ".pi", "auto-permissions.json"), JSON.stringify({ rules: [{ pattern: "danger", level: "guarded", label: "danger", group: "git" }] }));
+test("factory rereads trusted-ops and confirms after trust is revoked", async (t) => {
+  let confirmations = 0;
+  const { cwd, invoke } = await factoryHarness(t, async () => { confirmations++; return true; }, { group: "git" });
   const trustedPath = join(cwd, ".pi", "trusted-ops");
   writeFileSync(trustedPath, "git\n");
-  let confirmations = 0;
-  const ctx = context({ cwd, ui: { confirm: async () => { confirmations++; return true; } } }).ctx;
-  const invoke = () => callback!(event() as ToolCallEvent, ctx as Parameters<ToolCallHandler>[1]);
   assert.equal(await invoke(), undefined);
   assert.equal(confirmations, 0);
   writeFileSync(trustedPath, "\n");
@@ -325,87 +315,70 @@ test("factory rereads trusted-ops and confirms after trust is revoked", async ()
   assert.equal(confirmations, 2);
 });
 
-test("factory treats trust-path read errors as untrusted", async () => {
-  const { default: autoApproval } = await import("../src/index.ts");
-  let callback: ToolCallHandler | undefined;
-  const pi = { on: ((eventName: "tool_call", registered: ToolCallHandler) => { callback = registered; return () => {}; }) as ExtensionAPI["on"] } as ExtensionAPI;
-  autoApproval(pi);
-  const cwd = mkdtempSync(join(tmpdir(), "auto-approval-trust-error-"));
-  mkdirSync(join(cwd, ".pi"));
-  writeFileSync(join(cwd, ".pi", "auto-permissions.json"), JSON.stringify({ rules: [{ pattern: "danger", level: "guarded", label: "danger", group: "git" }] }));
-  mkdirSync(join(cwd, ".pi", "trusted-ops"));
+test("factory treats trust-path read errors as untrusted", async (t) => {
   let confirmations = 0;
-  const ctx = context({ cwd, ui: { confirm: async () => { confirmations++; return false; } } }).ctx;
-  const result = await callback!(event() as ToolCallEvent, ctx as Parameters<ToolCallHandler>[1]);
+  const { cwd, invoke } = await factoryHarness(t, async () => { confirmations++; return false; }, { group: "git" });
+  mkdirSync(join(cwd, ".pi", "trusted-ops"));
+  const result = await invoke();
   assert.match((result as { block: true; reason: string }).reason, /user declined/);
   assert.equal(confirmations, 1);
 });
 
-test("factory allows only one concurrent confirmation and releases the lock", async () => {
-  const { default: autoApproval } = await import("../src/index.ts");
-  let callback: ToolCallHandler | undefined;
-  const pi = { on: ((eventName: "tool_call", registered: ToolCallHandler) => { callback = registered; return () => {}; }) as ExtensionAPI["on"] } as ExtensionAPI;
-  autoApproval(pi);
-  const cwd = mkdtempSync(join(tmpdir(), "auto-approval-"));
-  mkdirSync(join(cwd, ".pi"));
-  writeFileSync(join(cwd, ".pi", "auto-permissions.json"), JSON.stringify({ rules: [{ pattern: "danger", level: "guarded", label: "danger" }] }));
+test("factory allows only one concurrent confirmation and releases the lock", async (t) => {
   let finishPrompt!: (approved: boolean) => void;
   let confirmations = 0;
-  const ctx = context({ cwd, ui: { confirm: async () => {
+  const { invoke } = await factoryHarness(t, async () => {
     confirmations++;
     return new Promise<boolean>((resolve) => { finishPrompt = resolve; });
-  } } }).ctx;
-  const first = callback!(event() as ToolCallEvent, ctx as Parameters<ToolCallHandler>[1]);
-  const second = await callback!(event() as ToolCallEvent, ctx as Parameters<ToolCallHandler>[1]);
+  });
+  const first = invoke();
+  const second = await invoke();
   assert.match((second as { block: true; reason: string }).reason, /confirmation failed/);
   assert.equal(confirmations, 1);
   finishPrompt(true);
   assert.equal(await first, undefined);
-  const third = callback!(event() as ToolCallEvent, { ...ctx, ui: { confirm: async () => true } } as unknown as Parameters<ToolCallHandler>[1]);
+  const third = invoke(async () => true);
   assert.equal(await third, undefined);
 });
 
-test("factory releases confirmation lock after a rejecting prompt", async () => {
-  const { default: autoApproval } = await import("../src/index.ts");
-  let callback: ToolCallHandler | undefined;
-  const pi = { on: ((eventName: "tool_call", registered: ToolCallHandler) => { callback = registered; return () => {}; }) as ExtensionAPI["on"] } as ExtensionAPI;
-  autoApproval(pi);
-  const cwd = mkdtempSync(join(tmpdir(), "auto-approval-"));
-  mkdirSync(join(cwd, ".pi"));
-  writeFileSync(join(cwd, ".pi", "auto-permissions.json"), JSON.stringify({ rules: [{ pattern: "danger", level: "guarded", label: "danger" }] }));
+test("factory releases confirmation lock after a rejecting prompt", async (t) => {
   let rejectPrompt!: (error: Error) => void;
   let confirmations = 0;
-  const ctx = context({ cwd, ui: { confirm: async () => {
+  const { invoke } = await factoryHarness(t, async () => {
     confirmations++;
     return new Promise<boolean>((_resolve, reject) => { rejectPrompt = reject; });
-  } } }).ctx;
-  const first = callback!(event() as ToolCallEvent, ctx as Parameters<ToolCallHandler>[1]);
+  });
+  const first = invoke();
   rejectPrompt(Error("prompt failed"));
   assert.match((await first as { block: true; reason: string }).reason, /confirmation failed/);
   let freshPrompted = false;
-  const next = callback!(event() as ToolCallEvent, { ...ctx, ui: { confirm: async () => { freshPrompted = true; return true; } } } as unknown as Parameters<ToolCallHandler>[1]);
+  const next = invoke(async () => { freshPrompted = true; return true; });
   assert.equal(await next, undefined);
   assert.equal(freshPrompted, true);
   assert.equal(confirmations, 1);
 });
 
-async function widgetHarness(uiStatus: boolean, confirm: (...args: unknown[]) => Promise<boolean>) {
+async function factoryHarness(t: TestContext, confirm: (...args: unknown[]) => Promise<boolean>, { group, uiStatus = true }: { group?: string; uiStatus?: boolean } = {}) {
   const { default: autoApproval } = await import("../src/index.ts");
-  let callback: ToolCallHandler | undefined;
-  const pi = { on: ((_eventName: "tool_call", registered: ToolCallHandler) => { callback = registered; return () => {}; }) as ExtensionAPI["on"] } as ExtensionAPI;
+  const registrations: Array<{ eventName: "tool_call"; callback: ToolCallHandler }> = [];
+  const pi = { on: ((eventName: "tool_call", callback: ToolCallHandler) => { registrations.push({ eventName, callback }); return () => {}; }) as ExtensionAPI["on"] } as ExtensionAPI;
   autoApproval(pi);
-  const cwd = mkdtempSync(join(tmpdir(), "auto-approval-widget-"));
+  const cwd = mkdtempSync(join(tmpdir(), "auto-approval-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
   mkdirSync(join(cwd, ".pi"));
-  writeFileSync(join(cwd, ".pi", "auto-permissions.json"), JSON.stringify({ rules: [{ pattern: "danger", level: "guarded", label: "danger" }], ui: { status: uiStatus } }));
+  writeFileSync(join(cwd, ".pi", "auto-permissions.json"), JSON.stringify({ rules: [{ pattern: "danger", level: "guarded", label: "danger", ...(group === undefined ? {} : { group }) }], ui: { status: uiStatus } }));
   const setWidget = mock.fn((_key: string, _content: string[] | undefined) => {});
-  const ctx = { cwd, hasUI: true, signal: undefined, ui: { confirm, setWidget } } as unknown as Parameters<ToolCallHandler>[1];
-  return { setWidget, invoke: () => callback!(event() as ToolCallEvent, ctx) };
+  const invoke = (confirmPrompt = confirm) => {
+    const ctx = { cwd, hasUI: true, signal: undefined, ui: { confirm: confirmPrompt, setWidget } } as unknown as Parameters<ToolCallHandler>[1];
+    return registrations[0]!.callback(event() as ToolCallEvent, ctx);
+  };
+  return { cwd, registrations, setWidget, invoke };
 }
 
-test("factory widget shows reviewing, then approved or blocked, and clears after 2000 ms", async () => {
+test("factory widget shows reviewing, then approved or blocked, and clears after 2000 ms", async (t) => {
   mock.timers.enable({ apis: ["setTimeout"] });
   let finish!: (approved: boolean) => void;
-  const approve = await widgetHarness(true, () => new Promise<boolean>((resolve) => { finish = resolve; }));
+  const approve = await factoryHarness(t, () => new Promise<boolean>((resolve) => { finish = resolve; }));
   const pending = approve.invoke();
   assert.deepEqual(approve.setWidget.mock.calls.map((call) => call.arguments), [["auto-approval:1", ["auto-approval: reviewing [danger]"]]]);
   finish(true);
@@ -416,7 +389,7 @@ test("factory widget shows reviewing, then approved or blocked, and clears after
   mock.timers.tick(1);
   assert.deepEqual(approve.setWidget.mock.calls.at(-1)?.arguments, ["auto-approval:1", undefined]);
 
-  const deny = await widgetHarness(true, async () => false);
+  const deny = await factoryHarness(t, async () => false);
   assert.match((await deny.invoke() as { reason: string }).reason, /user declined/);
   assert.deepEqual(deny.setWidget.mock.calls.map((call) => call.arguments), [
     ["auto-approval:1", ["auto-approval: reviewing [danger]"]],
@@ -426,15 +399,15 @@ test("factory widget shows reviewing, then approved or blocked, and clears after
   assert.deepEqual(deny.setWidget.mock.calls.at(-1)?.arguments, ["auto-approval:1", undefined]);
 });
 
-test("ui.status false suppresses factory widget calls without changing enforcement", async () => {
+test("ui.status false suppresses factory widget calls without changing enforcement", async (t) => {
   mock.timers.enable({ apis: ["setTimeout"] });
   const declinedConfirm = mock.fn(async () => false);
-  const declined = await widgetHarness(false, declinedConfirm);
+  const declined = await factoryHarness(t, declinedConfirm, { uiStatus: false });
   assert.match((await declined.invoke() as { reason: string }).reason, /user declined/);
   assert.equal(declinedConfirm.mock.callCount(), 1);
 
   const approvedConfirm = mock.fn(async () => true);
-  const approved = await widgetHarness(false, approvedConfirm);
+  const approved = await factoryHarness(t, approvedConfirm, { uiStatus: false });
   assert.equal(await approved.invoke(), undefined);
   assert.equal(approvedConfirm.mock.callCount(), 1);
 
