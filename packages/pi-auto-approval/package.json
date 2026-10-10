@@ -1,7 +1,7 @@
 {
   "name": "@thlinhit/pi-auto-approval",
   "version": "0.1.0",
-  "description": "",
+  "description": "Regex-based approval gates for Pi bash tool calls.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -29,11 +29,27 @@
   "publishConfig": {
     "access": "public"
   },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "pi": {
-    "extensions": []
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "files": [
     "README.md",
-    "LICENSE"
-  ]
+    "LICENSE",
+    "src",
+    "examples"
+  ],
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^1.1.0",
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-tui": "^1.1.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3"
+  }
 }
