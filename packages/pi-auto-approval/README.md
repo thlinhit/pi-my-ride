@@ -8,6 +8,14 @@ A Pi extension that applies regex-based approval rules to bash tool calls.
 pi install npm:@thlinhit/pi-auto-approval
 ```
 
+## Local testing
+
+Run Pi with the extension loaded directly from this repository:
+
+```bash
+pi --extension ./packages/pi-auto-approval/src/index.ts
+```
+
 ## Config
 
 Create `.pi/auto-permissions.json` in the project working directory. If absent, the extension uses `~/.pi/agent/auto-permissions.json`. The project file replaces global rules entirely, including when it contains an empty rules array.
