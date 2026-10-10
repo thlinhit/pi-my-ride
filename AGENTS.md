@@ -1,56 +1,67 @@
-## 1. Think Before Coding
+# AGENTS.md
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
+Monorepo of pi extensions; currently ships `pi-auto-approval` (regex-based approval gates).
 
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
+## Project map
+
+- `packages/pi-auto-approval/` - the pi extension (`src/gates.ts`, `src/config.ts`, `src/index.ts`; tests in `test/`)
+- `docs/` - specs and plans (e.g. `docs/phase-1/plan.md`)
+
+<important if="you need to run tests or other project commands">
+
+| Command | What it does |
+|---|---|
+| `npm test` | Run `pi-auto-approval` tests (delegates to `packages/pi-auto-approval`) |
+
+</important>
+
+<important if="you are starting a non-trivial change or feature with no spec">
+
+- State assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them. Don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-- Default to spec-first: write a markdown spec doc before implementing. If no spec exists and the task is non-trivial, draft one and confirm before coding.
+- If something is unclear, stop, name what's confusing, and ask.
+- Draft a markdown spec in `docs/` and confirm it before coding.
 
-## 2. Simplicity First
+</important>
 
-**Minimum code that solves the problem. Nothing speculative.**
+<important if="you are writing new code">
 
-- No features beyond what was asked.
+- Write only what was asked. No speculative features, flexibility, or configurability.
 - No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
+- No error handling for scenarios that can't happen.
+- If 200 lines could be 50, rewrite it. Ask: would a senior engineer call this overcomplicated?
 
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+</important>
 
-## 3. Surgical Changes
+<important if="you are editing existing code">
 
-**Touch only what you must. Clean up only your own mess.**
+- Touch only what the request requires. Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor code that isn't broken. Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it; don't delete it.
+- Remove imports, variables, and functions that your own changes made unused. Leave pre-existing dead code alone unless asked.
+- Every changed line should trace directly to the user's request.
 
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
+</important>
 
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
+<important if="you are fixing a bug, adding validation, or refactoring">
 
-The test: Every changed line should trace directly to the user's request.
+Define success criteria, then loop until verified:
+- Bug fix: write a test that reproduces it, then make it pass.
+- Validation: write tests for invalid inputs, then make them pass.
+- Refactor: ensure tests pass before and after.
 
-## 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
+For multi-step tasks, state a plan with a check for each step:
 ```
 1. [Step] → verify: [check]
 2. [Step] → verify: [check]
-3. [Step] → verify: [check]
 ```
 
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+</important>
+
+<important if="you are doing GitHub operations, authenticating, or using git over HTTPS">
+
+- Use the GitHub CLI (`gh`) for GitHub operations, including authentication and repo actions.
+- For git over HTTPS, run `gh auth setup-git` to configure Git to use the authenticated CLI.
+
+</important>
