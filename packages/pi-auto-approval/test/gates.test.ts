@@ -1,10 +1,26 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { matchRule } from "../src/gates.ts";
+import { matchRule, isTrusted } from "../src/gates.ts";
 import type { Rule } from "../src/config.ts";
 
 const guardedPush: Rule = { pattern: /\bgit\s+push\b/, level: "guarded", label: "git push" };
 const anyGit: Rule = { pattern: /\bgit\b/, level: "convention", label: "git", message: "use wrapper" };
+
+describe("isTrusted", () => {
+  test("true only for a guarded rule whose group is in the trusted set", () => {
+    assert.equal(isTrusted({ ...guardedPush, group: "git" }, new Set(["git"])), true);
+  });
+
+  test("false without a group, for a group not in the set, or for an empty set", () => {
+    assert.equal(isTrusted(guardedPush, new Set(["git"])), false);
+    assert.equal(isTrusted({ ...guardedPush, group: "deploy" }, new Set(["git"])), false);
+    assert.equal(isTrusted({ ...guardedPush, group: "git" }, new Set()), false);
+  });
+
+  test("convention is never trusted, even when its group is listed", () => {
+    assert.equal(isTrusted({ ...anyGit, group: "git" }, new Set(["git"])), false);
+  });
+});
 
 describe("matchRule", () => {
   test("no rule matches -> undefined", () => {

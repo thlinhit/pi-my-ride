@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseConfig, loadConfig, CONFIG_FILENAME } from "../src/config.ts";
+import { parseConfig, loadConfig, loadTrustedGroups, CONFIG_FILENAME, TRUSTED_FILENAME } from "../src/config.ts";
 
 function errorOf(raw: unknown): string {
   const r = parseConfig(raw, "cfg.json");
@@ -124,6 +124,129 @@ describe("parseConfig: valid configs", () => {
   });
 });
 
+function uiOf(raw: unknown) {
+  const r = parseConfig(raw, "cfg.json");
+  if (!r.ok) assert.fail(r.error);
+  return r.ui;
+}
+
+describe("parseConfig: group and ui", () => {
+  test("group must be a non-blank string when present", () => {
+    assert.equal(errorOf({ rules: [{ ...validRule, group: "" }] }), "cfg.json: rules[0]: group must be a non-empty string");
+    assert.match(errorOf({ rules: [{ ...validRule, group: "  " }] }), /group/);
+    assert.match(errorOf({ rules: [{ ...validRule, group: 5 }] }), /group/);
+  });
+
+  test("group is kept as-is and allowed on guarded and convention rules", () => {
+    const [guarded] = rulesOf({ rules: [{ ...validRule, group: " git " }] });
+    assert.equal(guarded!.group, " git ");
+    const [conv] = rulesOf({
+      rules: [{ pattern: "^tf", level: "convention", label: "tf", message: "Use CI", group: "infra" }],
+    });
+    assert.equal(conv!.group, "infra");
+  });
+
+  test("rule without group has no group", () => {
+    const [rule] = rulesOf({ rules: [validRule] });
+    assert.equal(rule!.group, undefined);
+  });
+
+  test("ui must be an object when present", () => {
+    assert.equal(errorOf({ rules: [], ui: null }), "cfg.json: ui must be an object");
+    assert.equal(errorOf({ rules: [], ui: [] }), "cfg.json: ui must be an object");
+    assert.equal(errorOf({ rules: [], ui: "hide" }), "cfg.json: ui must be an object");
+  });
+
+  test("ui.status must be a boolean when present", () => {
+    assert.equal(errorOf({ rules: [], ui: { status: "no" } }), "cfg.json: ui.status must be a boolean");
+    assert.equal(errorOf({ rules: [], ui: { status: 0 } }), "cfg.json: ui.status must be a boolean");
+  });
+
+  test("invalid ui blocks even when rules are valid", () => {
+    assert.match(errorOf({ rules: [validRule], ui: { status: null } }), /ui\.status/);
+  });
+
+  test("ui defaults to status true when absent or empty", () => {
+    assert.deepEqual(uiOf({ rules: [] }), { status: true });
+    assert.deepEqual(uiOf({ rules: [], ui: {} }), { status: true });
+  });
+
+  test("ui.status false is honoured; unknown ui keys are ignored", () => {
+    assert.deepEqual(uiOf({ rules: [], ui: { status: false } }), { status: false });
+    assert.deepEqual(uiOf({ rules: [], ui: { status: true, color: "red" } }), { status: true });
+  });
+});
+
+describe("loadTrustedGroups", () => {
+  function projectWith(content?: string) {
+    const cwd = mkdtempSync(join(tmpdir(), "aa-trust-"));
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    if (content !== undefined) writeFileSync(join(cwd, ".pi", TRUSTED_FILENAME), content);
+    return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
+  }
+
+  test("missing file yields an empty set", () => {
+    const t = projectWith();
+    try {
+      assert.equal(loadTrustedGroups(t.cwd).size, 0);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("empty and blank-only files yield an empty set", () => {
+    for (const content of ["", "  \n\t\r\n"]) {
+      const t = projectWith(content);
+      try {
+        assert.equal(loadTrustedGroups(t.cwd).size, 0);
+      } finally {
+        t.cleanup();
+      }
+    }
+  });
+
+  test("trims lines, drops blanks, accepts CRLF, dedupes", () => {
+    const t = projectWith("  git \r\n\r\ndeploy\ndeploy\n");
+    try {
+      assert.deepEqual([...loadTrustedGroups(t.cwd)].sort(), ["deploy", "git"]);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("# lines are literal group names and matching is case-sensitive", () => {
+    const t = projectWith("#x\nGit\n");
+    try {
+      const set = loadTrustedGroups(t.cwd);
+      assert.equal(set.has("#x"), true);
+      assert.equal(set.has("git"), false);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("a directory at the trust path yields an empty set without throwing", () => {
+    const t = projectWith();
+    try {
+      mkdirSync(join(t.cwd, ".pi", TRUSTED_FILENAME));
+      assert.equal(loadTrustedGroups(t.cwd).size, 0);
+    } finally {
+      t.cleanup();
+    }
+  });
+
+  test("edits are picked up on the next call (no cache)", () => {
+    const t = projectWith("git\n");
+    try {
+      assert.equal(loadTrustedGroups(t.cwd).has("git"), true);
+      writeFileSync(join(t.cwd, ".pi", TRUSTED_FILENAME), "");
+      assert.equal(loadTrustedGroups(t.cwd).size, 0);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
 describe("loadConfig: precedence and failure handling", () => {
   function setup() {
     const root = mkdtempSync(join(tmpdir(), "aa-config-"));
@@ -143,7 +266,7 @@ describe("loadConfig: precedence and failure handling", () => {
   test("no files -> ok with no rules and null source", () => {
     const t = setup();
     try {
-      assert.deepEqual(loadConfig(t.cwd, t.globalDir), { ok: true, rules: [], source: null });
+      assert.deepEqual(loadConfig(t.cwd, t.globalDir), { ok: true, rules: [], source: null, ui: { status: true } });
     } finally {
       t.cleanup();
     }

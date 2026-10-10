@@ -4,3 +4,8 @@ import type { Rule } from "./config.ts";
 export function matchRule(command: string, rules: readonly Rule[]): Rule | undefined {
   return rules.find((r) => r.pattern.test(command));
 }
+
+/** true only when rule.level === "guarded", rule.group is defined, and trusted.has(rule.group). Convention is never trusted. */
+export function isTrusted(rule: Rule, trusted: ReadonlySet<string>): boolean {
+  return rule.level === "guarded" && rule.group !== undefined && trusted.has(rule.group);
+}

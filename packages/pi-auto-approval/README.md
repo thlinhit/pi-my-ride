@@ -30,7 +30,19 @@ Create `.pi/auto-permissions.json` in the project working directory. If absent, 
 }
 ```
 
-Each rule requires a non-empty `pattern`, `level` (`guarded` or `convention`), and `label`. Optional `flags` accepts regular-expression flags except `g` and `y`. `convention` rules also require a non-empty `message`.
+Each rule requires a non-empty `pattern`, `level` (`guarded` or `convention`), and `label`. Optional `flags` accepts regular-expression flags except `g` and `y`. `convention` rules also require a non-empty `message`. An optional non-empty `group` can be set on a rule; it only affects `guarded` rules.
+
+## Trusted groups
+
+List trusted group names, one per line, in the project file `.pi/trusted-ops`. Names are trimmed, blank lines ignored, and matching is exact and case-sensitive. This file is project-only and read fresh on every bash call. A trusted group bypasses confirmation for matching `guarded` rules only; `convention` rules always block.
+
+```json
+{ "pattern": "\\bgit\\s+status\\b", "level": "guarded", "label": "git status", "group": "git" }
+```
+
+## Status widget
+
+For matched rules, the temporary widget shows `reviewing` while confirmation is pending, then `approved` or `blocked`. A trusted guarded match shows `approved`; convention matches show `blocked`. Set `"ui": { "status": false }` in `.pi/auto-permissions.json` to hide the widget. It is shown by default. This setting does not change enforcement.
 
 ## Starter rules
 
@@ -43,3 +55,5 @@ Rules are checked in order against the raw bash command; the first match wins. `
 ## Limits
 
 This checks raw command text with regular expressions only. It is evadable via quoting, variable expansion, aliases, `eval`, generated or downloaded scripts, shell wrappers, and subshells. It does no command parsing or path resolution. Only the `bash` tool is gated: other tools (including MCP and subprocess-based subagents), user `!`/`!!` commands, and extension `pi.exec` are not. Nested `ctx.executeTool("bash", ...)` does go through `tool_call`. Config is trusted input. This is **not a sandbox and not a security boundary**.
+
+`trusted-ops` grants broad trust: use it only in projects you control. Anyone who can write the project can write this file, including the agent through its own tools, so it is not a security boundary. Convention rules are never bypassed. The status widget is cosmetic; widget failures do not affect enforcement. Trusted guarded commands can run even without a UI.

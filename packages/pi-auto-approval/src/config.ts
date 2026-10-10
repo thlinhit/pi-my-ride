@@ -9,13 +9,19 @@ export interface Rule {
   readonly level: RuleLevel;
   readonly label: string; // human label shown in confirm / block reason
   readonly message?: string; // required for convention; allowed but unused for guarded
+  readonly group?: string; // trusted-ops group; used only for guarded
+}
+
+export interface ConfigUi {
+  readonly status: boolean;
 }
 
 export type ConfigResult =
-  | { readonly ok: true; readonly rules: readonly Rule[]; readonly source: string | null }
+  | { readonly ok: true; readonly rules: readonly Rule[]; readonly source: string | null; readonly ui: ConfigUi }
   | { readonly ok: false; readonly error: string };
 
 export const CONFIG_FILENAME = "auto-permissions.json";
+export const TRUSTED_FILENAME = "trusted-ops";
 
 const ALLOWED_FLAGS = "dimsuv";
 const LEVELS: readonly string[] = ["guarded", "convention"];
@@ -70,16 +76,31 @@ export function parseConfig(raw: unknown, source: string): ConfigResult {
     if (entry.level === "convention" && entry.message === undefined) {
       return { ok: false, error: `${where}: convention rules require a message` };
     }
+    if (entry.group !== undefined && !isNonBlank(entry.group)) {
+      return { ok: false, error: `${where}: group must be a non-empty string` };
+    }
 
     rules.push({
       pattern,
       level: entry.level as RuleLevel,
       label: entry.label,
       message: entry.message as string | undefined,
+      group: entry.group as string | undefined,
     });
   }
 
-  return { ok: true, rules, source };
+  let status = true;
+  if (raw.ui !== undefined) {
+    if (!isObject(raw.ui)) return { ok: false, error: `${source}: ui must be an object` };
+    if (raw.ui.status !== undefined) {
+      if (typeof raw.ui.status !== "boolean") {
+        return { ok: false, error: `${source}: ui.status must be a boolean` };
+      }
+      status = raw.ui.status;
+    }
+  }
+
+  return { ok: true, rules, source, ui: { status } };
 }
 
 /**
@@ -110,5 +131,21 @@ export function loadConfig(cwd: string, globalDir: string): ConfigResult {
     return parseConfig(raw, path);
   }
 
-  return { ok: true, rules: [], source: null };
+  return { ok: true, rules: [], source: null, ui: { status: true } };
+}
+
+/** Reads `<cwd>/.pi/trusted-ops`. Lines trimmed, blanks dropped, no comment syntax. Any read error (incl. ENOENT) => empty set. Never throws. Sync, read per call. */
+export function loadTrustedGroups(cwd: string): ReadonlySet<string> {
+  let text: string;
+  try {
+    text = readFileSync(join(cwd, ".pi", TRUSTED_FILENAME), "utf8");
+  } catch {
+    return new Set();
+  }
+  return new Set(
+    text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0),
+  );
 }
