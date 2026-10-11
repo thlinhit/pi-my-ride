@@ -1,15 +1,17 @@
-import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describe, test } from "node:test";
 import {
-  parseConfig,
-  loadConfig,
-  loadTrustedGroups,
   CONFIG_FILENAME,
-  TRUSTED_FILENAME,
+  DEFAULT_REVIEW_EVIDENCE,
   DEFAULT_REVIEWER,
+  loadConfig,
+  loadProjectInstructions,
+  loadTrustedGroups,
+  parseConfig,
+  TRUSTED_FILENAME,
 } from "../src/config.ts";
 
 function errorOf(raw: unknown): string {
@@ -187,6 +189,88 @@ describe("parseConfig: group and ui", () => {
   });
 });
 
+describe("parseConfig: reviewEvidence", () => {
+  test("defaults off and accepts empty, true, and false settings", () => {
+    for (const [raw, expected] of [
+      [{ rules: [] }, false],
+      [{ rules: [], reviewEvidence: {} }, false],
+      [{ rules: [], reviewEvidence: { projectInstructions: true } }, true],
+      [{ rules: [], reviewEvidence: { projectInstructions: false } }, false],
+    ] as const) {
+      const result = parseConfig(raw, "cfg.json");
+      assert.equal(result.ok && result.reviewEvidence.projectInstructions, expected);
+    }
+  });
+
+  test("validates reviewEvidence shapes with exact errors", () => {
+    for (const bad of ["x", [], null]) {
+      assert.equal(errorOf({ rules: [], reviewEvidence: bad }), "cfg.json: reviewEvidence must be an object");
+    }
+    for (const bad of ["yes", 1]) {
+      assert.equal(
+        errorOf({ rules: [], reviewEvidence: { projectInstructions: bad } }),
+        "cfg.json: reviewEvidence.projectInstructions must be a boolean",
+      );
+    }
+  });
+
+  test("example parses with project instructions explicitly disabled", () => {
+    const example = JSON.parse(readFileSync(new URL("../examples/auto-permissions.json", import.meta.url), "utf8"));
+    const result = parseConfig(example, "example.json");
+    assert.equal(result.ok && result.reviewEvidence.projectInstructions, false);
+  });
+});
+
+describe("loadProjectInstructions", () => {
+  function project() {
+    const cwd = mkdtempSync(join(tmpdir(), "aa-instructions-"));
+    return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
+  }
+
+  test("reads AGENTS.md or CLAUDE.md, preferring AGENTS.md", () => {
+    const agents = project();
+    const claude = project();
+    const both = project();
+    try {
+      writeFileSync(join(agents.cwd, "AGENTS.md"), "Agent rules");
+      writeFileSync(join(claude.cwd, "CLAUDE.md"), "Claude rules");
+      writeFileSync(join(both.cwd, "AGENTS.md"), "Agents");
+      writeFileSync(join(both.cwd, "CLAUDE.md"), "Claude");
+      assert.deepEqual(loadProjectInstructions(agents.cwd), { source: "AGENTS.md", content: "Agent rules" });
+      assert.deepEqual(loadProjectInstructions(claude.cwd), { source: "CLAUDE.md", content: "Claude rules" });
+      assert.deepEqual(loadProjectInstructions(both.cwd), { source: "AGENTS.md", content: "Agents" });
+    } finally {
+      agents.cleanup();
+      claude.cleanup();
+      both.cleanup();
+    }
+  });
+
+  test("missing files and blank AGENTS.md return undefined without fallback", () => {
+    const empty = project();
+    const blank = project();
+    try {
+      assert.equal(loadProjectInstructions(empty.cwd), undefined);
+      writeFileSync(join(blank.cwd, "AGENTS.md"), " \n\t");
+      writeFileSync(join(blank.cwd, "CLAUDE.md"), "fallback");
+      assert.equal(loadProjectInstructions(blank.cwd), undefined);
+    } finally {
+      empty.cleanup();
+      blank.cleanup();
+    }
+  });
+
+  test("non-ENOENT read errors throw with path and code", () => {
+    const t = project();
+    try {
+      mkdirSync(join(t.cwd, "AGENTS.md"));
+      assert.throws(() => loadProjectInstructions(t.cwd), /cannot read .*AGENTS\.md \(EISDIR\)/);
+    } finally {
+      t.cleanup();
+    }
+  });
+});
+
 describe("loadTrustedGroups", () => {
   function projectWith(content?: string) {
     const cwd = mkdtempSync(join(tmpdir(), "aa-trust-"));
@@ -283,6 +367,7 @@ describe("loadConfig: precedence and failure handling", () => {
         ui: { status: true },
         guardian: true,
         reviewer: DEFAULT_REVIEWER,
+        reviewEvidence: DEFAULT_REVIEW_EVIDENCE,
       });
     } finally {
       t.cleanup();
@@ -385,6 +470,7 @@ describe("parseConfig: guardian and reviewer", () => {
       ui: { status: true },
       guardian: true,
       reviewer: DEFAULT_REVIEWER,
+      reviewEvidence: DEFAULT_REVIEW_EVIDENCE,
     });
   });
 

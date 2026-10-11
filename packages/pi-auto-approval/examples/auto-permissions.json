@@ -7,5 +7,6 @@
       "label": "rm -rf"
     },
     { "pattern": "\\bterraform\\s+apply\\b", "level": "guarded", "label": "terraform apply" }
-  ]
+  ],
+  "reviewEvidence": { "projectInstructions": false }
 }

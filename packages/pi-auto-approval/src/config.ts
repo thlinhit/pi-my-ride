@@ -16,6 +16,17 @@ export interface ConfigUi {
   readonly status: boolean;
 }
 
+export interface ReviewEvidenceConfig {
+  readonly projectInstructions: boolean;
+}
+
+export const DEFAULT_REVIEW_EVIDENCE: ReviewEvidenceConfig = { projectInstructions: false };
+
+export interface ProjectInstructions {
+  readonly source: "AGENTS.md" | "CLAUDE.md";
+  readonly content: string;
+}
+
 export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
@@ -44,6 +55,7 @@ export type ConfigResult =
       readonly ui: ConfigUi;
       readonly guardian: boolean;
       readonly reviewer: ReviewerConfig;
+      readonly reviewEvidence: ReviewEvidenceConfig;
     }
   | { readonly ok: false; readonly error: string };
 
@@ -120,6 +132,15 @@ function parseUi(ui: unknown, source: string): Parsed<ConfigUi> {
   if (ui.status === undefined) return { ok: true, value: { status: true } };
   if (typeof ui.status !== "boolean") return fail(`${source}: ui.status must be a boolean`);
   return { ok: true, value: { status: ui.status } };
+}
+
+function parseReviewEvidence(raw: unknown, source: string): Parsed<ReviewEvidenceConfig> {
+  if (raw === undefined) return { ok: true, value: DEFAULT_REVIEW_EVIDENCE };
+  if (!isObject(raw)) return fail(`${source}: reviewEvidence must be an object`);
+  if (raw.projectInstructions !== undefined && typeof raw.projectInstructions !== "boolean") {
+    return fail(`${source}: reviewEvidence.projectInstructions must be a boolean`);
+  }
+  return { ok: true, value: { projectInstructions: raw.projectInstructions === true } };
 }
 
 function parseGuardian(value: unknown, source: string): Parsed<boolean> {
@@ -215,7 +236,18 @@ export function parseConfig(raw: unknown, source: string, baseDir = "."): Config
   const reviewer = parseReviewer(raw.reviewer, source, baseDir);
   if (!reviewer.ok) return reviewer;
 
-  return { ok: true, rules, source, ui: ui.value, guardian: guardian.value, reviewer: reviewer.value };
+  const reviewEvidence = parseReviewEvidence(raw.reviewEvidence, source);
+  if (!reviewEvidence.ok) return reviewEvidence;
+
+  return {
+    ok: true,
+    rules,
+    source,
+    ui: ui.value,
+    guardian: guardian.value,
+    reviewer: reviewer.value,
+    reviewEvidence: reviewEvidence.value,
+  };
 }
 
 /**
@@ -253,7 +285,26 @@ export function loadConfig(cwd: string, globalDir: string): ConfigResult {
     ui: { status: true },
     guardian: true,
     reviewer: DEFAULT_REVIEWER,
+    reviewEvidence: DEFAULT_REVIEW_EVIDENCE,
   };
+}
+
+/** Reads `<cwd>/AGENTS.md`, falling back to `<cwd>/CLAUDE.md` only when absent. */
+export function loadProjectInstructions(cwd: string): ProjectInstructions | undefined {
+  for (const source of ["AGENTS.md", "CLAUDE.md"] as const) {
+    const path = join(cwd, source);
+    let content: string;
+    try {
+      content = readFileSync(path, "utf8");
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") continue;
+      throw new Error(`cannot read ${path} (${code ?? "unknown error"})`);
+    }
+    if (content.trim() === "") return undefined;
+    return { source, content };
+  }
+  return undefined;
 }
 
 /** Reads `<cwd>/.pi/trusted-ops`. Lines trimmed, blanks dropped, no comment syntax. Any read error (incl. ENOENT) => empty set. Never throws. Sync, read per call. */
