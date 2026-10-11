@@ -1,10 +1,10 @@
 import type { AssistantMessage, Context, Message, Model, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { Api } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
-import type { ReviewEvidenceConfig, ReviewerConfig, Rule } from "./config.ts";
-import { loadProjectInstructions } from "./config.ts";
-import { BUDGET_EXCEEDED_ERROR, buildReviewPrompt, buildSystemPrompt, collectEvidence, contextBudget, estimateTokens, evidencePrefixMatches, parseVerdict, promptTokens, reviewerFingerprint } from "./review.ts";
-import type { EvidenceRecord, ReviewRequest, Verdict } from "./review.ts";
+import type { ReviewEvidenceConfig, ReviewerConfig, Rule } from "../config.ts";
+import { loadProjectInstructions } from "../config.ts";
+import { BUDGET_EXCEEDED_ERROR, buildReviewPrompt, buildSystemPrompt, collectEvidence, contextBudget, estimateTokens, evidencePrefixMatches, parseVerdict, promptTokens, reviewerFingerprint } from "./protocol.ts";
+import type { EvidenceRecord, ReviewRequest, Verdict } from "./protocol.ts";
 
 export type ReviewResult =
   | { readonly ok: true; readonly verdict: Verdict }

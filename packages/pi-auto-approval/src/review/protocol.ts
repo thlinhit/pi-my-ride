@@ -1,7 +1,7 @@
 /** Pure guardian-review helpers: policy prompt, evidence builder, verdict parser. */
 
 import { createHash } from "node:crypto";
-import type { ProjectInstructions, ReasoningEffort } from "./config.ts";
+import type { ProjectInstructions, ReasoningEffort } from "../config.ts";
 
 export const CONTEXT_BUDGET_RATIO = 0.8;
 export const DEFAULT_CONTEXT_WINDOW = 128_000;

@@ -3,11 +3,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ConfigResult, Rule } from "./config.ts";
 import { loadConfig, loadTrustedGroups } from "./config.ts";
 import { isTrusted, matchRule } from "./gates.ts";
-import type { ReviewContext, ReviewResult, Reviewer } from "./reviewer.ts";
-import { createPiReviewer, createReviewerState } from "./reviewer.ts";
+import type { ReviewContext, ReviewResult, Reviewer } from "./review/session.ts";
+import { createPiReviewer, createReviewerState } from "./review/session.ts";
 
-export type { ReviewContext, ReviewInput, ReviewResult, Reviewer, ReviewerState } from "./reviewer.ts";
-export { createPiReviewer, createReviewerState } from "./reviewer.ts";
+export type { ReviewContext, ReviewInput, ReviewResult, Reviewer, ReviewerState } from "./review/session.ts";
+export { createPiReviewer, createReviewerState } from "./review/session.ts";
 
 export interface GateContext {
   readonly cwd: string;

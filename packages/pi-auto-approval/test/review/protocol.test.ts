@@ -5,7 +5,7 @@ import {
   buildReviewPrompt, buildSystemPrompt, collectEvidence, contextBudget, estimateTokens,
   evidencePrefixMatches, parseVerdict, promptTokens, reviewerFingerprint,
   type EvidenceRecord, type ReviewRequest,
-} from "../src/review.ts";
+} from "../../src/review/protocol.ts";
 
 const request: ReviewRequest = { tool: "bash", command: "git push origin main", cwd: "/repo", gate: "git push", group: "git" };
 const userMsg = (text: string, id?: string) => ({ type: "message", ...(id === undefined ? {} : { id }), message: { role: "user", content: text } });
