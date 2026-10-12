@@ -1,17 +1,16 @@
 import type { AssistantMessage, Context, Message, Model, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { Api } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
-import type { ReviewEvidenceConfig, ReviewerConfig, Rule } from "../config.ts";
+import type { ReviewEvidenceConfig, ReviewerConfig } from "../config.ts";
 import { loadProjectInstructions } from "../config.ts";
 import { BUDGET_EXCEEDED_ERROR, buildReviewPrompt, buildSystemPrompt, collectEvidence, contextBudget, estimateTokens, evidencePrefixMatches, parseVerdict, promptTokens, reviewerFingerprint } from "./protocol.ts";
 import type { EvidenceRecord, ReviewRequest, Verdict } from "./protocol.ts";
 
 export type ReviewResult =
   | { readonly ok: true; readonly verdict: Verdict }
-  | { readonly ok: false; readonly error: string };
+  | { readonly ok: false; readonly error: string; readonly cancelled?: true };
 export interface ReviewInput {
   readonly command: string;
-  readonly rule: Rule;
   readonly reviewer: ReviewerConfig;
   readonly reviewEvidence: ReviewEvidenceConfig;
   readonly signal: AbortSignal | undefined;
@@ -74,7 +73,7 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
   try {
     if (input.signal?.aborted) {
       discard();
-      return { ok: false, error: "review timed out or was cancelled" };
+      return { ok: false, error: "review timed out or was cancelled", ...(input.signal?.aborted ? { cancelled: true as const } : {}) };
     }
     const model = input.reviewer.model
       ? ctx.modelRegistry.find(input.reviewer.model.provider, input.reviewer.model.id)
@@ -97,7 +96,7 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
       discard();
       base = undefined;
     }
-    const request: ReviewRequest = { tool: "bash", command: input.command, cwd: ctx.cwd, gate: input.rule.label, group: input.rule.group ?? null };
+    const request: ReviewRequest = { tool: "bash", command: input.command, cwd: ctx.cwd, gate: "Unmatched Bash command", group: null };
     const makeUser = (selected: readonly EvidenceRecord[], mode: "full" | "delta") => ({
       role: "user" as const,
       content: [{ type: "text" as const, text: buildReviewPrompt(selected, request, mode) }],
@@ -123,7 +122,7 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     let msg: AssistantMessage;
     try { msg = await Promise.race([pending, aborted]); }
     finally { if (abortListener) signal.removeEventListener("abort", abortListener); void pending.catch(() => {}); }
-    if (signal.aborted || msg.stopReason === "aborted") throw new Error("review timed out or was cancelled");
+    if (signal.aborted || msg.stopReason === "aborted") throw Object.assign(new Error("review timed out or was cancelled"), { cancelled: input.signal?.aborted === true || msg.stopReason === "aborted" });
     if (msg.stopReason === "error") throw new Error(msg.errorMessage ?? "reviewer request failed");
     if (msg.stopReason !== "stop") throw new Error("reviewer did not finish normally");
     const parsed = parseVerdict(msg.content.filter((part) => part.type === "text").map((part) => part.text).join(""));
@@ -133,7 +132,7 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     return parsed;
   } catch (error) {
     discard();
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    return { ok: false, error: error instanceof Error ? error.message : String(error), ...((input.signal?.aborted || (error && typeof error === "object" && "cancelled" in error && error.cancelled === true)) ? { cancelled: true as const } : {}) };
   }
 }
 

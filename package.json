@@ -1,6 +1,7 @@
 {
   "scripts": {
     "test": "npm --prefix packages/pi-auto-approval test",
+    "typecheck": "npm --prefix packages/pi-auto-approval run typecheck",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "biome check ."

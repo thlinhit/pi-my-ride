@@ -1,52 +1,37 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { matchRule, isTrusted } from "../src/gates.ts";
+import { matchRule, isSuspiciousAllow } from "../src/gates.ts";
 import type { Rule } from "../src/config.ts";
 
-const guardedPush: Rule = { pattern: /\bgit\s+push\b/, level: "guarded", label: "git push" };
-const anyGit: Rule = { pattern: /\bgit\b/, level: "convention", label: "git", message: "use wrapper" };
+const rule = (level: Rule["level"], scope: Rule["scope"], label: string): Rule => ({ pattern: /cmd/i, level, scope, source: `${scope}.json`, label });
 
-describe("isTrusted", () => {
-  test("true only for a guarded rule whose group is in the trusted set", () => {
-    assert.equal(isTrusted({ ...guardedPush, group: "git" }, new Set(["git"])), true);
+describe("matchRule", () => {
+  test("prioritizes deny, then ask, then allow across scope and order", () => {
+    const deny = rule("deny", "project", "deny");
+    const ask = rule("ask", "global", "ask");
+    const allow = rule("allow", "global", "allow");
+    for (const rules of [[allow, ask, deny], [deny, allow, ask], [ask, deny, allow]]) assert.equal(matchRule("cmd", rules, true), deny);
+    assert.equal(matchRule("cmd", [allow, ask], true), ask);
+    assert.equal(matchRule("cmd", [allow], true), allow);
   });
-
-  test("false without a group, for a group not in the set, or for an empty set", () => {
-    assert.equal(isTrusted(guardedPush, new Set(["git"])), false);
-    assert.equal(isTrusted({ ...guardedPush, group: "deploy" }, new Set(["git"])), false);
-    assert.equal(isTrusted({ ...guardedPush, group: "git" }, new Set()), false);
+  test("uses first global match before project at the winning level", () => {
+    const project = rule("deny", "project", "project");
+    const global1 = rule("deny", "global", "global1");
+    const global2 = rule("deny", "global", "global2");
+    assert.equal(matchRule("cmd", [project, global1, global2], true), global1);
   });
-
-  test("convention is never trusted, even when its group is listed", () => {
-    assert.equal(isTrusted({ ...anyGit, group: "git" }, new Set(["git"])), false);
+  test("ignores untrusted project allows but retains other actions and global allows", () => {
+    const projectAllow = rule("allow", "project", "project allow");
+    const globalAllow = rule("allow", "global", "global allow");
+    assert.equal(matchRule("cmd", [projectAllow], false), undefined);
+    assert.equal(matchRule("cmd", [projectAllow, globalAllow], false), globalAllow);
+    assert.equal(matchRule("cmd", [rule("ask", "project", "ask")], false)?.level, "ask");
+    assert.equal(matchRule("cmd", [projectAllow], true), projectAllow);
+    assert.equal(matchRule("none", [], false), undefined);
   });
 });
 
-describe("matchRule", () => {
-  test("no rule matches -> undefined", () => {
-    assert.equal(matchRule("ls -la", [guardedPush]), undefined);
-    assert.equal(matchRule("ls", []), undefined);
-  });
-
-  test("first matching rule wins when several overlap", () => {
-    assert.equal(matchRule("git push origin main", [guardedPush, anyGit]), guardedPush);
-    assert.equal(matchRule("git push origin main", [anyGit, guardedPush]), anyGit);
-  });
-
-  test("matches raw text only, without splitting on && or ;", () => {
-    assert.equal(matchRule("echo ok && git push", [guardedPush]), guardedPush);
-    assert.equal(matchRule("git status; ls", [guardedPush]), undefined);
-  });
-
-  test("case-insensitive flag is honoured", () => {
-    const rule: Rule = { pattern: /^TERRAFORM/i, level: "guarded", label: "tf" };
-    assert.equal(matchRule("terraform apply", [rule]), rule);
-  });
-
-  test("repeated calls are stable (no lastIndex drift)", () => {
-    const rules = [guardedPush];
-    for (let i = 0; i < 5; i++) {
-      assert.equal(matchRule("git push", rules), guardedPush);
-    }
-  });
+test("suspicious allow detection is conservative, not a shell-safety proof", () => {
+  for (const command of ["a;b", "a&&b", "a||b", "a|b", "a&", "a\nb", "a\r\nb", "$(x)", "`x`", "<(x)", ">(x)", 'echo "a; b"', "cmd 2>&1"]) assert.equal(isSuspiciousAllow(command), true, command);
+  for (const command of ["git status", "ls -la", "echo hello"]) assert.equal(isSuspiciousAllow(command), false, command);
 });

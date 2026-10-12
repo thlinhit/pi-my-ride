@@ -1,302 +1,180 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-export type RuleLevel = "guarded" | "convention";
-
-/** A validated, compiled rule. */
+export type RuleLevel = "deny" | "ask" | "allow";
+export type ReviewMode = "manual" | "auto";
 export interface Rule {
-  readonly pattern: RegExp; // compiled up front; never carries g or y flags
+  readonly pattern: RegExp;
   readonly level: RuleLevel;
-  readonly label: string; // human label shown in confirm / block reason
-  readonly message?: string; // required for convention; allowed but unused for guarded
-  readonly group?: string; // trusted-ops group; used only for guarded
+  readonly label: string;
+  readonly message?: string;
+  readonly source: string;
+  readonly scope: "global" | "project";
 }
-
-export interface ConfigUi {
-  readonly status: boolean;
-}
-
-export interface ReviewEvidenceConfig {
-  readonly projectInstructions: boolean;
-}
-
+export interface PermissionSettings { readonly enabled: boolean; readonly reviewMode: ReviewMode }
+export interface SessionChoices { readonly enabled?: boolean; readonly reviewMode?: ReviewMode }
+export interface ConfigUi { readonly status: boolean }
+export interface ReviewEvidenceConfig { readonly projectInstructions: boolean }
 export const DEFAULT_REVIEW_EVIDENCE: ReviewEvidenceConfig = { projectInstructions: false };
-
-export interface ProjectInstructions {
-  readonly source: "AGENTS.md" | "CLAUDE.md";
-  readonly content: string;
-}
-
+export interface ProjectInstructions { readonly source: "AGENTS.md" | "CLAUDE.md"; readonly content: string }
 export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
-
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "low";
 export const REVIEW_TIMEOUT_DEFAULT_MS = 30_000;
 export const REVIEW_TIMEOUT_MIN_MS = 1_000;
 export const REVIEW_TIMEOUT_MAX_MS = 300_000;
-
 export interface ReviewerConfig {
-  readonly model?: { readonly provider: string; readonly id: string }; // undefined => active model
+  readonly model?: { readonly provider: string; readonly id: string };
   readonly reasoningEffort: ReasoningEffort;
   readonly timeoutMs: number;
-  readonly extraInstructions?: string; // resolved text (inline or file contents), non-blank when present
+  readonly extraInstructions?: string;
 }
-
-export const DEFAULT_REVIEWER: ReviewerConfig = {
-  reasoningEffort: DEFAULT_REASONING_EFFORT,
-  timeoutMs: REVIEW_TIMEOUT_DEFAULT_MS,
-};
-
+export const DEFAULT_REVIEWER: ReviewerConfig = { reasoningEffort: DEFAULT_REASONING_EFFORT, timeoutMs: REVIEW_TIMEOUT_DEFAULT_MS };
 export type ConfigResult =
-  | {
-      readonly ok: true;
-      readonly rules: readonly Rule[];
-      readonly source: string | null;
-      readonly ui: ConfigUi;
-      readonly guardian: boolean;
-      readonly reviewer: ReviewerConfig;
-      readonly reviewEvidence: ReviewEvidenceConfig;
-    }
+  | ({ readonly ok: true; readonly rules: readonly Rule[]; readonly ui: ConfigUi; readonly reviewer: ReviewerConfig; readonly reviewEvidence: ReviewEvidenceConfig } & PermissionSettings)
   | { readonly ok: false; readonly error: string };
-
 export const CONFIG_FILENAME = "auto-permissions.json";
-export const TRUSTED_FILENAME = "trusted-ops";
-
 const ALLOWED_FLAGS = "dimsuv";
-const LEVELS: readonly string[] = ["guarded", "convention"];
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isNonBlank(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
 type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string };
-
 const fail = (error: string): { ok: false; error: string } => ({ ok: false, error });
-
+function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function isNonBlank(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0; }
+function checkKeys(value: Record<string, unknown>, keys: readonly string[], where: string): string | undefined {
+  for (const key of Object.keys(value)) if (!keys.includes(key)) return `${where}: unsupported field "${key}"`;
+  return undefined;
+}
 function parseFlags(flags: unknown, where: string): Parsed<string> {
   if (flags === undefined) return { ok: true, value: "" };
   if (typeof flags !== "string") return fail(`${where}: flags must be a string`);
   if (/[gy]/.test(flags)) return fail(`${where}: flags must not include g or y (stateful matching)`);
-  if ([...flags].some((f) => !ALLOWED_FLAGS.includes(f)))
-    return fail(`${where}: flags contain an unsupported character`);
+  if ([...flags].some((f) => !ALLOWED_FLAGS.includes(f))) return fail(`${where}: flags contain an unsupported character`);
   return { ok: true, value: flags };
 }
-
-function compilePattern(source: string, flags: string, where: string): Parsed<RegExp> {
-  try {
-    return { ok: true, value: new RegExp(source, flags) };
-  } catch (err) {
-    return fail(`${where}: invalid regex (${(err as Error).message})`);
-  }
-}
-
-function parseRule(entry: unknown, where: string): Parsed<Rule> {
+function parseRule(entry: unknown, where: string, source: string, scope: "global" | "project"): Parsed<Rule> {
   if (!isObject(entry)) return fail(`${where} must be an object`);
-
+  const unknown = checkKeys(entry, ["pattern", "flags", "level", "label", "message"], where);
+  if (unknown) return fail(unknown);
   if (!isNonBlank(entry.pattern)) return fail(`${where}: pattern must be a non-empty string`);
   if (!isNonBlank(entry.label)) return fail(`${where}: label must be a non-empty string`);
-  if (typeof entry.level !== "string" || !LEVELS.includes(entry.level)) {
-    return fail(`${where}: level must be "guarded" or "convention"`);
-  }
-
+  if (typeof entry.level !== "string" || !["deny", "ask", "allow"].includes(entry.level)) return fail(`${where}: level must be "deny", "ask", or "allow"`);
   const flags = parseFlags(entry.flags, where);
   if (!flags.ok) return flags;
-  const pattern = compilePattern(entry.pattern, flags.value, where);
-  if (!pattern.ok) return pattern;
-
-  if (entry.message !== undefined && !isNonBlank(entry.message))
-    return fail(`${where}: message must be a non-empty string`);
-  if (entry.level === "convention" && entry.message === undefined)
-    return fail(`${where}: convention rules require a message`);
-  if (entry.group !== undefined && !isNonBlank(entry.group)) return fail(`${where}: group must be a non-empty string`);
-
-  return {
-    ok: true,
-    value: {
-      pattern: pattern.value,
-      level: entry.level as RuleLevel,
-      label: entry.label,
-      message: entry.message as string | undefined,
-      group: entry.group as string | undefined,
-    },
-  };
+  let pattern: RegExp;
+  try { pattern = new RegExp(entry.pattern, flags.value); } catch (err) { return fail(`${where}: invalid regex (${(err as Error).message})`); }
+  if (entry.message !== undefined && !isNonBlank(entry.message)) return fail(`${where}: message must be a non-empty string`);
+  return { ok: true, value: { pattern, level: entry.level as RuleLevel, label: entry.label, ...(entry.message === undefined ? {} : { message: entry.message as string }), source, scope } };
 }
-
-function parseUi(ui: unknown, source: string): Parsed<ConfigUi> {
-  if (ui === undefined) return { ok: true, value: { status: true } };
-  if (!isObject(ui)) return fail(`${source}: ui must be an object`);
-  if (ui.status === undefined) return { ok: true, value: { status: true } };
-  if (typeof ui.status !== "boolean") return fail(`${source}: ui.status must be a boolean`);
-  return { ok: true, value: { status: ui.status } };
+function parseNested<T>(raw: unknown, source: string, key: string, allowed: readonly string[], parse: (obj: Record<string, unknown>) => Parsed<T>, fallback: T): Parsed<T> {
+  if (raw === undefined) return { ok: true, value: fallback };
+  if (!isObject(raw)) return fail(`${source}: ${key} must be an object`);
+  const unknown = checkKeys(raw, allowed, `${source}: ${key}`);
+  return unknown ? fail(unknown) : parse(raw);
 }
-
-function parseReviewEvidence(raw: unknown, source: string): Parsed<ReviewEvidenceConfig> {
-  if (raw === undefined) return { ok: true, value: DEFAULT_REVIEW_EVIDENCE };
-  if (!isObject(raw)) return fail(`${source}: reviewEvidence must be an object`);
-  if (raw.projectInstructions !== undefined && typeof raw.projectInstructions !== "boolean") {
-    return fail(`${source}: reviewEvidence.projectInstructions must be a boolean`);
-  }
-  return { ok: true, value: { projectInstructions: raw.projectInstructions === true } };
-}
-
-function parseGuardian(value: unknown, source: string): Parsed<boolean> {
-  if (value === undefined || value === "on") return { ok: true, value: true };
-  if (value === "off") return { ok: true, value: false };
-  return fail(`${source}: guardian must be "on" or "off"`);
-}
-
 function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<ReviewerConfig> {
-  if (raw === undefined) return { ok: true, value: DEFAULT_REVIEWER };
-  if (!isObject(raw)) return fail(`${source}: reviewer must be an object`);
-
-  if ((raw.provider === undefined) !== (raw.model === undefined)) {
-    return fail(`${source}: reviewer.provider and reviewer.model must be set together`);
-  }
-  if (raw.provider !== undefined && (!isNonBlank(raw.provider) || !isNonBlank(raw.model))) {
-    return fail(`${source}: reviewer.provider and reviewer.model must be non-empty strings`);
-  }
-
-  let reasoningEffort: ReasoningEffort = DEFAULT_REASONING_EFFORT;
-  if (raw.reasoningEffort !== undefined) {
-    if (!REASONING_EFFORTS.includes(raw.reasoningEffort as ReasoningEffort)) {
-      return fail(`${source}: reviewer.reasoningEffort must be one of ${REASONING_EFFORTS.join(", ")}`);
+  return parseNested(raw, source, "reviewer", ["provider", "model", "reasoningEffort", "timeoutMs", "extraInstructions", "extraInstructionsFile"], (obj) => {
+    if ((obj.provider === undefined) !== (obj.model === undefined)) return fail(`${source}: reviewer.provider and reviewer.model must be set together`);
+    if (obj.provider !== undefined && (!isNonBlank(obj.provider) || !isNonBlank(obj.model))) return fail(`${source}: reviewer.provider and reviewer.model must be non-empty strings`);
+    let reasoningEffort: ReasoningEffort = DEFAULT_REASONING_EFFORT;
+    if (obj.reasoningEffort !== undefined) {
+      if (!REASONING_EFFORTS.includes(obj.reasoningEffort as ReasoningEffort)) return fail(`${source}: reviewer.reasoningEffort must be one of ${REASONING_EFFORTS.join(", ")}`);
+      reasoningEffort = obj.reasoningEffort as ReasoningEffort;
     }
-    reasoningEffort = raw.reasoningEffort as ReasoningEffort;
-  }
-
-  let timeoutMs = REVIEW_TIMEOUT_DEFAULT_MS;
-  if (raw.timeoutMs !== undefined) {
-    const t = raw.timeoutMs;
-    if (typeof t !== "number" || !Number.isInteger(t) || t < REVIEW_TIMEOUT_MIN_MS || t > REVIEW_TIMEOUT_MAX_MS) {
-      return fail(
-        `${source}: reviewer.timeoutMs must be an integer from ${REVIEW_TIMEOUT_MIN_MS} to ${REVIEW_TIMEOUT_MAX_MS}`,
-      );
+    let timeoutMs = REVIEW_TIMEOUT_DEFAULT_MS;
+    if (obj.timeoutMs !== undefined) {
+      if (typeof obj.timeoutMs !== "number" || !Number.isInteger(obj.timeoutMs) || obj.timeoutMs < REVIEW_TIMEOUT_MIN_MS || obj.timeoutMs > REVIEW_TIMEOUT_MAX_MS) return fail(`${source}: reviewer.timeoutMs must be an integer from ${REVIEW_TIMEOUT_MIN_MS} to ${REVIEW_TIMEOUT_MAX_MS}`);
+      timeoutMs = obj.timeoutMs;
     }
-    timeoutMs = t;
-  }
-
-  if (raw.extraInstructions !== undefined && raw.extraInstructionsFile !== undefined) {
-    return fail(`${source}: reviewer.extraInstructions and reviewer.extraInstructionsFile are mutually exclusive`);
-  }
-  let extraInstructions: string | undefined;
-  if (raw.extraInstructions !== undefined) {
-    if (!isNonBlank(raw.extraInstructions))
-      return fail(`${source}: reviewer.extraInstructions must be a non-empty string`);
-    extraInstructions = raw.extraInstructions;
-  } else if (raw.extraInstructionsFile !== undefined) {
-    if (!isNonBlank(raw.extraInstructionsFile))
-      return fail(`${source}: reviewer.extraInstructionsFile must be a non-empty string`);
-    const path = resolve(baseDir, raw.extraInstructionsFile);
-    let text: string;
-    try {
-      text = readFileSync(path, "utf8");
-    } catch {
-      return fail(`${source}: reviewer.extraInstructionsFile cannot be read (${path})`);
+    if (obj.extraInstructions !== undefined && obj.extraInstructionsFile !== undefined) return fail(`${source}: reviewer.extraInstructions and reviewer.extraInstructionsFile are mutually exclusive`);
+    let extraInstructions: string | undefined;
+    if (obj.extraInstructions !== undefined) {
+      if (!isNonBlank(obj.extraInstructions)) return fail(`${source}: reviewer.extraInstructions must be a non-empty string`);
+      extraInstructions = obj.extraInstructions;
+    } else if (obj.extraInstructionsFile !== undefined) {
+      if (!isNonBlank(obj.extraInstructionsFile)) return fail(`${source}: reviewer.extraInstructionsFile must be a non-empty string`);
+      const path = resolve(baseDir, obj.extraInstructionsFile);
+      try { extraInstructions = readFileSync(path, "utf8"); } catch { return fail(`${source}: reviewer.extraInstructionsFile cannot be read (${path})`); }
+      if (extraInstructions.trim() === "") return fail(`${source}: reviewer.extraInstructionsFile is empty (${path})`);
     }
-    if (text.trim() === "") return fail(`${source}: reviewer.extraInstructionsFile is empty (${path})`);
-    extraInstructions = text;
-  }
-
-  return {
-    ok: true,
-    value: {
-      ...(raw.provider !== undefined ? { model: { provider: raw.provider as string, id: raw.model as string } } : {}),
-      reasoningEffort,
-      timeoutMs,
-      ...(extraInstructions !== undefined ? { extraInstructions } : {}),
-    },
-  };
+    return { ok: true, value: { ...(obj.provider === undefined ? {} : { model: { provider: obj.provider as string, id: obj.model as string } }), reasoningEffort, timeoutMs, ...(extraInstructions === undefined ? {} : { extraInstructions }) } };
+  }, DEFAULT_REVIEWER);
 }
-
-/**
- * Validates parsed JSON and compiles regexes. Never throws; returns { ok:false } instead.
- * Sync-reads `reviewer.extraInstructionsFile` (relative to baseDir) when set; the only I/O here.
- */
-export function parseConfig(raw: unknown, source: string, baseDir = "."): ConfigResult {
+export function parseConfig(raw: unknown, source: string, baseDir = ".", scope: "global" | "project" = "global"): ConfigResult {
   if (!isObject(raw)) return fail(`${source}: root must be an object`);
-  if (!Array.isArray(raw.rules)) return fail(`${source}: rules must be an array`);
-
+  const allowed = scope === "global" ? ["enabled", "reviewMode", "rules", "reviewer", "reviewEvidence", "ui"] : ["rules"];
+  const unknown = checkKeys(raw, allowed, source);
+  if (unknown) return fail(unknown);
+  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") return fail(`${source}: enabled must be a boolean`);
+  if (raw.reviewMode !== undefined && raw.reviewMode !== "manual" && raw.reviewMode !== "auto") return fail(`${source}: reviewMode must be "manual" or "auto"`);
+  if (raw.rules !== undefined && !Array.isArray(raw.rules)) return fail(`${source}: rules must be an array`);
   const rules: Rule[] = [];
-  for (let i = 0; i < raw.rules.length; i++) {
-    const rule = parseRule(raw.rules[i], `${source}: rules[${i}]`);
+  for (const [i, entry] of (raw.rules as unknown[] | undefined ?? []).entries()) {
+    const rule = parseRule(entry, `${source}: rules[${i}]`, source, scope);
     if (!rule.ok) return rule;
     rules.push(rule.value);
   }
-
-  const ui = parseUi(raw.ui, source);
-  if (!ui.ok) return ui;
-
-  const guardian = parseGuardian(raw.guardian, source);
-  if (!guardian.ok) return guardian;
-
   const reviewer = parseReviewer(raw.reviewer, source, baseDir);
   if (!reviewer.ok) return reviewer;
-
-  const reviewEvidence = parseReviewEvidence(raw.reviewEvidence, source);
-  if (!reviewEvidence.ok) return reviewEvidence;
-
-  return {
-    ok: true,
-    rules,
-    source,
-    ui: ui.value,
-    guardian: guardian.value,
-    reviewer: reviewer.value,
-    reviewEvidence: reviewEvidence.value,
-  };
+  const evidence = parseNested(raw.reviewEvidence, source, "reviewEvidence", ["projectInstructions"], (obj) => {
+    if (obj.projectInstructions !== undefined && typeof obj.projectInstructions !== "boolean") return fail(`${source}: reviewEvidence.projectInstructions must be a boolean`);
+    return { ok: true, value: { projectInstructions: obj.projectInstructions === true } };
+  }, DEFAULT_REVIEW_EVIDENCE);
+  if (!evidence.ok) return evidence;
+  const ui = parseNested(raw.ui, source, "ui", ["status"], (obj) => {
+    if (obj.status !== undefined && typeof obj.status !== "boolean") return fail(`${source}: ui.status must be a boolean`);
+    return { ok: true, value: { status: obj.status !== false } };
+  }, { status: true });
+  if (!ui.ok) return ui;
+  return { ok: true, enabled: scope === "global" ? (raw.enabled as boolean | undefined ?? true) : true, reviewMode: scope === "global" ? (raw.reviewMode as ReviewMode | undefined ?? "manual") : "manual", rules, reviewer: reviewer.value, reviewEvidence: evidence.value, ui: ui.value };
 }
-
-/**
- * Sync fs. Looks for `<cwd>/.pi/auto-permissions.json`, else `<globalDir>/auto-permissions.json`.
- * No file found -> { ok:true, rules:[], source:null }.
- * Only ENOENT permits trying the next candidate; any other read error blocks.
- * Invalid JSON / schema -> { ok:false, error }. Never throws.
- */
-export function loadConfig(cwd: string, globalDir: string): ConfigResult {
-  const candidates = [join(cwd, ".pi", CONFIG_FILENAME), join(globalDir, CONFIG_FILENAME)];
-
-  for (const path of candidates) {
-    let text: string;
-    try {
-      text = readFileSync(path, "utf8");
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") continue;
-      return { ok: false, error: `${path}: cannot read config (${code ?? "unknown error"})` };
-    }
-
-    let raw: unknown;
-    try {
-      raw = JSON.parse(text);
-    } catch (err) {
-      return { ok: false, error: `${path}: invalid JSON (${(err as Error).message})` };
-    }
-    return parseConfig(raw, path, dirname(path));
+function readConfig(path: string, scope: "global" | "project"): ConfigResult {
+  let text: string;
+  try { text = readFileSync(path, "utf8"); } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { ok: true, enabled: true, reviewMode: "manual", rules: [], ui: { status: true }, reviewer: DEFAULT_REVIEWER, reviewEvidence: DEFAULT_REVIEW_EVIDENCE };
+    return { ok: false, error: `${path}: cannot read config (${code ?? "unknown error"})` };
   }
-
-  return {
-    ok: true,
-    rules: [],
-    source: null,
-    ui: { status: true },
-    guardian: true,
-    reviewer: DEFAULT_REVIEWER,
-    reviewEvidence: DEFAULT_REVIEW_EVIDENCE,
-  };
+  let raw: unknown;
+  try { raw = JSON.parse(text); } catch (err) { return { ok: false, error: `${path}: invalid JSON (${(err as Error).message})` }; }
+  return parseConfig(raw, path, dirname(path), scope);
 }
-
-/** Reads `<cwd>/AGENTS.md`, falling back to `<cwd>/CLAUDE.md` only when absent. */
+export function loadGlobalConfig(globalDir: string): ConfigResult { return readConfig(join(globalDir, CONFIG_FILENAME), "global"); }
+export function loadConfig(cwd: string, globalDir: string): ConfigResult {
+  const globalPath = join(globalDir, CONFIG_FILENAME);
+  const projectPath = join(cwd, ".pi", CONFIG_FILENAME);
+  const global = readConfig(globalPath, "global");
+  if (!global.ok) return global;
+  const project = readConfig(projectPath, "project");
+  if (!project.ok) return project;
+  return { ...global, rules: [...global.rules, ...project.rules] };
+}
+export type SaveResult = { readonly ok: true; readonly path: string } | { readonly ok: false; readonly path: string; readonly error: string };
+export function saveGlobalSettings(globalDir: string, settings: PermissionSettings): SaveResult {
+  const path = join(globalDir, CONFIG_FILENAME);
+  let before: string | undefined;
+  let raw: Record<string, unknown> = {};
+  try { before = readFileSync(path, "utf8"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { ok: false, path, error: `cannot read config (${(err as NodeJS.ErrnoException).code ?? "unknown error"})` }; }
+  if (before !== undefined) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(before); } catch (err) { return { ok: false, path, error: `invalid JSON (${(err as Error).message})` }; }
+    const checked = parseConfig(parsed, path, dirname(path));
+    if (!checked.ok) return { ok: false, path, error: checked.error };
+    raw = parsed as Record<string, unknown>;
+  }
+  const output = JSON.stringify(before === undefined ? { enabled: settings.enabled, reviewMode: settings.reviewMode, rules: [] } : { ...raw, enabled: settings.enabled, reviewMode: settings.reviewMode }, null, 2) + "\n";
+  try {
+    mkdirSync(globalDir, { recursive: true });
+    let current: string | undefined;
+    try { current = readFileSync(path, "utf8"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
+    if (current !== before) return { ok: false, path, error: "config changed during save; refusing to overwrite" };
+    writeFileSync(path, output, "utf8");
+    return { ok: true, path };
+  } catch (err) { return { ok: false, path, error: (err as Error).message }; }
+}
 export function loadProjectInstructions(cwd: string): ProjectInstructions | undefined {
   for (const source of ["AGENTS.md", "CLAUDE.md"] as const) {
     const path = join(cwd, source);
     let content: string;
-    try {
-      content = readFileSync(path, "utf8");
-    } catch (err) {
+    try { content = readFileSync(path, "utf8"); } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") continue;
       throw new Error(`cannot read ${path} (${code ?? "unknown error"})`);
@@ -305,20 +183,4 @@ export function loadProjectInstructions(cwd: string): ProjectInstructions | unde
     return { source, content };
   }
   return undefined;
-}
-
-/** Reads `<cwd>/.pi/trusted-ops`. Lines trimmed, blanks dropped, no comment syntax. Any read error (incl. ENOENT) => empty set. Never throws. Sync, read per call. */
-export function loadTrustedGroups(cwd: string): ReadonlySet<string> {
-  let text: string;
-  try {
-    text = readFileSync(join(cwd, ".pi", TRUSTED_FILENAME), "utf8");
-  } catch {
-    return new Set();
-  }
-  return new Set(
-    text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0),
-  );
 }

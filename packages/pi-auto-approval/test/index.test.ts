@@ -22,20 +22,20 @@ import type {
 
 type ToolCallHandler = ExtensionHandler<ToolCallEvent, ToolCallEventResult>;
 
-const rule = (level: "guarded" | "convention" = "guarded", group?: string): Rule => ({
+const rule = (level: "deny" | "ask" | "allow" = "ask", scope: "global" | "project" = "global"): Rule => ({
   pattern: /danger/i,
   level,
   label: "danger command",
-  ...(group === undefined ? {} : { group }),
-  ...(level === "convention" ? { message: "Use the approved workflow." } : { message: undefined }),
+  source: `${scope}.json`,
+  scope,
 });
-const ruleSet = (level: "guarded" | "convention" = "guarded"): Rule[] => [rule(level)];
-const config = (rules = ruleSet(), guardian = false): ConfigResult => ({
+const ruleSet = (level: "deny" | "ask" | "allow" = "ask"): Rule[] => [rule(level)];
+const config = (rules = ruleSet(), reviewMode: "manual" | "auto" = "manual"): ConfigResult => ({
   ok: true,
   rules,
-  source: "mock",
+  enabled: true,
+  reviewMode,
   ui: { status: true },
-  guardian,
   reviewer: { reasoningEffort: "low", timeoutMs: 30_000 },
   reviewEvidence: { projectInstructions: false },
 });
@@ -51,11 +51,13 @@ function context(overrides: Partial<GateContext> = {}) {
     cwd: "/tmp",
     hasUI: true,
     signal: undefined,
+    isProjectTrusted: () => true,
     ui: {
       confirm: async (...args) => {
         calls.push(args);
         return true;
       },
+      notify: () => {},
     },
     ...overrides,
   };
@@ -63,7 +65,7 @@ function context(overrides: Partial<GateContext> = {}) {
 }
 const event = (command: unknown = "dangerous") => ({ toolName: "bash", input: { command } });
 
-test("non-bash does not load config; unmatched bash runs", async () => {
+test("non-bash does not load config; unmatched bash confirms in manual mode", async () => {
   let loads = 0;
   const statuses: string[] = [];
   const { ctx, calls } = context();
@@ -85,15 +87,15 @@ test("non-bash does not load config; unmatched bash runs", async () => {
       ctx,
       () => {
         loads++;
-        return config();
+        return config([]);
       },
       { status: (state) => statuses.push(state) },
     ),
     undefined,
   );
   assert.equal(loads, 1);
-  assert.equal(calls.length, 0);
-  assert.equal(statuses.length, 0);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(statuses, ["reviewing", "approved"]);
 });
 
 test("invalid bash input and config failures block", async () => {
@@ -117,8 +119,8 @@ test("invalid bash input and config failures block", async () => {
 test("convention blocks with configured message", async () => {
   const { ctx, calls } = context();
   assert.equal(
-    (await handleToolCall(event(), ctx, () => config(ruleSet("convention"))))?.reason,
-    "Use the approved workflow.",
+    (await handleToolCall(event(), ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }])))?.reason,
+    "Blocked by auto-approval (danger command, global.json): Use the approved workflow.",
   );
   assert.equal(calls.length, 0);
 });
@@ -126,14 +128,14 @@ test("convention blocks with configured message", async () => {
 test("guarded command confirms exact raw command and label", async () => {
   const { ctx, calls } = context();
   assert.equal(await handleToolCall(event("danger; echo hi"), ctx, loadConfig), undefined);
-  assert.deepEqual(calls[0]?.slice(0, 2), ["Approve command? [danger command]", "danger; echo hi"]);
+  assert.deepEqual(calls[0]?.slice(0, 2), ["Approve command? [danger command]", "Requires confirmation (danger command, global.json)\n\ndanger; echo hi"]);
 });
 
 test("guardian approves without confirmation and reports review status", async () => {
   const statuses: string[] = [];
   const { ctx, calls } = context();
   let received: unknown;
-  const result = await handleToolCall({ ...event(), toolCallId: "call-1" }, ctx, () => config(ruleSet(), true), {
+  const result = await handleToolCall({ ...event(), toolCallId: "call-1" }, ctx, () => config([], "auto"), {
     review: async (input) => {
       received = input;
       return { ok: true, verdict: { decision: "approve", reason: "Authorized." } };
@@ -148,25 +150,25 @@ test("guardian approves without confirmation and reports review status", async (
 
 test("guardian revise blocks and ask_user confirms with the reason", async () => {
   const denied = context();
-  const revised = await handleToolCall(event(), denied.ctx, () => config(ruleSet(), true), {
+  const revised = await handleToolCall(event(), denied.ctx, () => config([], "auto"), {
     review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Target mismatch." } }),
   });
-  assert.match(revised!.reason, /guardian requested a revision: Target mismatch/);
+  assert.match(revised!.reason, /Reviewer requested a revision: Target mismatch/);
   const askCalls = context();
   assert.equal(
-    await handleToolCall(event("dangerous exact"), askCalls.ctx, () => config(ruleSet(), true), {
+    await handleToolCall(event("dangerous exact"), askCalls.ctx, () => config([], "auto"), {
       review: async () => ({ ok: true, verdict: { decision: "ask_user", reason: "Confirm target." } }),
     }),
     undefined,
   );
-  assert.match(String(askCalls.calls[0]?.[1]), /Guardian: Confirm target/);
+  assert.match(String(askCalls.calls[0]?.[1]), /Reviewer needs user approval: Confirm target/);
   assert.match(String(askCalls.calls[0]?.[1]), /dangerous exact/);
 });
 
 test("guardian failure falls back to confirmation or blocks without UI", async () => {
   const ui = context();
   assert.equal(
-    await handleToolCall(event(), ui.ctx, () => config(ruleSet(), true), {
+    await handleToolCall(event(), ui.ctx, () => config([], "auto"), {
       review: async () => ({ ok: false, error: "timeout" }),
     }),
     undefined,
@@ -174,10 +176,10 @@ test("guardian failure falls back to confirmation or blocks without UI", async (
   assert.match(String(ui.calls[0]?.[1]), /Automatic review failed: timeout/);
   const noUi = context({ hasUI: false });
   assert.match(
-    (await handleToolCall(event(), noUi.ctx, () => config(ruleSet(), true), {
+    (await handleToolCall(event(), noUi.ctx, () => config([], "auto"), {
       review: async () => ({ ok: false, error: "timeout" }),
     }))!.reason,
-    /automatic review failed: timeout/,
+    /Automatic review failed: timeout/,
   );
 });
 
@@ -186,7 +188,7 @@ test("no UI blocks guarded command", async () => {
   const noUi = context({ hasUI: false });
   assert.match(
     (await handleToolCall(event(), noUi.ctx, loadConfig, { status: (state) => statuses.push(state) }))!.reason,
-    /no UI to confirm/,
+    /Requires confirmation/,
   );
   assert.equal(noUi.calls.length, 0);
   assert.equal(statuses.length, 0);
@@ -196,8 +198,8 @@ test("trusted guarded rule bypasses confirmation and reports status", async () =
   const statuses: string[] = [];
   const { ctx, calls } = context();
   assert.equal(
-    await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
-      trusted: () => new Set(["git"]),
+    await handleToolCall(event(), ctx, () => config([rule("allow", "global")]), {
+
       status: (state) => statuses.push(state),
     }),
     undefined,
@@ -210,8 +212,8 @@ test("trusted guarded rule allows without UI and reports no status", async () =>
   const statuses: string[] = [];
   const noUi = context({ hasUI: false });
   assert.equal(
-    await handleToolCall(event(), noUi.ctx, () => config([rule("guarded", "git")]), {
-      trusted: () => new Set(["git"]),
+    await handleToolCall(event(), noUi.ctx, () => config([rule("allow", "global")]), {
+
       status: (state) => statuses.push(state),
     }),
     undefined,
@@ -220,15 +222,12 @@ test("trusted guarded rule allows without UI and reports no status", async () =>
   assert.equal(statuses.length, 0);
 });
 
-test("trusted loader abort after returning blocks unmatched command", async () => {
+test("config loader abort after returning blocks unmatched command", async () => {
   const controller = new AbortController();
   const statuses: string[] = [];
   const { ctx, calls } = context({ signal: controller.signal });
-  const result = await handleToolCall(event("echo ok"), ctx, loadConfig, {
-    trusted: () => {
-      controller.abort();
-      return new Set(["git"]);
-    },
+  const result = await handleToolCall(event("echo ok"), ctx, () => { controller.abort(); return config(); }, {
+
     status: (state) => statuses.push(state),
   });
   assert.match(result!.reason, /confirmation failed/);
@@ -236,18 +235,11 @@ test("trusted loader abort after returning blocks unmatched command", async () =
   assert.equal(statuses.length, 0);
 });
 
-test("trusted guarded rule blocks when aborted during trust membership", async () => {
+test("allow blocks when aborted while sampling project trust", async () => {
   const controller = new AbortController();
-  const trusted = new Set<string>();
-  Object.defineProperty(trusted, "has", {
-    value: () => {
-      controller.abort();
-      return true;
-    },
-  });
-  const { ctx, calls } = context({ signal: controller.signal });
-  const result = await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
-    trusted: () => trusted,
+  const { ctx, calls } = context({ signal: controller.signal, isProjectTrusted: () => { controller.abort(); return true; } });
+  const result = await handleToolCall(event(), ctx, () => config([rule("allow", "global")]), {
+
   });
   assert.match(result!.reason, /confirmation failed/);
   assert.equal(calls.length, 0);
@@ -256,8 +248,8 @@ test("trusted guarded rule blocks when aborted during trust membership", async (
 test("trusted guarded rule blocks when aborted during status reporting", async () => {
   const controller = new AbortController();
   const { ctx, calls } = context({ signal: controller.signal });
-  const result = await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
-    trusted: () => new Set(["git"]),
+  const result = await handleToolCall(event(), ctx, () => config([rule("allow", "global")]), {
+
     status: () => {
       controller.abort();
     },
@@ -266,29 +258,28 @@ test("trusted guarded rule blocks when aborted during status reporting", async (
   assert.equal(calls.length, 0);
 });
 
-test("untrusted guarded rule confirms; convention cannot bypass", async () => {
+test("untrusted project allow confirms; deny cannot bypass", async () => {
   const statuses: string[] = [];
-  const { ctx, calls } = context();
+  const { ctx, calls } = context({ isProjectTrusted: () => false });
   assert.equal(
-    await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
-      trusted: () => new Set(["other"]),
+    await handleToolCall(event(), ctx, () => config([rule("allow", "project")]), {
       status: (state) => statuses.push(state),
     }),
     undefined,
   );
   assert.equal(calls.length, 1);
-  const blocked = await handleToolCall(event(), ctx, () => config([rule("convention", "git")]), {
-    trusted: () => new Set(["git"]),
+  const blocked = await handleToolCall(event(), ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }]), {
+
     status: (state) => statuses.push(state),
   });
-  assert.equal(blocked?.reason, "Use the approved workflow.");
+  assert.equal(blocked?.reason, "Blocked by auto-approval (danger command, global.json): Use the approved workflow.");
   assert.deepEqual(statuses, ["reviewing", "approved", "blocked"]);
 });
 
 test("status disabled hides reports without changing enforcement", async () => {
   const statuses: string[] = [];
   const hiddenConfig = (rules = ruleSet()) => ({ ...config(rules), ui: { status: false } });
-  const denied = context({ ui: { confirm: async () => false } });
+  const denied = context({ ui: { confirm: async () => false, notify: () => {} } });
   const result = await handleToolCall(event(), denied.ctx, () => hiddenConfig(), {
     status: (state) => statuses.push(state),
   });
@@ -297,8 +288,8 @@ test("status disabled hides reports without changing enforcement", async () => {
 
   const trusted = context();
   assert.equal(
-    await handleToolCall(event(), trusted.ctx, () => hiddenConfig([rule("guarded", "git")]), {
-      trusted: () => new Set(["git"]),
+    await handleToolCall(event(), trusted.ctx, () => hiddenConfig([rule("allow", "global")]), {
+
       status: (state) => statuses.push(state),
     }),
     undefined,
@@ -306,34 +297,26 @@ test("status disabled hides reports without changing enforcement", async () => {
   assert.equal(trusted.calls.length, 0);
   assert.equal(statuses.length, 0);
 
-  const convention = await handleToolCall(event(), trusted.ctx, () => hiddenConfig(ruleSet("convention")), {
-    trusted: () => new Set(["git"]),
+  const convention = await handleToolCall(event(), trusted.ctx, () => hiddenConfig([{ ...rule(), level: "deny", message: "Use the approved workflow." }]), {
+
     status: (state) => statuses.push(state),
   });
-  assert.equal(convention?.reason, "Use the approved workflow.");
+  assert.equal(convention?.reason, "Blocked by auto-approval (danger command, global.json): Use the approved workflow.");
   assert.equal(statuses.length, 0);
 });
 
-test("trust loader and membership failures fall back to confirmation", async () => {
-  const { ctx, calls } = context();
-  const trusted = new Set<string>();
-  Object.defineProperty(trusted, "has", {
-    value: () => {
-      throw Error("membership failed");
-    },
-  });
+test("project trust failures ignore project allow and fall back to confirmation", async () => {
+  const { ctx, calls } = context({ isProjectTrusted: () => { throw Error("trust failed"); } });
   assert.equal(
-    await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
-      trusted: () => {
-        throw Error("loader failed");
-      },
+    await handleToolCall(event(), ctx, () => config([rule("allow", "project")]), {
+
     }),
     undefined,
   );
   assert.equal(calls.length, 1);
   assert.equal(
-    await handleToolCall(event(), ctx, () => config([rule("guarded", "git")]), {
-      trusted: () => trusted,
+    await handleToolCall(event(), ctx, () => config([rule("allow", "project")]), {
+
     }),
     undefined,
   );
@@ -345,17 +328,17 @@ test("status reporter failures do not change allow or block decisions", async ()
     throw Error("widget failed");
   };
   assert.equal(await handleToolCall(event(), context().ctx, loadConfig, { status: throwing }), undefined);
-  const denied = context({ ui: { confirm: async () => false } });
+  const denied = context({ ui: { confirm: async () => false, notify: () => {} } });
   assert.match((await handleToolCall(event(), denied.ctx, loadConfig, { status: throwing }))!.reason, /user declined/);
   assert.equal(
-    (await handleToolCall(event(), context().ctx, () => config(ruleSet("convention")), { status: throwing }))?.reason,
-    "Use the approved workflow.",
+    (await handleToolCall(event(), context().ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }]), { status: throwing }))?.reason,
+    "Blocked by auto-approval (danger command, global.json): Use the approved workflow.",
   );
 });
 
 test("user denial blocks", async () => {
   const statuses: string[] = [];
-  const denied = context({ ui: { confirm: async () => false } });
+  const denied = context({ ui: { confirm: async () => false, notify: () => {} } });
   assert.match(
     (await handleToolCall(event(), denied.ctx, loadConfig, { status: (state) => statuses.push(state) }))!.reason,
     /user declined/,
@@ -370,6 +353,7 @@ test("confirmation throwing blocks", async () => {
       confirm: async () => {
         throw Error();
       },
+      notify: () => {},
     },
   });
   assert.match(
@@ -415,13 +399,14 @@ test("abort during confirmation blocks even when confirmation approves", async (
         controller.abort();
         return true;
       },
+      notify: () => {},
     },
   });
   assert.match(
     (await handleToolCall(event(), during.ctx, loadConfig, { status: (state) => statuses.push(state) }))!.reason,
-    /confirmation failed/,
+    /review cancelled/,
   );
-  assert.deepEqual(statuses, ["reviewing", "blocked"]);
+  assert.deepEqual(statuses, ["reviewing"]);
 });
 
 test("abort during approved status reporting blocks confirmed command", async () => {
@@ -434,13 +419,13 @@ test("abort during approved status reporting blocks confirmed command", async ()
       if (state === "approved") controller.abort();
     },
   });
-  assert.match(result!.reason, /review cancelled/);
+  assert.match(result!.reason, /confirmation failed/);
   assert.equal(calls.length, 1);
-  assert.deepEqual(statuses, ["reviewing", "approved", "blocked"]);
+  assert.deepEqual(statuses, ["reviewing", "approved"]);
 });
 
 test("non-boolean confirmation result blocks", async () => {
-  const invalid = context({ ui: { confirm: async () => undefined as unknown as boolean } });
+  const invalid = context({ ui: { confirm: async () => undefined as unknown as boolean, notify: () => {} } });
   assert.notEqual(await handleToolCall(event(), invalid.ctx, loadConfig), undefined);
 });
 
@@ -507,14 +492,13 @@ test("widget reporter cleanup survives throwing show and clear calls", () => {
   assert.equal(calls, 2);
 });
 
-test("factory registers exactly one tool_call handler", async (t) => {
-  const { registrations } = await factoryHarness(t, async () => true);
-  assert.equal(registrations.length, 1);
-  assert.equal(registrations[0]?.eventName, "tool_call");
-  assert.equal(typeof registrations[0]?.callback, "function");
+test("factory registers tool, session reset and permissions command", async (t) => {
+  const { registrations, commands } = await factoryHarness(t, async () => true);
+  assert.equal(registrations.length, 2);
+  assert.ok(commands.permissions);
 });
 
-test("factory rereads trusted-ops and confirms after trust is revoked", async (t) => {
+test("factory ignores trusted-ops changes and always confirms ask rules", async (t) => {
   let confirmations = 0;
   const { cwd, invoke } = await factoryHarness(
     t,
@@ -527,14 +511,14 @@ test("factory rereads trusted-ops and confirms after trust is revoked", async (t
   const trustedPath = join(cwd, ".pi", "trusted-ops");
   writeFileSync(trustedPath, "git\n");
   assert.equal(await invoke(), undefined);
-  assert.equal(confirmations, 0);
+  assert.equal(confirmations, 1);
   writeFileSync(trustedPath, "\n");
   assert.equal(await invoke(), undefined);
-  assert.equal(confirmations, 1);
+  assert.equal(confirmations, 2);
   writeFileSync(trustedPath, "git\n");
   await import("node:fs").then(({ unlinkSync }) => unlinkSync(trustedPath));
   assert.equal(await invoke(), undefined);
-  assert.equal(confirmations, 2);
+  assert.equal(confirmations, 3);
 });
 
 test("factory treats trust-path read errors as untrusted", async (t) => {
@@ -606,22 +590,30 @@ async function factoryHarness(
   }: { group?: string; uiStatus?: boolean; guardian?: boolean; reply?: string; branch?: unknown[] } = {},
 ) {
   const { default: autoApproval } = await import("../src/index.ts");
-  const registrations: Array<{ eventName: "tool_call"; callback: ToolCallHandler }> = [];
+  const registrations: Array<{ eventName: "tool_call" | "session_start"; callback: (...args: any[]) => unknown }> = [];
+  const commands: Record<string, { handler: (args: string, ctx: any) => Promise<void> }> = {};
   const pi = {
     on: ((eventName: "tool_call", callback: ToolCallHandler) => {
       registrations.push({ eventName, callback });
       return () => {};
     }) as ExtensionAPI["on"],
+    registerCommand: ((name: string, options: { handler: (args: string, ctx: any) => Promise<void> }) => { commands[name] = options; }) as ExtensionAPI["registerCommand"],
   } as ExtensionAPI;
-  autoApproval(pi);
   const cwd = mkdtempSync(join(tmpdir(), "auto-approval-"));
+  const globalDir = join(cwd, "global");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = globalDir;
+  t.after(() => { if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir; });
+  autoApproval(pi);
+  mkdirSync(globalDir);
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   mkdirSync(join(cwd, ".pi"));
   writeFileSync(
-    join(cwd, ".pi", "auto-permissions.json"),
+    join(globalDir, "auto-permissions.json"),
     JSON.stringify({
-      guardian: guardian ? "on" : "off",
-      rules: [{ pattern: "danger", level: "guarded", label: "danger", ...(group === undefined ? {} : { group }) }],
+      enabled: true,
+      reviewMode: guardian ? "auto" : "manual",
+      rules: guardian ? [] : [{ pattern: "danger", level: "ask", label: "danger" }],
       ui: { status: uiStatus },
     }),
   );
@@ -664,33 +656,36 @@ async function factoryHarness(
         };
       },
     },
-    ui: { confirm, setWidget },
+    ui: { confirm, setWidget, notify: () => {} },
   } as unknown as Parameters<ToolCallHandler>[1];
   const invoke = (confirmPrompt = confirm, toolCallId?: string) =>
-    registrations[0]!.callback({ ...event(), toolCallId } as ToolCallEvent, {
+    registrations.find((registration) => registration.eventName === "tool_call")!.callback({ ...event(), toolCallId } as ToolCallEvent, {
       ...ctx,
       ui: { ...ctx.ui, confirm: confirmPrompt },
     });
-  return { cwd, registrations, setWidget, invoke, prompts, streamOptions, snapshots };
+  const menu = (selection: string | undefined) => commands.permissions!.handler("", { ...ctx, ui: { ...ctx.ui, select: async () => selection } });
+  const reset = (reason: string) => registrations.find((registration) => registration.eventName === "session_start")!.callback({ reason }, ctx);
+  return { cwd, globalDir, ctx, registrations, commands, menu, reset, setWidget, invoke, prompts, streamOptions, snapshots };
 }
 
 test("guardian ask_user without UI blocks; parent cancellation never prompts", async () => {
   const noUi = context({ hasUI: false });
-  const needsUser = await handleToolCall(event(), noUi.ctx, () => config(ruleSet(), true), {
+  const needsUser = await handleToolCall(event(), noUi.ctx, () => config([], "auto"), {
     review: async () => ({ ok: true, verdict: { decision: "ask_user", reason: "Confirm this." } }),
   });
-  assert.match(needsUser!.reason, /no UI is available/);
+  assert.equal(needsUser?.block, true);
+  assert.match(needsUser!.reason, /Reviewer needs user approval: Confirm this/);
   assert.equal(noUi.calls.length, 0);
 
   const controller = new AbortController();
   const cancelled = context({ signal: controller.signal });
-  const result = await handleToolCall(event(), cancelled.ctx, () => config(ruleSet(), true), {
+  const result = await handleToolCall(event(), cancelled.ctx, () => config([], "auto"), {
     review: async () => {
       controller.abort();
       return { ok: false, error: "cancelled" };
     },
   });
-  assert.match(result!.reason, /review cancelled/);
+  assert.match(result!.reason, /confirmation failed/);
   assert.equal(cancelled.calls.length, 0);
 });
 
@@ -698,16 +693,16 @@ test("guardian cancellation after automatic approval blocks", async () => {
   const controller = new AbortController();
   const statuses: string[] = [];
   const { ctx, calls } = context({ signal: controller.signal });
-  const result = await handleToolCall(event(), ctx, () => config(ruleSet(), true), {
+  const result = await handleToolCall(event(), ctx, () => config([], "auto"), {
     review: async () => ({ ok: true, verdict: { decision: "approve", reason: "Allowed." } }),
     status: (state) => {
       statuses.push(state);
       if (state === "approved") controller.abort();
     },
   });
-  assert.match(result!.reason, /review cancelled/);
+  assert.match(result!.reason, /confirmation failed/);
   assert.equal(calls.length, 0);
-  assert.deepEqual(statuses, ["reviewing", "approved", "blocked"]);
+  assert.deepEqual(statuses, ["reviewing", "approved"]);
 });
 
 test("guardian fallback blocks denied, failed, and non-boolean confirmations", async () => {
@@ -722,8 +717,8 @@ test("guardian fallback blocks denied, failed, and non-boolean confirmations", a
     { confirm: async () => undefined as unknown as boolean, expected: /user declined/ },
   ];
   for (const { confirm, expected } of cases) {
-    const { ctx, calls } = context({ ui: { confirm } });
-    const result = await handleToolCall(event(), ctx, () => config(ruleSet(), true), {
+    const { ctx, calls } = context({ ui: { confirm, notify: () => {} } });
+    const result = await handleToolCall(event(), ctx, () => config([], "auto"), {
       review: async () => ({ ok: false, error: "malformed" }),
     });
     assert.match(result!.reason, expected);
@@ -741,18 +736,18 @@ test("guardian bypasses reviewer for trusted, convention, and unmatched routes",
     },
   };
   assert.equal(
-    await handleToolCall(event(), ctx, () => config([rule("guarded", "git")], true), {
+    await handleToolCall(event(), ctx, () => config([rule("allow", "global")], "auto"), {
       ...deps,
-      trusted: () => new Set(["git"]),
+
     }),
     undefined,
   );
   assert.equal(
-    (await handleToolCall(event(), ctx, () => config(ruleSet("convention"), true), deps))?.reason,
-    "Use the approved workflow.",
+    (await handleToolCall(event(), ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }], "auto"), deps))?.reason,
+    "Blocked by auto-approval (danger command, global.json): Use the approved workflow.",
   );
-  assert.equal(await handleToolCall(event("echo safe"), ctx, () => config(ruleSet(), true), deps), undefined);
-  assert.equal(reviews, 0);
+  assert.equal(await handleToolCall(event("echo safe"), ctx, () => config([], "auto"), deps), undefined);
+  assert.equal(reviews, 1, "unmatched auto command must be reviewed");
   assert.equal(calls.length, 0);
 });
 
@@ -783,7 +778,7 @@ test("guardian-on factory reviews live evidence, filters the pending call, and r
   const ask = await factoryHarness(
     t,
     async (_title, message) => {
-      assert.match(String(message), /Guardian: Confirm the target/);
+      assert.match(String(message), /Reviewer needs user approval: Confirm the target/);
       return true;
     },
     { guardian: true, reply: '{"decision":"ask_user","reason":"Confirm the target."}' },
@@ -896,20 +891,20 @@ test("createPiReviewer fails closed when the active or selected model is missing
 
   const ui = context();
   assert.equal(
-    await handleToolCall(event(), ui.ctx, () => config(ruleSet(), true), { review: async () => missingActive }),
+    await handleToolCall(event(), ui.ctx, () => config([], "auto"), { review: async () => missingActive }),
     undefined,
   );
   assert.match(String(ui.calls[0]?.[1]), /Automatic review failed: review model not found/);
   assert.equal(
-    await handleToolCall(event(), ui.ctx, () => config(ruleSet(), true), { review: async () => missingSelected }),
+    await handleToolCall(event(), ui.ctx, () => config([], "auto"), { review: async () => missingSelected }),
     undefined,
   );
 
   const noUi = context({ hasUI: false });
-  const blocked = await handleToolCall(event(), noUi.ctx, () => config(ruleSet(), true), {
+  const blocked = await handleToolCall(event(), noUi.ctx, () => config([], "auto"), {
     review: async () => missingSelected,
   });
-  assert.match(blocked!.reason, /automatic review failed: review model not found/);
+  assert.match(blocked!.reason, /Automatic review failed: review model not found/);
   assert.equal(noUi.calls.length, 0);
 });
 
@@ -1187,7 +1182,6 @@ test("projection adapter uses installed compaction/context-edit semantics and ig
   );
   const result = await reviewer({
     command: "dangerous",
-    rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
     signal: undefined,
@@ -1401,17 +1395,20 @@ test("reviewer compares five chronological steps against fresh verdicts and pres
       .map((part: any) => part.text ?? "")
       .join("\\n");
   const extractEvidence = (request: any) => {
-    const text = evidenceText(request);
-    return [...text.matchAll(/^\\s*(\\{\\s*"source"\\s*:[^\\n]+)$/gm)].map((match) => JSON.parse(match[1]!));
+    const text = evidenceText(request).replaceAll("\\n", "\n");
+    const records = [...text.matchAll(/^\s*(\{\s*"source"\s*:[^\n]+)$/gm)].map((match) => JSON.parse(match[1]!));
+    assert.ok(records.length > 0, "comparison must extract actual evidence");
+    return records;
   };
   const latestAction = (request: any) => {
     const text = evidenceText(request);
     return (
-      text.match(/<ACTION_CARD>([\s\S]*?)<\/ACTION_CARD>/)?.[1] ?? text.match(/<ACTION[^>]*>([\s\S]*?)<\/ACTION>/)?.[1]
+      text.match(/<LATEST_PROPOSED_ACTION>([\s\S]*?)<\/LATEST_PROPOSED_ACTION>/)?.[1]
     );
   };
   for (let i = 0; i < 5; i++) {
     assert.deepEqual(extractEvidence(reusedRequests[i]), extractEvidence(freshRequests[i]), `evidence at step ${i}`);
+    assert.ok(latestAction(reusedRequests[i]), "comparison must extract an action card");
     assert.equal(latestAction(reusedRequests[i]), latestAction(freshRequests[i]), `action at step ${i}`);
     assert.equal(reusedRequests[i]!.options.cacheRetention, "long");
     if (i > 0) assert.equal(reusedRequests[i]!.options.sessionId, reusedRequests[0]!.options.sessionId);
@@ -1520,14 +1517,14 @@ test("fresh evidence overflow routes through confirmation or blocks without UI",
       const decision = await handleToolCall(
         { toolName: "bash", input: { command: largeCommand } },
         ui.ctx,
-        () => config(ruleSet(), true),
+        () => config([], "auto"),
         { review: reviewer },
       );
       if (hasUI) {
         assert.match(String(uiCalls[0]?.[1]), /Automatic review failed: compact review evidence/);
         if (allow) assert.equal(decision, undefined);
         else assert.match(decision!.reason, /user declined/);
-      } else assert.match(decision!.reason, /automatic review failed: compact review evidence/);
+      } else assert.match(decision!.reason, /Automatic review failed: compact review evidence/);
     }
   }
 });
@@ -1648,13 +1645,159 @@ test("ui.status false suppresses factory widget calls without changing enforceme
   assert.equal(declined.setWidget.mock.callCount() + approved.setWidget.mock.callCount(), 0);
 });
 
-test("starter rules match intended commands", () => {
+test("shipped rules are empty", () => {
   const raw = JSON.parse(readFileSync(new URL("../examples/auto-permissions.json", import.meta.url), "utf8"));
   const parsed = parseConfig(raw, "example");
   assert.equal(parsed.ok, true);
-  if (!parsed.ok) return;
-  for (const command of ["git push origin main", "rm -rf /tmp/x", "rm -fr /tmp/x", "terraform apply"])
-    assert.ok(matchRule(command, parsed.rules));
-  for (const command of ["git status", "rm -r /tmp/x", "terraform plan"])
-    assert.equal(matchRule(command, parsed.rules), undefined);
+  if (parsed.ok) assert.deepEqual(parsed.rules, []);
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("factory session_start clears awaited explicit off and auto choices for all five reasons", async (t) => {
+  const h = await factoryHarness(t, async () => false);
+  for (const reason of ["startup", "reload", "new", "resume", "fork"]) {
+    await h.menu("Auto review");
+    await h.menu("Protection off");
+    assert.equal(await h.invoke(), undefined);
+    await h.reset(reason);
+    assert.match(((await h.invoke()) as { reason: string }).reason, /user declined/);
+    assert.equal(h.prompts.length, 0, "reset must restore saved manual review, not auto");
+  }
+});
+
+test("menu cancellation settles an abort-ignoring dialog and retains its lock until actual settlement", async (t) => {
+  for (const selection of ["Protection off", "Auto review", "Clear session choices / reload"]) {
+    const old = deferred<boolean>();
+    const opened = deferred<void>();
+    const h = await factoryHarness(t, async () => { opened.resolve(); return old.promise; });
+    if (selection === "Clear session choices / reload") await h.menu("Auto review");
+    if (selection === "Clear session choices / reload") {
+      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "manual", rules: [] }));
+      await h.menu("Manual review");
+      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", rules: [] }));
+    }
+    const pending = h.invoke();
+    await opened.promise;
+    await h.menu(selection);
+    assert.match(((await pending) as { reason: string }).reason, /confirmation failed/);
+    const published = h.setWidget.mock.callCount();
+    if (selection === "Protection off") {
+      assert.equal(await h.invoke(), undefined, "off retry is a fresh permitted attempt");
+      await h.menu("Protection on");
+    }
+    let newDialog = false;
+    // Ask still owns human approval even when mode switched to auto.
+    writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ rules: [{ pattern: "danger", level: "ask", label: "danger" }] }));
+    assert.match(((await h.invoke(async () => { newDialog = true; return true; })) as { reason: string }).reason, /confirmation failed/);
+    assert.equal(newDialog, false, "unresolved old dialog must retain its lock");
+    old.resolve(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.setWidget.mock.calls.slice(published).some((call) => JSON.stringify(call.arguments).includes("approved")), false, "late approval must not publish");
+    assert.equal(await h.invoke(async () => true), undefined);
+  }
+});
+
+test("menu cancels active and queued model reviews without late approval or fallback", async (t) => {
+  for (const selection of ["Protection off", "Manual review"]) {
+    const h = await factoryHarness(t, async () => assert.fail("cancelled review cannot prompt"), { guardian: true });
+    const started = deferred<void>();
+    const late = deferred<any>();
+    let streams = 0;
+    (h.ctx.modelRegistry as any).streamSimple = () => {
+      streams++; started.resolve();
+      return { result: () => late.promise };
+    };
+    const active = h.invoke();
+    await started.promise;
+    const queued = h.invoke();
+    await h.menu(selection);
+    for (const pending of [active, queued]) assert.match(((await pending) as { reason: string }).reason, /confirmation failed/);
+    assert.equal(streams, 1, "queued cancelled review cannot call provider");
+    late.resolve({ stopReason: "stop", content: [{ type: "text", text: '{"decision":"approve","reason":"late"}' }] });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.setWidget.mock.calls.some((call) => JSON.stringify(call.arguments).includes("approved")), false);
+    assert.equal(await h.invoke(async () => true), undefined, "retry uses new protection/mode");
+  }
+});
+
+test("fallback cancellation suppresses late approval; unchanged choice and save do not cancel", async (t) => {
+  const old = deferred<boolean>();
+  const opened = deferred<void>();
+  const h = await factoryHarness(t, async () => { opened.resolve(); return old.promise; }, { guardian: true, reply: "not JSON" });
+  let settled = false;
+  const pending = Promise.resolve(h.invoke()).then((result) => { settled = true; return result; }); await opened.promise;
+  await h.menu("Auto review");
+  await h.menu("Save settings");
+  assert.equal(settled, false, "unchanged choice and saving must leave fallback pending");
+  await h.menu("Protection off");
+  assert.match(((await pending) as { reason: string }).reason, /confirmation failed/);
+  old.resolve(true); await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.setWidget.mock.calls.some((call) => JSON.stringify(call.arguments).includes("approved")), false);
+});
+
+test("external edits do not cancel pending review and session overrides persist until clear", async (t) => {
+  const h = await factoryHarness(t, async () => false, { guardian: true });
+  const started = deferred<void>(); const reply = deferred<any>();
+  (h.ctx.modelRegistry as any).streamSimple = () => { started.resolve(); return { result: () => reply.promise }; };
+  const pending = h.invoke(); await started.promise;
+  writeFileSync(join(h.globalDir, "auto-permissions.json"), "{broken");
+  reply.resolve({ stopReason: "stop", content: [{ type: "text", text: '{"decision":"approve","reason":"ok"}' }] });
+  assert.equal(await pending, undefined);
+  assert.match(((await h.invoke()) as { reason: string }).reason, /invalid config/);
+  await h.menu("Protection off");
+  assert.equal(await h.invoke(), undefined);
+  await h.menu("Clear session choices / reload");
+  assert.match(((await h.invoke()) as { reason: string }).reason, /invalid config/);
+});
+
+test("authorization routes enforce priority, attribution, trust and suspicious allows", async () => {
+  let reviews = 0; const notices: string[] = []; const prompts: string[] = [];
+  let trusted = false; let trustSamples = 0;
+  const { ctx } = context({ isProjectTrusted: () => { trustSamples++; return trusted; }, ui: {
+    notify: (message) => { notices.push(message); },
+    confirm: async (_title, message) => { prompts.push(message); return true; },
+  } });
+  const deps = { review: async () => { reviews++; return { ok: true as const, verdict: { decision: "approve" as const, reason: "ok" } }; } };
+  for (const mode of ["manual", "auto"] as const) {
+    const allow = rule("allow", "global"); const ask = rule("ask", "project"); const deny = rule("deny", "global");
+    for (const rules of [[allow, ask, deny], [deny, ask, allow]]) {
+      assert.match((await handleToolCall(event(), ctx, () => config(rules, mode), deps))!.reason, /danger command, global.json/);
+    }
+    assert.equal(await handleToolCall(event(), ctx, () => config([allow, ask], mode), deps), undefined);
+    assert.match(prompts.at(-1)!, /danger command, project.json/);
+    const before = prompts.length;
+    assert.equal(await handleToolCall(event(), ctx, () => ({ ...config([allow], mode), ui: { status: false } }), deps), undefined);
+    assert.equal(prompts.length, before);
+    assert.match(notices.at(-1)!, /Allowed by rule .*global.json/);
+    // Raw-text markers, including accepted false positives; not a shell-safety proof.
+    for (const marker of [";", "&&", "||", "|", "&", "\n", "\r", "$(x)", "`x`", "<(x)", ">(x)", '"a; b"', "2>&1"]) {
+      assert.equal(await handleToolCall(event(`danger ${marker}`), ctx, () => config([allow], mode), deps), undefined);
+      assert.match(prompts.at(-1)!, /Combined or nested/);
+      assert.notEqual(await handleToolCall(event(`danger ${marker}`), { ...ctx, hasUI: false }, () => config([allow], mode), deps), undefined);
+    }
+    assert.equal(await handleToolCall(event(), ctx, () => config([rule("allow", "project"), allow], mode), deps), undefined);
+    assert.ok(notices.some((notice) => /Ignored.*project.json/.test(notice)));
+    const ignored = await handleToolCall(event(), { ...ctx, hasUI: false }, () => config([rule("allow", "project")], "manual"), deps);
+    assert.match(ignored!.reason, /Ignored.*project.json/);
+    trusted = true;
+    assert.equal(await handleToolCall(event(), ctx, () => config([rule("allow", "project")], mode), deps), undefined);
+    trusted = false;
+  }
+  assert.equal(reviews, 0);
+  assert.ok(trustSamples > 1);
+});
+
+test("off validation exception and cancelled reviewer routes fail closed", async () => {
+  const { ctx, calls } = context();
+  const never = () => { assert.fail("off cannot match or review"); };
+  assert.equal(await handleToolCall(event(), ctx, () => ({ ...config(), enabled: false }), { matcher: never, review: never }), undefined);
+  assert.equal(await handleToolCall(event(), ctx, () => { assert.fail("explicit off cannot load"); }, {}, { enabled: false }), undefined);
+  assert.match((await handleToolCall(event(), ctx, () => ({ ok: false, error: "bad project" }), {}, { enabled: true }))!.reason, /bad project/);
+  assert.notEqual(await handleToolCall(event(), ctx, () => config([], "auto"), { review: async () => ({ ok: false, error: "aborted", cancelled: true }) }), undefined);
+  assert.equal(calls.length, 0);
 });
