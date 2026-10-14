@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import * as config from "../src/config.ts";
 import { loadConfig, loadGlobalConfig, parseConfig, saveGlobalSettings } from "../src/config.ts";
 
 const rule = { pattern: "^cmd$", level: "ask", label: "cmd" };
@@ -85,6 +86,54 @@ test("save creates global config, preserves fields, refuses invalid targets, and
     }
   } finally { t.cleanup(); }
 });
+
+const saveReviewer = (globalDir: string, model: { provider: string; id: string } | undefined) => {
+  assert.equal(typeof config.saveGlobalReviewerModel, "function", "reviewer saver is exported");
+  return config.saveGlobalReviewerModel(globalDir, model);
+};
+
+test("reviewer save preserves unrelated raw config and reviewer options", () => {
+  const t = temp(); mkdirSync(t.global, { recursive: true });
+  try {
+    const path = join(t.global, "auto-permissions.json");
+    const raw = { enabled: false, reviewMode: "auto", rules: [rule], ui: { status: false, placement: "toolRow" }, reviewEvidence: { projectInstructions: true }, reviewer: { reasoningEffort: "high", timeoutMs: 4000, extraInstructionsFile: "instructions.md" } };
+    writeFileSync(join(t.global, "instructions.md"), "instructions");
+    writeFileSync(path, JSON.stringify(raw));
+    assert.equal(saveReviewer(t.global, { provider: "p", id: "m" }).ok, true);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { ...raw, reviewer: { ...raw.reviewer, provider: "p", model: "m" } });
+    const loaded = loadGlobalConfig(t.global);
+    assert.equal(loaded.ok, true);
+    if (loaded.ok) {
+      assert.equal(loaded.enabled, false);
+      assert.equal(loaded.reviewMode, "auto");
+      assert.deepEqual(loaded.rules.map(({ pattern, level, label, source, scope }) => ({ pattern: pattern.source, level, label, source, scope })), [{ pattern: rule.pattern, level: rule.level, label: rule.label, source: path, scope: "global" }]);
+      assert.deepEqual(loaded.ui, raw.ui);
+      assert.deepEqual(loaded.reviewEvidence, raw.reviewEvidence);
+      assert.deepEqual(loaded.reviewer, { model: { provider: "p", id: "m" }, reasoningEffort: "high", timeoutMs: 4000, extraInstructions: "instructions" });
+    }
+  } finally { t.cleanup(); }
+});
+
+test("reviewer save creates minimal config when absent", () => {
+  const t = temp();
+  try { assert.equal(saveReviewer(t.global, { provider: "p", id: "m" }).ok, true); assert.deepEqual(JSON.parse(readFileSync(join(t.global, "auto-permissions.json"), "utf8")), { rules: [], reviewer: { provider: "p", model: "m" } }); } finally { t.cleanup(); }
+});
+test("reviewer save replaces pair retaining reviewer options", () => {
+  const t = temp(); mkdirSync(t.global, { recursive: true });
+  try { const path = join(t.global, "auto-permissions.json"); writeFileSync(path, JSON.stringify({ rules: [], reviewer: { provider: "a", model: "b", reasoningEffort: "high", timeoutMs: 5000, extraInstructions: "x" } })); assert.equal(saveReviewer(t.global, { provider: "c", id: "d" }).ok, true); assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { provider: "c", model: "d", reasoningEffort: "high", timeoutMs: 5000, extraInstructions: "x" }); } finally { t.cleanup(); }
+});
+test("reviewer clear removes pair preserving other options", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); writeFileSync(path, JSON.stringify({ rules: [], reviewer: { provider: "a", model: "b", timeoutMs: 5000 } })); assert.equal(saveReviewer(t.global, undefined).ok, true); assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { timeoutMs: 5000 }); } finally { t.cleanup(); } });
+test("reviewer clear removes empty reviewer object", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); writeFileSync(path, JSON.stringify({ rules: [], reviewer: { provider: "a", model: "b" } })); assert.equal(saveReviewer(t.global, undefined).ok, true); assert.equal("reviewer" in JSON.parse(readFileSync(path, "utf8")), false); } finally { t.cleanup(); } });
+test("reviewer clear no-op leaves absent and unset files untouched", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); assert.equal(saveReviewer(t.global, undefined).ok, true); assert.equal(fs.existsSync(path), false); for (const bytes of ['{ "rules": [] }', '{"rules":[],"reviewer":{}}']) { writeFileSync(path, bytes); assert.equal(saveReviewer(t.global, undefined).ok, true); assert.equal(readFileSync(path, "utf8"), bytes); } } finally { t.cleanup(); } });
+test("reviewer save refuses malformed JSON retaining bytes", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); writeFileSync(path, "{broken"); assert.equal(saveReviewer(t.global, { provider: "p", id: "m" }).ok, false); assert.equal(readFileSync(path, "utf8"), "{broken"); } finally { t.cleanup(); } });
+test("reviewer no-op clear validates existing config", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); const bytes = JSON.stringify({ reviewer: { provider: "p" } }); writeFileSync(path, bytes); assert.equal(saveReviewer(t.global, undefined).ok, false); assert.equal(readFileSync(path, "utf8"), bytes); } finally { t.cleanup(); } });
+test("reviewer save rejects blank pair without changing bytes", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); const bytes = JSON.stringify({ rules: [] }); writeFileSync(path, bytes); assert.equal(saveReviewer(t.global, { provider: " ", id: "m" }).ok, false); assert.equal(readFileSync(path, "utf8"), bytes); } finally { t.cleanup(); } });
+test("reviewer write stages bytes before a partial write failure", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); const original = JSON.stringify({ rules: [], reviewer: { provider: "old", model: "old-id" } }); writeFileSync(path, original); const beforeWrite = fs.writeFileSync; let injected = false; fs.writeFileSync = ((file: Parameters<typeof beforeWrite>[0], data: Parameters<typeof beforeWrite>[1], ...args: Parameters<typeof beforeWrite>[2][]) => { if (String(file) === path || String(file).startsWith(`${path}.`) || String(file).includes(`.${"auto-permissions.json"}.`)) { injected = true; beforeWrite(file, String(data).slice(0, 4), ...args); throw new Error("injected partial write"); } return beforeWrite(file, data, ...args); }) as typeof fs.writeFileSync; syncBuiltinESMExports(); try { assert.equal(saveReviewer(t.global, { provider: "new", id: "new-id" }).ok, false); } finally { fs.writeFileSync = beforeWrite; syncBuiltinESMExports(); } assert.equal(injected, true); assert.equal(readFileSync(path, "utf8"), original); const loaded = loadGlobalConfig(t.global); assert.equal(loaded.ok, true); if (loaded.ok) assert.deepEqual(loaded.reviewer.model, { provider: "old", id: "old-id" }); assert.deepEqual(fs.readdirSync(t.global), ["auto-permissions.json"]); } finally { t.cleanup(); } });
+test("reviewer rename failures preserve existing and absent targets", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); const original = fs.renameSync; try { const path = join(t.global, "auto-permissions.json"); const originalBytes = JSON.stringify({ rules: [], reviewer: { provider: "old", model: "old-id" } }); for (const exists of [true, false]) { if (exists) writeFileSync(path, originalBytes); else rmSync(path, { force: true }); fs.renameSync = (() => { throw new Error("rename denied"); }) as typeof fs.renameSync; syncBuiltinESMExports(); try { assert.equal(saveReviewer(t.global, { provider: "p", id: "m" }).ok, false); } finally { fs.renameSync = original; syncBuiltinESMExports(); } assert.equal(fs.existsSync(path), exists); if (exists) { assert.equal(readFileSync(path, "utf8"), originalBytes); const loaded = loadGlobalConfig(t.global); assert.equal(loaded.ok, true); if (loaded.ok) assert.deepEqual(loaded.reviewer.model, { provider: "old", id: "old-id" }); } assert.deepEqual(fs.readdirSync(t.global), exists ? ["auto-permissions.json"] : []); } } finally { fs.renameSync = original; syncBuiltinESMExports(); t.cleanup(); } });
+test("reviewer save detects content changes during staging", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); const path = join(t.global, "auto-permissions.json"); try { const initial = JSON.stringify({ rules: [] }); writeFileSync(path, initial); const original = fs.readFileSync; let reads = 0; fs.readFileSync = ((file: Parameters<typeof original>[0], ...args: Parameters<typeof original>[1][]) => { if (String(file) === path && ++reads === 2) writeFileSync(path, "external"); return original(file as never, ...(args as [never])); }) as typeof fs.readFileSync; syncBuiltinESMExports(); try { const result = saveReviewer(t.global, { provider: "p", id: "m" }); assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error, "config changed during save; refusing to overwrite"); } finally { fs.readFileSync = original; syncBuiltinESMExports(); } assert.equal(readFileSync(path, "utf8"), "external"); assert.deepEqual(fs.readdirSync(t.global), ["auto-permissions.json"]); } finally { t.cleanup(); } });
+test("reviewer save detects target deletion or appearance", () => { for (const change of ["deletion", "appearance"]) { const t = temp(); mkdirSync(t.global, { recursive: true }); const path = join(t.global, "auto-permissions.json"); try { if (change === "deletion") writeFileSync(path, JSON.stringify({ rules: [] })); const original = fs.readFileSync; let reads = 0; fs.readFileSync = ((file: Parameters<typeof original>[0], ...args: Parameters<typeof original>[1][]) => { if (String(file) === path && ++reads === 2) { if (change === "deletion") rmSync(path); else writeFileSync(path, "external"); } return original(file as never, ...(args as [never])); }) as typeof fs.readFileSync; syncBuiltinESMExports(); try { assert.equal(saveReviewer(t.global, { provider: "p", id: "m" }).ok, false); } finally { fs.readFileSync = original; syncBuiltinESMExports(); } assert.equal(fs.existsSync(path), change === "appearance"); if (change === "appearance") assert.equal(readFileSync(path, "utf8"), "external"); assert.deepEqual(fs.readdirSync(t.global), change === "appearance" ? ["auto-permissions.json"] : []); } finally { t.cleanup(); } } });
+test("reviewer atomic replacement preserves restrictive mode and leaves no staging files", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); writeFileSync(path, JSON.stringify({ rules: [] })); chmodSync(path, 0o640); const previousUmask = process.umask(0o077); try { assert.equal(saveReviewer(t.global, { provider: "p", id: "m" }).ok, true); } finally { process.umask(previousUmask); } assert.equal(fs.statSync(path).mode & 0o777, 0o640); assert.deepEqual(fs.readdirSync(t.global), ["auto-permissions.json"]); } finally { t.cleanup(); } });
+test("existing settings saver preserves reviewer pair", () => { const t = temp(); mkdirSync(t.global, { recursive: true }); try { const path = join(t.global, "auto-permissions.json"); writeFileSync(path, JSON.stringify({ rules: [], reviewer: { provider: "p", model: "m" } })); assert.equal(saveGlobalSettings(t.global, { enabled: false, reviewMode: "auto" }).ok, true); assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { provider: "p", model: "m" }); } finally { t.cleanup(); } });
 
 test("strict nested configuration and values reject malformed inputs with source attribution", () => {
   const invalid = [null, [], { unknown: true },

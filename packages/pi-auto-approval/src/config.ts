@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync, chmodSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
 export type RuleLevel = "deny" | "ask" | "allow";
@@ -151,6 +152,59 @@ export function loadConfig(cwd: string, globalDir: string): ConfigResult {
   return { ...global, rules: [...global.rules, ...project.rules] };
 }
 export type SaveResult = { readonly ok: true; readonly path: string } | { readonly ok: false; readonly path: string; readonly error: string };
+export function saveGlobalReviewerModel(
+  globalDir: string,
+  model: NonNullable<ReviewerConfig["model"]> | undefined,
+): SaveResult {
+  const path = join(globalDir, CONFIG_FILENAME);
+  let before: string | undefined;
+  let raw: Record<string, unknown> = { rules: [] };
+  try { before = readFileSync(path, "utf8"); } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { ok: false, path, error: `cannot read config (${(err as NodeJS.ErrnoException).code ?? "unknown error"})` };
+  }
+  if (before !== undefined) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(before); } catch (err) { return { ok: false, path, error: `invalid JSON (${(err as Error).message})` }; }
+    const checked = parseConfig(parsed, path, dirname(path));
+    if (!checked.ok) return { ok: false, path, error: checked.error };
+    if (model === undefined && checked.reviewer.model === undefined) return { ok: true, path };
+    raw = parsed as Record<string, unknown>;
+  }
+  if (model === undefined) {
+    if (raw.reviewer !== undefined) {
+      const reviewer = raw.reviewer as Record<string, unknown>;
+      delete reviewer.provider;
+      delete reviewer.model;
+      if (Object.keys(reviewer).length === 0) delete raw.reviewer;
+    }
+    if (before === undefined || JSON.stringify(JSON.parse(before)) === JSON.stringify(raw)) return { ok: true, path };
+  } else {
+    if (!isNonBlank(model.provider) || !isNonBlank(model.id)) return { ok: false, path, error: `${path}: reviewer.provider and reviewer.model must be non-empty strings` };
+    const reviewer = isObject(raw.reviewer) ? raw.reviewer : {};
+    raw.reviewer = { ...reviewer, provider: model.provider, model: model.id };
+  }
+  const checked = parseConfig(raw, path, dirname(path));
+  if (!checked.ok) return { ok: false, path, error: checked.error };
+  const output = JSON.stringify(raw, null, 2) + "\n";
+  const stage = join(globalDir, `.${CONFIG_FILENAME}.${randomUUID()}.tmp`);
+  let committed = false;
+  try {
+    mkdirSync(globalDir, { recursive: true });
+    const mode = before === undefined ? undefined : (() => { const stat = statSync(path); return stat.isFile() ? stat.mode & 0o7777 : undefined; })();
+    writeFileSync(stage, output, { encoding: "utf8", flag: "wx", ...(mode === undefined ? {} : { mode }) });
+    if (mode !== undefined) chmodSync(stage, mode);
+    let current: string | undefined;
+    try { current = readFileSync(path, "utf8"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
+    if (current !== before) return { ok: false, path, error: "config changed during save; refusing to overwrite" };
+    renameSync(stage, path);
+    committed = true;
+    return { ok: true, path };
+  } catch (err) {
+    return { ok: false, path, error: (err as Error).message };
+  } finally {
+    if (!committed) { try { rmSync(stage, { force: true }); } catch { /* best-effort staging cleanup */ } }
+  }
+}
 export function saveGlobalSettings(globalDir: string, settings: PermissionSettings): SaveResult {
   const path = join(globalDir, CONFIG_FILENAME);
   let before: string | undefined;

@@ -1,9 +1,10 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadConfig, loadGlobalConfig, saveGlobalSettings } from "./config.ts";
-import type { ConfigUi, PermissionSettings, SessionChoices } from "./config.ts";
+import { loadConfig, loadGlobalConfig, saveGlobalReviewerModel, saveGlobalSettings } from "./config.ts";
+import type { ConfigUi, PermissionSettings, ReviewerConfig, SessionChoices } from "./config.ts";
 import { footerText } from "./ui/footer.ts";
 
-const OPTIONS = ["Protection on", "Protection off", "Auto review", "Manual review", "Save settings", "Clear session choices / reload"];
+const OPTIONS = ["Protection on", "Protection off", "Auto review", "Manual review", "Reviewer model", "Save settings", "Clear session choices / reload"];
+const USE_ACTIVE_MODEL = "Use active model";
 export interface PermissionsController {
   snapshot(): SessionChoices;
   menu(args: string, ctx: ExtensionCommandContext): Promise<void>;
@@ -19,6 +20,28 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
     return saved.ok ? { enabled: choices.enabled ?? saved.enabled, reviewMode: choices.reviewMode ?? saved.reviewMode } : undefined;
   };
   const snapshot = (): SessionChoices => ({ ...choices });
+  const chooseReviewerModel = async (ctx: ExtensionCommandContext, openedAt: number): Promise<void> => {
+    const saved = loadConfig(ctx.cwd, globalDir);
+    if (!saved.ok) { notify(ctx, `Saved config is invalid: ${saved.error}`, "error"); return; }
+    let models: { readonly provider: string; readonly id: string }[];
+    try { models = ctx.modelRegistry.getAvailable(); } catch (err) { notify(ctx, `Could not list models: ${(err as Error).message}`, "error"); return; }
+    const pairs = new Map<string, NonNullable<ReviewerConfig["model"]>>();
+    const labels = models.map((model, index) => {
+      const label = `${index + 1}. ${model.provider}/${model.id}`;
+      pairs.set(label, { provider: model.provider, id: model.id });
+      return label;
+    });
+    const current = saved.reviewer.model ? `${saved.reviewer.model.provider}/${saved.reviewer.model.id}` : "active model";
+    const selected = await ctx.ui.select(`Reviewer model (current: ${current})`, [USE_ACTIVE_MODEL, ...labels]);
+    if (selected === undefined || openedAt !== generation) return;
+    const clear = selected === USE_ACTIVE_MODEL;
+    const model = clear ? undefined : pairs.get(selected);
+    if (!clear && !model) { notify(ctx, `Unknown reviewer model: ${selected}`, "warning"); return; }
+    const result = saveGlobalReviewerModel(globalDir, model);
+    if (!result.ok) notify(ctx, `Could not save reviewer model to ${result.path}: ${result.error}; previous selection retained`, "error");
+    else if (model) notify(ctx, `Saved reviewer model ${model.provider}/${model.id} to ${result.path}`, "info");
+    else notify(ctx, "Reviewer model: active model (global override cleared)", "info");
+  };
   const refreshFooter = (ctx: ExtensionContext): void => {
     try {
       if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
@@ -39,6 +62,7 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
       try {
         const selected = await ctx.ui.select("Permissions", OPTIONS);
         if (selected === undefined || openedAt !== generation) { refreshFooter(ctx); return; }
+        if (selected === "Reviewer model") { await chooseReviewerModel(ctx, openedAt); return; }
         const saved = loadConfig(ctx.cwd, globalDir);
         const beforeChoices = choices;
         const before = loadSettings(ctx, saved);
