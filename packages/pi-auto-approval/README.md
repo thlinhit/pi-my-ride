@@ -48,6 +48,8 @@ Unmatched commands require human confirmation in manual mode (the default) or mo
 
 Use `/permissions` for the interactive menu: protection on/off, auto/manual review, reviewer model, save settings, or clear session choices and reload. Protection and review-mode choices apply immediately but remain session-local until saved. Reviewer model choices are not session-local: they save to the global file immediately. All session starts (`startup`, `reload`, `new`, `resume`, `fork`) clear unsaved protection and review-mode choices; they do not clear a saved reviewer selection. Save writes only the global file, preserves unrelated fields, and refuses invalid or concurrently changed targets rather than overwriting them. External file edits take effect on the next Bash call. A protection or review-mode change cancels and blocks pending attempts. Explicit session-level protection off bypasses config validation and this extension's gating; turning it back on restores validation.
 
+The protection footer shows `🛡️ guardian: off`, `🛡️ guardian: auto`, or `🛡️ guardian: manual`. Setting `ui.status: false` hides valid-config status. Invalid configuration still shows `⚠ protection config error · Bash blocked`, unless protection is explicitly disabled for the session, which shows `🛡️ guardian: off`.
+
 ## Reviewer and limits
 
 Reviewer settings are optional: `provider` and `model` must be supplied together (otherwise the active model is used), `reasoningEffort` defaults to `low`, and `timeoutMs` defaults to `30000` (valid range 1000–300000). Supply either non-blank `extraInstructions` or `extraInstructionsFile`, not both; file paths are relative to the global config.

@@ -16,11 +16,20 @@ const valid = (overrides: Partial<Extract<ConfigResult, { ok: true }>> = {}): Ex
 
 const choices = (overrides: SessionChoices = {}): SessionChoices => overrides;
 
+test("shows compact guardian modes", () => {
+  assert.equal(footerText(valid(), choices()), "🛡️ guardian: manual");
+  assert.equal(footerText(valid({ reviewMode: "auto" }), choices()), "🛡️ guardian: auto");
+});
+
+test("shows off regardless of configured review mode", () => {
+  assert.equal(footerText(valid({ enabled: false, reviewMode: "manual" }), choices()), "🛡️ guardian: off");
+  assert.equal(footerText(valid({ enabled: false, reviewMode: "auto" }), choices()), "🛡️ guardian: off");
+});
+
 test("uses session choices over valid config", () => {
-  assert.equal(footerText(valid(), choices()), "▸▸ protection on · manual");
-  assert.equal(footerText(valid({ reviewMode: "auto" }), choices({ enabled: false, reviewMode: "manual" })), "⏸ protection off · manual");
-  assert.equal(footerText(valid({ enabled: false, reviewMode: "manual" }), choices({ enabled: true, reviewMode: "auto" })), "▸▸ protection on · auto");
-  assert.equal(footerText(valid({ enabled: false, reviewMode: "auto" }), choices()), "⏸ protection off · auto");
+  assert.equal(footerText(valid({ reviewMode: "auto" }), choices({ enabled: false, reviewMode: "manual" })), "🛡️ guardian: off");
+  assert.equal(footerText(valid({ enabled: false, reviewMode: "manual" }), choices({ enabled: true, reviewMode: "auto" })), "🛡️ guardian: auto");
+  assert.equal(footerText(valid({ reviewMode: "auto" }), choices({ reviewMode: "manual" })), "🛡️ guardian: manual");
 });
 
 test("suppresses valid status when ui status is disabled", () => {
@@ -31,6 +40,7 @@ test("suppresses valid status when ui status is disabled", () => {
 test("invalid config shows error unless session protection is explicitly off", () => {
   const invalid: ConfigResult = { ok: false, error: "bad config" };
   assert.equal(footerText(invalid, choices()), "⚠ protection config error · Bash blocked");
-  assert.equal(footerText(invalid, choices({ enabled: false })), "⏸ protection off");
-  assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "auto" })), "⏸ protection off · auto");
+  assert.equal(footerText(invalid, choices({ enabled: false })), "🛡️ guardian: off");
+  assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "auto" })), "🛡️ guardian: off");
+  assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "manual" })), "🛡️ guardian: off");
 });
