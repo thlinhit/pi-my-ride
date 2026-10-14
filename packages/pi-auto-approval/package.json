@@ -30,7 +30,7 @@
     "access": "public"
   },
   "scripts": {
-    "test": "node --test test/*.test.ts test/review/*.test.ts",
+    "test": "node --test test/*.test.ts test/review/*.test.ts test/ui/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
@@ -45,9 +45,9 @@
     "examples"
   ],
   "devDependencies": {
-    "@earendil-works/pi-ai": "^1.1.0",
-    "@earendil-works/pi-coding-agent": "^1.1.0",
-    "@earendil-works/pi-tui": "^1.1.0",
+    "@earendil-works/pi-ai": "^1.2.0",
+    "@earendil-works/pi-coding-agent": "^1.2.0",
+    "@earendil-works/pi-tui": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@types/node": "^22.20.5",
     "typescript": "^5.9.3"

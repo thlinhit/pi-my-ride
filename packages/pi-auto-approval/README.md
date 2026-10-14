@@ -60,6 +60,14 @@ Only the Bash tool is gated. Other tools, user `!`/`!!` commands, and extension 
 
 Run `npm test && npm run typecheck` from the repository root. Tests cover strict global/project and nested validation; rule priority, trust, attribution and suspicious raw text; manual/auto/off routes; all five session resets; pending human/model cancellation, late approvals and dialog-lock retention; external-edit selection snapshots; and save conflicts from modification, deletion or appearance. Phase 4 reviewer evidence, budget, cache and lineage tests remain, including five-step comparisons against fresh reviews. Providers and UI are mocked; these tests do not establish real-model approval quality or live Pi behavior.
 
+## Phase 5 tool-row status
+
+Tool-row status is an opt-in renderer adaptation. It calls Pi's public `registerToolRenderer` resolver and `next()` to wrap only the native Bash `renderCall`; Bash execution and native `renderResult` remain unchanged. The extension checks the installed Pi version and current builtin Bash identity before using a row, and otherwise falls back to the editor widget.
+
+Automated native-renderer evidence is recorded in [`docs/phase-5/verification.md`](../../docs/phase-5/verification.md). It uses the public `createBashToolDefinition`, `ToolExecutionComponent`, and renderer APIs. Tool-row status is admitted only for exact tested Pi version `1.2.0` (`VERIFIED_PI_VERSIONS` in `src/ui/rows.ts`). The renderer-only contract checks builtin Bash attribution (source and path) and row readiness; it does not claim a backend definition identity. Any failed check, unverified version, or non-builtin Bash falls back to the widget path.
+
+No real Pi session or provider check has been performed for this phase.
+
 ## Harmless-command checklist
 
 For a manual Pi check: run `/permissions`; turn protection off and run `echo off-ok`; turn on + manual and run `echo manual` (expect confirmation); select auto and run `echo auto` (expect review); verify untrusted project allows are reported/ignored and suspicious allow text such as `echo "a; b"` prompts; save and inspect `~/.pi/agent/auto-permissions.json`; verify malformed config blocks, then session off bypasses it; start `/new` and confirm session choices clear. Automated tests cover save interleavings; do not treat manual editing before Save as a conflict because Save reads the current value first.

@@ -9,7 +9,7 @@ import type { ConfigResult, ReviewerConfig, Rule } from "../src/config.ts";
 import { parseConfig } from "../src/config.ts";
 import { matchRule } from "../src/gates.ts";
 import type { ConfigLoader, GateContext, ReviewContext } from "../src/index.ts";
-import { createPiReviewer, createReviewerState, createWidgetReporter, handleToolCall } from "../src/index.ts";
+import { createPiReviewer, createReviewerState, handleToolCall } from "../src/index.ts";
 
 afterEach(() => mock.timers.reset());
 
@@ -35,7 +35,7 @@ const config = (rules = ruleSet(), reviewMode: "manual" | "auto" = "manual"): Co
   rules,
   enabled: true,
   reviewMode,
-  ui: { status: true },
+  ui: { status: true, placement: "widget" },
   reviewer: { reasoningEffort: "low", timeoutMs: 30_000 },
   reviewEvidence: { projectInstructions: false },
 });
@@ -77,7 +77,7 @@ test("non-bash does not load config; unmatched bash confirms in manual mode", as
         loads++;
         return config();
       },
-      { status: (state) => statuses.push(state) },
+      { status: (report) => statuses.push(typeof report === "string" ? report : report.state) },
     ),
     undefined,
   );
@@ -89,13 +89,13 @@ test("non-bash does not load config; unmatched bash confirms in manual mode", as
         loads++;
         return config([]);
       },
-      { status: (state) => statuses.push(state) },
+      { status: (report) => statuses.push(typeof report === "string" ? report : report.state) },
     ),
     undefined,
   );
   assert.equal(loads, 1);
   assert.equal(calls.length, 1);
-  assert.deepEqual(statuses, ["reviewing", "approved"]);
+  assert.deepEqual(statuses, ["approval-required", "approved"]);
 });
 
 test("invalid bash input and config failures block", async () => {
@@ -131,6 +131,26 @@ test("guarded command confirms exact raw command and label", async () => {
   assert.deepEqual(calls[0]?.slice(0, 2), ["Approve command? [danger command]", "Requires confirmation (danger command, global.json)\n\ndanger; echo hi"]);
 });
 
+test("guardian abort during synchronous running report skips reviewer", async () => {
+  const controller = new AbortController();
+  const statuses: string[] = [];
+  let reviews = 0;
+  const { ctx } = context({ signal: controller.signal });
+  const result = await handleToolCall(event(), ctx, () => config([], "auto"), {
+    review: async () => {
+      reviews++;
+      return { ok: true, verdict: { decision: "approve", reason: "late" } };
+    },
+    status: (report) => {
+      statuses.push(typeof report === "string" ? report : report.state);
+      if (typeof report !== "string" && report.state === "guardian-running") controller.abort();
+    },
+  });
+  assert.match(result!.reason, /confirmation failed/);
+  assert.equal(reviews, 0);
+  assert.deepEqual(statuses, ["guardian-running"]);
+});
+
 test("guardian approves without confirmation and reports review status", async () => {
   const statuses: string[] = [];
   const { ctx, calls } = context();
@@ -140,11 +160,11 @@ test("guardian approves without confirmation and reports review status", async (
       received = input;
       return { ok: true, verdict: { decision: "approve", reason: "Authorized." } };
     },
-    status: (state) => statuses.push(state),
+    status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
   assert.equal(result, undefined);
   assert.equal(calls.length, 0);
-  assert.deepEqual(statuses, ["reviewing", "approved"]);
+  assert.deepEqual(statuses, ["guardian-running", "approved"]);
   assert.deepEqual((received as { reviewEvidence: unknown }).reviewEvidence, { projectInstructions: false });
 });
 
@@ -187,7 +207,7 @@ test("no UI blocks guarded command", async () => {
   const statuses: string[] = [];
   const noUi = context({ hasUI: false });
   assert.match(
-    (await handleToolCall(event(), noUi.ctx, loadConfig, { status: (state) => statuses.push(state) }))!.reason,
+    (await handleToolCall(event(), noUi.ctx, loadConfig, { status: (report) => statuses.push(typeof report === "string" ? report : report.state) }))!.reason,
     /Requires confirmation/,
   );
   assert.equal(noUi.calls.length, 0);
@@ -200,7 +220,7 @@ test("trusted guarded rule bypasses confirmation and reports status", async () =
   assert.equal(
     await handleToolCall(event(), ctx, () => config([rule("allow", "global")]), {
 
-      status: (state) => statuses.push(state),
+      status: (report) => statuses.push(typeof report === "string" ? report : report.state),
     }),
     undefined,
   );
@@ -214,7 +234,7 @@ test("trusted guarded rule allows without UI and reports no status", async () =>
   assert.equal(
     await handleToolCall(event(), noUi.ctx, () => config([rule("allow", "global")]), {
 
-      status: (state) => statuses.push(state),
+      status: (report) => statuses.push(typeof report === "string" ? report : report.state),
     }),
     undefined,
   );
@@ -228,7 +248,7 @@ test("config loader abort after returning blocks unmatched command", async () =>
   const { ctx, calls } = context({ signal: controller.signal });
   const result = await handleToolCall(event("echo ok"), ctx, () => { controller.abort(); return config(); }, {
 
-    status: (state) => statuses.push(state),
+    status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
   assert.match(result!.reason, /confirmation failed/);
   assert.equal(calls.length, 0);
@@ -263,25 +283,28 @@ test("untrusted project allow confirms; deny cannot bypass", async () => {
   const { ctx, calls } = context({ isProjectTrusted: () => false });
   assert.equal(
     await handleToolCall(event(), ctx, () => config([rule("allow", "project")]), {
-      status: (state) => statuses.push(state),
+      status: (report) => statuses.push(typeof report === "string" ? report : report.state),
     }),
     undefined,
   );
   assert.equal(calls.length, 1);
   const blocked = await handleToolCall(event(), ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }]), {
 
-    status: (state) => statuses.push(state),
+    status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
   assert.equal(blocked?.reason, "Blocked by auto-approval (danger command, global.json): Use the approved workflow.");
-  assert.deepEqual(statuses, ["reviewing", "approved", "blocked"]);
+  assert.deepEqual(statuses, ["approval-required", "approved", "blocked"]);
 });
 
 test("status disabled hides reports without changing enforcement", async () => {
   const statuses: string[] = [];
-  const hiddenConfig = (rules = ruleSet()) => ({ ...config(rules), ui: { status: false } });
+  const hiddenConfig = (rules = ruleSet()): ConfigResult => {
+    const loaded = config(rules);
+    return loaded.ok ? { ...loaded, ui: { status: false, placement: "widget" } } : loaded;
+  };
   const denied = context({ ui: { confirm: async () => false, notify: () => {} } });
   const result = await handleToolCall(event(), denied.ctx, () => hiddenConfig(), {
-    status: (state) => statuses.push(state),
+    status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
   assert.match(result!.reason, /user declined/);
   assert.equal(statuses.length, 0);
@@ -290,7 +313,7 @@ test("status disabled hides reports without changing enforcement", async () => {
   assert.equal(
     await handleToolCall(event(), trusted.ctx, () => hiddenConfig([rule("allow", "global")]), {
 
-      status: (state) => statuses.push(state),
+      status: (report) => statuses.push(typeof report === "string" ? report : report.state),
     }),
     undefined,
   );
@@ -299,7 +322,7 @@ test("status disabled hides reports without changing enforcement", async () => {
 
   const convention = await handleToolCall(event(), trusted.ctx, () => hiddenConfig([{ ...rule(), level: "deny", message: "Use the approved workflow." }]), {
 
-    status: (state) => statuses.push(state),
+    status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
   assert.equal(convention?.reason, "Blocked by auto-approval (danger command, global.json): Use the approved workflow.");
   assert.equal(statuses.length, 0);
@@ -340,10 +363,10 @@ test("user denial blocks", async () => {
   const statuses: string[] = [];
   const denied = context({ ui: { confirm: async () => false, notify: () => {} } });
   assert.match(
-    (await handleToolCall(event(), denied.ctx, loadConfig, { status: (state) => statuses.push(state) }))!.reason,
+    (await handleToolCall(event(), denied.ctx, loadConfig, { status: (report) => statuses.push(typeof report === "string" ? report : report.state) }))!.reason,
     /user declined/,
   );
-  assert.deepEqual(statuses, ["reviewing", "blocked"]);
+  assert.deepEqual(statuses, ["approval-required", "blocked"]);
 });
 
 test("confirmation throwing blocks", async () => {
@@ -357,10 +380,10 @@ test("confirmation throwing blocks", async () => {
     },
   });
   assert.match(
-    (await handleToolCall(event(), failed.ctx, loadConfig, { status: (state) => statuses.push(state) }))!.reason,
+    (await handleToolCall(event(), failed.ctx, loadConfig, { status: (report) => statuses.push(typeof report === "string" ? report : report.state) }))!.reason,
     /confirmation failed/,
   );
-  assert.deepEqual(statuses, ["reviewing", "blocked"]);
+  assert.deepEqual(statuses, ["approval-required", "blocked"]);
 });
 
 test("already-aborted signal blocks without prompting", async () => {
@@ -369,7 +392,7 @@ test("already-aborted signal blocks without prompting", async () => {
   controller.abort();
   const aborted = context({ signal: controller.signal });
   assert.equal(
-    (await handleToolCall(event(), aborted.ctx, loadConfig, { status: (state) => statuses.push(state) }))?.reason,
+    (await handleToolCall(event(), aborted.ctx, loadConfig, { status: (report) => statuses.push(typeof report === "string" ? report : report.state) }))?.reason,
     "auto-approval: confirmation failed",
   );
   assert.equal(aborted.calls.length, 0);
@@ -403,10 +426,10 @@ test("abort during confirmation blocks even when confirmation approves", async (
     },
   });
   assert.match(
-    (await handleToolCall(event(), during.ctx, loadConfig, { status: (state) => statuses.push(state) }))!.reason,
+    (await handleToolCall(event(), during.ctx, loadConfig, { status: (report) => statuses.push(typeof report === "string" ? report : report.state) }))!.reason,
     /review cancelled/,
   );
-  assert.deepEqual(statuses, ["reviewing"]);
+  assert.deepEqual(statuses, ["approval-required"]);
 });
 
 test("abort during approved status reporting blocks confirmed command", async () => {
@@ -415,13 +438,13 @@ test("abort during approved status reporting blocks confirmed command", async ()
   const { ctx, calls } = context({ signal: controller.signal });
   const result = await handleToolCall(event(), ctx, loadConfig, {
     status: (state) => {
-      statuses.push(state);
-      if (state === "approved") controller.abort();
+      statuses.push(typeof state === "string" ? state : state.state);
+      if (state.state === "approved") controller.abort();
     },
   });
   assert.match(result!.reason, /confirmation failed/);
   assert.equal(calls.length, 1);
-  assert.deepEqual(statuses, ["reviewing", "approved"]);
+  assert.deepEqual(statuses, ["approval-required", "approved"]);
 });
 
 test("non-boolean confirmation result blocks", async () => {
@@ -429,72 +452,9 @@ test("non-boolean confirmation result blocks", async () => {
   assert.notEqual(await handleToolCall(event(), invalid.ctx, loadConfig), undefined);
 });
 
-test("widget reporter keeps reviewing and clears terminal states after 2000 ms", () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  const setWidget = mock.fn((_key: string, _content: string[] | undefined) => {});
-  const report = createWidgetReporter({ setWidget }, "auto-approval:one");
-  report("reviewing", "review");
-  mock.timers.tick(2000);
-  assert.deepEqual(
-    setWidget.mock.calls.map((call) => call.arguments),
-    [["auto-approval:one", ["auto-approval: reviewing [review]"]]],
-  );
-  report("approved", "allow");
-  assert.deepEqual(setWidget.mock.calls.at(-1)?.arguments, ["auto-approval:one", ["auto-approval: approved [allow]"]]);
-  mock.timers.tick(1999);
-  assert.equal(setWidget.mock.calls.length, 2);
-  mock.timers.tick(1);
-  assert.deepEqual(setWidget.mock.calls.at(-1)?.arguments, ["auto-approval:one", undefined]);
-  report("blocked", "deny");
-  mock.timers.tick(2000);
-  assert.deepEqual(setWidget.mock.calls.at(-1)?.arguments, ["auto-approval:one", undefined]);
-});
-
-test("widget reporters isolate call keys and replace pending cleanup", () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  const setWidget = mock.fn((_key: string, _content: string[] | undefined) => {});
-  const older = createWidgetReporter({ setWidget }, "auto-approval:one");
-  const newer = createWidgetReporter({ setWidget }, "auto-approval:two");
-  older("approved", "old");
-  newer("reviewing", "new");
-  mock.timers.tick(2000);
-  assert.deepEqual(
-    setWidget.mock.calls.map((call) => call.arguments),
-    [
-      ["auto-approval:one", ["auto-approval: approved [old]"]],
-      ["auto-approval:two", ["auto-approval: reviewing [new]"]],
-      ["auto-approval:one", undefined],
-    ],
-  );
-  older("approved", "first");
-  mock.timers.tick(1000);
-  older("blocked", "second");
-  mock.timers.tick(1000);
-  assert.equal(setWidget.mock.calls.filter((call) => call.arguments[1] === undefined).length, 1);
-  mock.timers.tick(1000);
-  assert.equal(setWidget.mock.calls.filter((call) => call.arguments[1] === undefined).length, 2);
-});
-
-test("widget reporter cleanup survives throwing show and clear calls", () => {
-  mock.timers.enable({ apis: ["setTimeout"] });
-  let calls = 0;
-  const report = createWidgetReporter(
-    {
-      setWidget: () => {
-        calls++;
-        throw Error("widget failed");
-      },
-    },
-    "auto-approval:one",
-  );
-  assert.doesNotThrow(() => report("approved", "label"));
-  mock.timers.tick(2000);
-  assert.equal(calls, 2);
-});
-
 test("factory registers tool, session reset and permissions command", async (t) => {
   const { registrations, commands } = await factoryHarness(t, async () => true);
-  assert.equal(registrations.length, 2);
+  assert.equal(registrations.length, 4);
   assert.ok(commands.permissions);
 });
 
@@ -590,7 +550,7 @@ async function factoryHarness(
   }: { group?: string; uiStatus?: boolean; guardian?: boolean; reply?: string; branch?: unknown[] } = {},
 ) {
   const { default: autoApproval } = await import("../src/index.ts");
-  const registrations: Array<{ eventName: "tool_call" | "session_start"; callback: (...args: any[]) => unknown }> = [];
+  const registrations: Array<{ eventName: string; callback: (...args: any[]) => unknown }> = [];
   const commands: Record<string, { handler: (args: string, ctx: any) => Promise<void> }> = {};
   const pi = {
     on: ((eventName: "tool_call", callback: ToolCallHandler) => {
@@ -614,7 +574,7 @@ async function factoryHarness(
       enabled: true,
       reviewMode: guardian ? "auto" : "manual",
       rules: guardian ? [] : [{ pattern: "danger", level: "ask", label: "danger" }],
-      ui: { status: uiStatus },
+      ui: { status: uiStatus, placement: "widget" },
     }),
   );
   const setWidget = mock.fn((_key: string, _content: string[] | undefined) => {});
@@ -624,6 +584,7 @@ async function factoryHarness(
   const snapshots: Array<{ context: unknown; options: unknown }> = [];
   const ctx = {
     cwd,
+    mode: "tui",
     hasUI: true,
     signal: undefined,
     model,
@@ -696,13 +657,13 @@ test("guardian cancellation after automatic approval blocks", async () => {
   const result = await handleToolCall(event(), ctx, () => config([], "auto"), {
     review: async () => ({ ok: true, verdict: { decision: "approve", reason: "Allowed." } }),
     status: (state) => {
-      statuses.push(state);
-      if (state === "approved") controller.abort();
+      statuses.push(typeof state === "string" ? state : state.state);
+      if (state.state === "approved") controller.abort();
     },
   });
   assert.match(result!.reason, /confirmation failed/);
   assert.equal(calls.length, 0);
-  assert.deepEqual(statuses, ["reviewing", "approved"]);
+  assert.deepEqual(statuses, ["guardian-running", "approved"]);
 });
 
 test("guardian fallback blocks denied, failed, and non-boolean confirmations", async () => {
@@ -1604,13 +1565,14 @@ test("factory widget shows reviewing, then approved or blocked, and clears after
   const pending = approve.invoke();
   assert.deepEqual(
     approve.setWidget.mock.calls.map((call) => call.arguments),
-    [["auto-approval:1", ["auto-approval: reviewing [danger]"]]],
+    [["auto-approval:1", ["auto-approval: reviewing [danger]"], { placement: "aboveEditor" }]],
   );
   finish(true);
   assert.equal(await pending, undefined);
   assert.deepEqual(approve.setWidget.mock.calls.at(-1)?.arguments, [
     "auto-approval:1",
     ["auto-approval: approved [danger]"],
+    { placement: "aboveEditor" },
   ]);
   mock.timers.tick(1999);
   assert.equal(approve.setWidget.mock.calls.length, 2);
@@ -1622,8 +1584,8 @@ test("factory widget shows reviewing, then approved or blocked, and clears after
   assert.deepEqual(
     deny.setWidget.mock.calls.map((call) => call.arguments),
     [
-      ["auto-approval:1", ["auto-approval: reviewing [danger]"]],
-      ["auto-approval:1", ["auto-approval: blocked [danger]"]],
+      ["auto-approval:1", ["auto-approval: reviewing [danger]"], { placement: "aboveEditor" }],
+      ["auto-approval:1", ["auto-approval: blocked [danger]"], { placement: "aboveEditor" }],
     ],
   );
   mock.timers.tick(2000);
@@ -1685,6 +1647,7 @@ test("menu cancellation settles an abort-ignoring dialog and retains its lock un
     await opened.promise;
     await h.menu(selection);
     assert.match(((await pending) as { reason: string }).reason, /confirmation failed/);
+    assert.equal(h.setWidget.mock.calls.some((call) => JSON.stringify(call.arguments).includes("Cancelled")), true);
     const published = h.setWidget.mock.callCount();
     if (selection === "Protection off") {
       assert.equal(await h.invoke(), undefined, "off retry is a fresh permitted attempt");
@@ -1717,6 +1680,9 @@ test("menu cancels active and queued model reviews without late approval or fall
     const queued = h.invoke();
     await h.menu(selection);
     for (const pending of [active, queued]) assert.match(((await pending) as { reason: string }).reason, /confirmation failed/);
+    const cancelledCalls = h.setWidget.mock.calls.filter((call) => JSON.stringify(call.arguments).includes("Cancelled"));
+    assert.equal(cancelledCalls.length, 2, "each cancelled owner publishes exactly one cancellation");
+    assert.deepEqual(new Set(cancelledCalls.map((call) => call.arguments[0])), new Set(["auto-approval:1", "auto-approval:2"]));
     assert.equal(streams, 1, "queued cancelled review cannot call provider");
     late.resolve({ stopReason: "stop", content: [{ type: "text", text: '{"decision":"approve","reason":"late"}' }] });
     await new Promise((resolve) => setImmediate(resolve));
@@ -1736,6 +1702,7 @@ test("fallback cancellation suppresses late approval; unchanged choice and save 
   assert.equal(settled, false, "unchanged choice and saving must leave fallback pending");
   await h.menu("Protection off");
   assert.match(((await pending) as { reason: string }).reason, /confirmation failed/);
+  assert.equal(h.setWidget.mock.calls.filter((call) => JSON.stringify(call.arguments).includes("Cancelled")).length, 1);
   old.resolve(true); await new Promise((resolve) => setImmediate(resolve));
   assert.equal(h.setWidget.mock.calls.some((call) => JSON.stringify(call.arguments).includes("approved")), false);
 });
@@ -1771,7 +1738,7 @@ test("authorization routes enforce priority, attribution, trust and suspicious a
     assert.equal(await handleToolCall(event(), ctx, () => config([allow, ask], mode), deps), undefined);
     assert.match(prompts.at(-1)!, /danger command, project.json/);
     const before = prompts.length;
-    assert.equal(await handleToolCall(event(), ctx, () => ({ ...config([allow], mode), ui: { status: false } }), deps), undefined);
+    assert.equal(await handleToolCall(event(), ctx, () => ({ ...config([allow], mode), ui: { status: false, placement: "widget" } }), deps), undefined);
     assert.equal(prompts.length, before);
     assert.match(notices.at(-1)!, /Allowed by rule .*global.json/);
     // Raw-text markers, including accepted false positives; not a shell-safety proof.

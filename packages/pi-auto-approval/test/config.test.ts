@@ -13,7 +13,12 @@ function temp() { const root = mkdtempSync(join(tmpdir(), "permissions-")); retu
 test("defaults and strict new rule schema", () => {
   const parsed = parseConfig({}, "global.json");
   assert.equal(parsed.ok, true);
-  if (parsed.ok) { assert.equal(parsed.enabled, true); assert.equal(parsed.reviewMode, "manual"); assert.deepEqual(parsed.rules, []); }
+  if (parsed.ok) {
+    assert.equal(parsed.enabled, true);
+    assert.equal(parsed.reviewMode, "manual");
+    assert.deepEqual(parsed.rules, []);
+    assert.deepEqual(parsed.ui, { status: true, placement: "widget" });
+  }
   for (const raw of [{ rules: [rule] }, { rules: [{ ...rule, level: "deny" }] }, { rules: [{ ...rule, level: "allow" }] }]) assert.equal(parseConfig(raw, "cfg").ok, true);
   for (const raw of [{ guardian: "off" }, { enabled: "false" }, { reviewMode: "atuo" }, { rules: {} }, { rules: [{ ...rule, group: "x" }] }, { rules: [{ ...rule, level: "guarded" }] }]) assert.equal(parseConfig(raw, "cfg").ok, false);
 });
@@ -40,14 +45,22 @@ test("save creates global config, preserves fields, refuses invalid targets, and
     assert.equal(created.ok, true);
     const path = join(t.global, "auto-permissions.json");
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { enabled: false, reviewMode: "auto", rules: [] });
-    writeFileSync(path, JSON.stringify({ enabled: true, reviewMode: "manual", rules: [rule], ui: { status: false } }));
+    writeFileSync(path, JSON.stringify({ enabled: true, reviewMode: "manual", rules: [rule], ui: { status: false, placement: "toolRow" } }));
     assert.equal(saveGlobalSettings(t.global, { enabled: false, reviewMode: "auto" }).ok, true);
     const saved = JSON.parse(readFileSync(path, "utf8"));
-    assert.equal(saved.ui.status, false); assert.equal(saved.rules[0].label, "cmd"); assert.equal(saved.enabled, false); assert.equal(saved.reviewMode, "auto");
+    assert.equal(saved.ui.status, false);
+    assert.equal(saved.ui.placement, "toolRow");
+    assert.equal(saved.rules[0].label, "cmd");
+    assert.equal(saved.enabled, false);
+    assert.equal(saved.reviewMode, "auto");
     writeFileSync(path, "{broken");
     assert.equal(saveGlobalSettings(t.global, { enabled: true, reviewMode: "manual" }).ok, false);
     assert.equal(readFileSync(path, "utf8"), "{broken");
     assert.equal(loadGlobalConfig(t.global).ok, false);
+    rmSync(path);
+    const defaults = loadGlobalConfig(t.global);
+    assert.equal(defaults.ok, true);
+    if (defaults.ok) assert.deepEqual(defaults.ui, { status: true, placement: "widget" });
     for (const change of ["modification", "deletion", "appearance"]) {
     if (change === "appearance") rmSync(path, { force: true }); else writeFileSync(path, JSON.stringify({ enabled: true, rules: [] }));
     const original = fs.readFileSync;
@@ -85,7 +98,10 @@ test("strict nested configuration and values reject malformed inputs with source
     { reviewer: { extraInstructions: " " } }, { reviewer: { extraInstructionsFile: " " } },
     { reviewer: { extraInstructions: "x", extraInstructionsFile: "x" } },
     { reviewer: { extraInstructionsFile: "/nonexistent-phase45-instructions" } },
-    { ui: { status: 0 } }, { reviewEvidence: { projectInstructions: "true" } },
+    { ui: { status: 0 } },
+    ...[null, 1, true, "", "invalid"].map((placement) => ({ ui: { placement } })),
+    { ui: { status: true, placement: "toolRow", unknown: true } },
+    { reviewEvidence: { projectInstructions: "true" } },
   ];
   for (const value of invalid) {
     const result = parseConfig(value, "validation.json");
@@ -95,6 +111,11 @@ test("strict nested configuration and values reject malformed inputs with source
   for (const key of ["enabled", "reviewMode", "reviewer", "reviewEvidence", "ui", "guardian"]) {
     assert.equal(parseConfig({ [key]: {} }, "project.json", ".", "project").ok, false, key);
   }
+  assert.equal(parseConfig({ ui: { placement: "bad" } }, "global.json").ok, false);
+  const invalidPlacement = parseConfig({ ui: { placement: null } }, "global.json");
+  assert.deepEqual(invalidPlacement, { ok: false, error: "global.json: ui.placement must be widget or toolRow" });
+  const projectUi = parseConfig({ ui: { placement: "toolRow" } }, "project.json", ".", "project");
+  assert.deepEqual(projectUi, { ok: false, error: "project.json: unsupported field \"ui\"" });
   for (const timeoutMs of [1000, 300000]) assert.equal(parseConfig({ reviewer: { timeoutMs } }, "cfg").ok, true);
   for (const reasoningEffort of ["minimal", "low", "medium", "high", "xhigh", "max"]) assert.equal(parseConfig({ reviewer: { reasoningEffort } }, "cfg").ok, true);
   const t = temp();

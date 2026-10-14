@@ -13,7 +13,8 @@ export interface Rule {
 }
 export interface PermissionSettings { readonly enabled: boolean; readonly reviewMode: ReviewMode }
 export interface SessionChoices { readonly enabled?: boolean; readonly reviewMode?: ReviewMode }
-export interface ConfigUi { readonly status: boolean }
+export type UiPlacement = "widget" | "toolRow";
+export interface ConfigUi { readonly status: boolean; readonly placement: UiPlacement }
 export interface ReviewEvidenceConfig { readonly projectInstructions: boolean }
 export const DEFAULT_REVIEW_EVIDENCE: ReviewEvidenceConfig = { projectInstructions: false };
 export interface ProjectInstructions { readonly source: "AGENTS.md" | "CLAUDE.md"; readonly content: string }
@@ -119,10 +120,12 @@ export function parseConfig(raw: unknown, source: string, baseDir = ".", scope: 
     return { ok: true, value: { projectInstructions: obj.projectInstructions === true } };
   }, DEFAULT_REVIEW_EVIDENCE);
   if (!evidence.ok) return evidence;
-  const ui = parseNested(raw.ui, source, "ui", ["status"], (obj) => {
+  const ui = parseNested<ConfigUi>(raw.ui, source, "ui", ["status", "placement"], (obj) => {
     if (obj.status !== undefined && typeof obj.status !== "boolean") return fail(`${source}: ui.status must be a boolean`);
-    return { ok: true, value: { status: obj.status !== false } };
-  }, { status: true });
+    if (obj.placement !== undefined && obj.placement !== "widget" && obj.placement !== "toolRow") return fail(`${source}: ui.placement must be widget or toolRow`);
+    const placement: UiPlacement = obj.placement === "toolRow" ? "toolRow" : "widget";
+    return { ok: true, value: { status: obj.status !== false, placement } };
+  }, { status: true, placement: "widget" });
   if (!ui.ok) return ui;
   return { ok: true, enabled: scope === "global" ? (raw.enabled as boolean | undefined ?? true) : true, reviewMode: scope === "global" ? (raw.reviewMode as ReviewMode | undefined ?? "manual") : "manual", rules, reviewer: reviewer.value, reviewEvidence: evidence.value, ui: ui.value };
 }
@@ -130,7 +133,7 @@ function readConfig(path: string, scope: "global" | "project"): ConfigResult {
   let text: string;
   try { text = readFileSync(path, "utf8"); } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { ok: true, enabled: true, reviewMode: "manual", rules: [], ui: { status: true }, reviewer: DEFAULT_REVIEWER, reviewEvidence: DEFAULT_REVIEW_EVIDENCE };
+    if (code === "ENOENT") return { ok: true, enabled: true, reviewMode: "manual", rules: [], ui: { status: true, placement: "widget" }, reviewer: DEFAULT_REVIEWER, reviewEvidence: DEFAULT_REVIEW_EVIDENCE };
     return { ok: false, error: `${path}: cannot read config (${code ?? "unknown error"})` };
   }
   let raw: unknown;

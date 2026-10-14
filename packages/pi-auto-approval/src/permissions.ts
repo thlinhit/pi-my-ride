@@ -1,12 +1,14 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, loadGlobalConfig, saveGlobalSettings } from "./config.ts";
-import type { PermissionSettings, SessionChoices } from "./config.ts";
+import type { ConfigUi, PermissionSettings, SessionChoices } from "./config.ts";
+import { footerText } from "./ui/footer.ts";
 
 const OPTIONS = ["Protection on", "Protection off", "Auto review", "Manual review", "Save settings", "Clear session choices / reload"];
 export interface PermissionsController {
   snapshot(): SessionChoices;
   menu(args: string, ctx: ExtensionCommandContext): Promise<void>;
   reset(ctx: ExtensionContext): void;
+  refreshFooter(ctx: ExtensionContext): void;
 }
 export function createPermissionsController(globalDir: string, cancelPending: () => void): PermissionsController {
   let choices: SessionChoices = {};
@@ -17,17 +19,26 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
     return saved.ok ? { enabled: choices.enabled ?? saved.enabled, reviewMode: choices.reviewMode ?? saved.reviewMode } : undefined;
   };
   const snapshot = (): SessionChoices => ({ ...choices });
+  const refreshFooter = (ctx: ExtensionContext): void => {
+    try {
+      if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
+      const saved = loadConfig(ctx.cwd, globalDir);
+      ctx.ui.setStatus("auto-approval", footerText(saved, choices));
+    } catch {}
+  };
   return {
+    refreshFooter,
+
     snapshot,
     async menu(args, ctx) {
-      if (args.trim()) { notify(ctx, "/permissions does not accept arguments", "warning"); return; }
-      if (!ctx.hasUI) { notify(ctx, "/permissions requires an interactive UI", "warning"); return; }
-      if (locked) { notify(ctx, "/permissions menu is already open", "warning"); return; }
+      if (args.trim()) { notify(ctx, "/permissions does not accept arguments", "warning"); refreshFooter(ctx); return; }
+      if (!ctx.hasUI) { notify(ctx, "/permissions requires an interactive UI", "warning"); refreshFooter(ctx); return; }
+      if (locked) { notify(ctx, "/permissions menu is already open", "warning"); refreshFooter(ctx); return; }
       locked = true;
       const openedAt = generation;
       try {
         const selected = await ctx.ui.select("Permissions", OPTIONS);
-        if (selected === undefined || openedAt !== generation) return;
+        if (selected === undefined || openedAt !== generation) { refreshFooter(ctx); return; }
         const saved = loadConfig(ctx.cwd, globalDir);
         const beforeChoices = choices;
         const before = loadSettings(ctx, saved);
@@ -62,7 +73,7 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
         const invalid = !saved.ok && !(choices.enabled === false);
         notify(ctx, `Protection ${effective.enabled ? "on" : "off"} · ${effective.reviewMode}${invalid ? " · invalid config still blocks Bash" : ""}`, invalid ? "error" : "info");
       } catch (err) { notify(ctx, `Could not open /permissions: ${(err as Error).message}`, "error"); }
-      finally { locked = false; }
+      finally { refreshFooter(ctx); locked = false; }
     },
     reset(ctx) {
       choices = {};
@@ -72,6 +83,7 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
         const result = loadConfig(ctx.cwd, globalDir);
         notify(ctx, result.ok ? `Protection ${result.enabled ? "on" : "off"} · ${result.reviewMode}` : `Saved config is invalid: ${result.error}`, result.ok ? "info" : "error");
       } catch {}
+      refreshFooter(ctx);
     },
   };
 }

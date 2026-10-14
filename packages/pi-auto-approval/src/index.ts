@@ -1,9 +1,12 @@
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ConfigResult, Rule, SessionChoices } from "./config.ts";
 import { loadConfig } from "./config.ts";
 import { isSuspiciousAllow, matchRule } from "./gates.ts";
 import { createPermissionsController } from "./permissions.ts";
+import { createReviewDisplay } from "./ui/display.ts";
+import type { ConfigUi } from "./config.ts";
+import type { ReviewState } from "./ui/status.ts";
 import type { ReviewContext, ReviewResult, Reviewer } from "./review/session.ts";
 import { createPiReviewer, createReviewerState } from "./review/session.ts";
 
@@ -17,25 +20,22 @@ export interface GateContext {
   readonly ui: { confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean>; notify(message: string, type?: "info" | "warning" | "error"): void };
 }
 export type ConfigLoader = (cwd: string) => ConfigResult;
-export type GateStatus = "reviewing" | "approved" | "blocked";
-export type StatusReporter = (state: GateStatus, label: string) => void;
+export interface GateReport {
+  readonly state: ReviewState;
+  readonly label: string;
+  readonly source?: string;
+  readonly reviewer?: string;
+  readonly detail?: string;
+  readonly ui: ConfigUi;
+}
+export type StatusReporter = (report: GateReport) => void;
 export interface GateDeps {
   readonly matcher?: (command: string, rules: readonly Rule[], projectTrusted: boolean) => Rule | undefined;
   readonly status?: StatusReporter;
+  readonly reviewer?: string;
   readonly review?: Reviewer;
 }
-export function createWidgetReporter(ui: { setWidget(key: string, content: string[] | undefined): void }, key: string): StatusReporter {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return (state, label) => {
-    if (timer !== undefined) clearTimeout(timer);
-    timer = undefined;
-    try { ui.setWidget(key, [`auto-approval: ${state} [${label}]`]); } catch {}
-    if (state !== "reviewing") {
-      timer = setTimeout(() => { try { ui.setWidget(key, undefined); } catch {} timer = undefined; }, 2000);
-      timer.unref?.();
-    }
-  };
-}
+export type GateStatus = ReviewState;
 export type GateDecision = { block: true; reason: string } | undefined;
 const CONFIRMATION_FAILED = "auto-approval: confirmation failed";
 const block = (reason: string): { block: true; reason: string } => ({ block: true, reason });
@@ -67,18 +67,20 @@ export async function handleToolCall(event: { toolName: string; input: unknown; 
   try { rule = (deps.matcher ?? matchRule)(command, config.rules, projectTrusted); } catch { return block("auto-approval: matcher error"); }
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   const label = rule?.label ?? "Unmatched Bash command";
-  const report = (state: GateStatus) => {
+  const reviewer = config.reviewer.model ? `${config.reviewer.model.provider}/${config.reviewer.model.id}` : deps.reviewer;
+  const report = (state: ReviewState, detail?: string) => {
     if (!ctx.hasUI || !config.ui.status || !deps.status || isAborted(ctx)) return;
-    try { deps.status(state, label); } catch {}
+    try { deps.status({ state, label, ...(rule?.source ? { source: rule.source } : {}), ...(state === "guardian-running" && reviewer ? { reviewer } : {}), ...(detail ? { detail } : {}), ui: config.ui }); } catch {}
   };
   const attribution = rule ? `(${rule.label}, ${rule.source})` : "";
   const confirm = async (reason: string, message?: string): Promise<GateDecision> => {
     if (!ctx.hasUI) return block(`${reason}${ignoredNote ? ` ${ignoredNote}` : ""}`);
     if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
-    report("reviewing");
+    report("approval-required");
+    if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
     try {
       const approved = await ctx.ui.confirm(`Approve command?${rule ? ` [${rule.label}]` : ""}`, `${reason}${message ? `\n${message}` : ""}\n\n${command}`, { signal: ctx.signal });
-      if (isAborted(ctx) || approved !== true) { report("blocked"); return block(`${reason}${isAborted(ctx) ? " (review cancelled)" : " (user declined)"}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+      if (isAborted(ctx) || approved !== true) { report("blocked", isAborted(ctx) ? "Cancelled" : undefined); return block(`${reason}${isAborted(ctx) ? " (review cancelled)" : " (user declined)"}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
       report("approved");
       return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
     } catch { report("blocked"); return block(`${reason} (confirmation failed)${ignoredNote ? ` ${ignoredNote}` : ""}`); }
@@ -93,36 +95,40 @@ export async function handleToolCall(event: { toolName: string; input: unknown; 
   }
   if (mode === "manual") return confirm("Unmatched Bash command requires confirmation");
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
-  report("reviewing");
+  report("guardian-running");
+  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   let result: ReviewResult;
   try { result = deps.review ? await deps.review({ command, reviewer: config.reviewer, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" }; }
   catch { result = { ok: false, error: "reviewer unavailable" }; }
-  if (isAborted(ctx)) { report("blocked"); return block(CONFIRMATION_FAILED); }
+  if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
   if (!result.ok) {
-    if (result.cancelled) { report("blocked"); return block(`Review cancelled${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+    if (result.cancelled) { report("blocked", "Cancelled"); return block(`Review cancelled${ignoredNote ? ` ${ignoredNote}` : ""}`); }
     return confirm(`Automatic review failed: ${result.error}`);
   }
   const { decision, reason } = result.verdict;
-  if (decision === "revise") { report("blocked"); return block(`Reviewer requested a revision: ${reason}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+  if (decision === "revise") { report("revision-requested"); return block(`Reviewer requested a revision: ${reason}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
   if (decision === "ask_user") return confirm(`Reviewer needs user approval: ${reason}`);
   report("approved");
   return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
 }
 
-export default function autoApproval(pi: ExtensionAPI): void {
+export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readonly string[]): void {
   const reviewerState = createReviewerState();
   const controllers = new Set<AbortController>();
   const cancelPending = () => { for (const controller of controllers) controller.abort(); };
   const permissions = createPermissionsController(getAgentDir(), cancelPending);
+  const display = createReviewDisplay(pi, VERSION, verifiedVersions);
   let approvalDialogOpened = false;
   let callId = 0;
-  pi.on("session_start", (_event, ctx) => permissions.reset(ctx));
   pi.registerCommand("permissions", { description: "Configure Bash protection and review mode", handler: (args, ctx) => permissions.menu(args, ctx) });
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return undefined;
     const controller = new AbortController();
     controllers.add(controller);
     const signal = AbortSignal.any([controller.signal, ...(ctx.signal ? [ctx.signal] : [])]);
+    const widgetKey = `auto-approval:${++callId}`;
+    const callToolId = event.toolCallId ?? widgetKey;
+    const displayGeneration = display.generation();
     const adapted: GateContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, signal, isProjectTrusted: () => ctx.isProjectTrusted(), ui: {
       confirm: async (title, message, opts) => {
         if (approvalDialogOpened) throw new Error("confirmation already in progress");
@@ -131,18 +137,29 @@ export default function autoApproval(pi: ExtensionAPI): void {
       },
       notify: (message, type) => ctx.ui.notify(message, type),
     } };
-    const status = createWidgetReporter(ctx.ui, `auto-approval:${++callId}`);
-    const pending = handleToolCall(event, adapted, (cwd) => loadConfig(cwd, getAgentDir()), {
-      review: createPiReviewer(ctx as unknown as ReviewContext, reviewerState),
-      status: (state, label) => status(state, label),
-    }, permissions.snapshot());
+    permissions.refreshFooter(ctx);
+    let lastReport: GateReport | undefined;
     let abortListener: (() => void) | undefined;
     const aborted = new Promise<GateDecision>((resolve) => {
-      abortListener = () => resolve(block(CONFIRMATION_FAILED));
+      abortListener = () => {
+        if (lastReport) display.show(ctx, lastReport.ui, { ...lastReport, state: "blocked", detail: "Cancelled", toolCallId: callToolId }, widgetKey, displayGeneration);
+        resolve(block(CONFIRMATION_FAILED));
+      };
       signal.addEventListener("abort", abortListener, { once: true });
       if (signal.aborted) abortListener();
     });
+    const pending = handleToolCall(event, adapted, (cwd) => loadConfig(cwd, getAgentDir()), {
+      reviewer: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+      review: createPiReviewer(ctx as unknown as ReviewContext, reviewerState),
+      status: (report) => {
+        lastReport = report;
+        display.show(ctx, report.ui, { ...report, toolCallId: callToolId }, widgetKey, displayGeneration);
+      },
+    }, permissions.snapshot());
     try { return await Promise.race([pending, aborted]); }
     finally { if (abortListener) signal.removeEventListener("abort", abortListener); controllers.delete(controller); void pending.catch(() => {}); }
   });
+  pi.on("tool_execution_end", (event) => { if (event.toolName === "bash") display.dropInvalidator(event.toolCallId); });
+  pi.on("session_start", (_event, ctx) => { cancelPending(); permissions.reset(ctx); display.reset(ctx); permissions.refreshFooter(ctx); });
+  pi.on("session_shutdown", (_event, ctx) => { cancelPending(); display.shutdown(ctx); });
 }
