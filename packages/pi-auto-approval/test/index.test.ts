@@ -5,10 +5,11 @@ import { join } from "node:path";
 import type { TestContext } from "node:test";
 import test, { afterEach, mock } from "node:test";
 import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
-import type { ConfigResult, ReviewerConfig, Rule } from "../src/config.ts";
-import { parseConfig } from "../src/config.ts";
-import { matchRule } from "../src/gates.ts";
-import type { ConfigLoader, GateContext, ReviewContext } from "../src/index.ts";
+import type { ConfigResult, PermissionRule, ReviewerConfig } from "../src/config.ts";
+import { parseConfig, SEED_CONFIG } from "../src/config.ts";
+import { parsePermissionRule } from "../src/rules.ts";
+import { BUDGET_EXCEEDED_ERROR } from "../src/review/protocol.ts";
+import type { ConfigLoader, GateContext, GateDeps, ReviewContext, ReviewInput } from "../src/index.ts";
 import { createPiReviewer, createReviewerState, handleToolCall } from "../src/index.ts";
 
 afterEach(() => mock.timers.reset());
@@ -22,14 +23,12 @@ import type {
 
 type ToolCallHandler = ExtensionHandler<ToolCallEvent, ToolCallEventResult>;
 
-const rule = (level: "deny" | "ask" | "allow" = "ask", scope: "global" | "project" = "global"): Rule => ({
-  pattern: /danger/i,
-  level,
-  label: "danger command",
-  source: `${scope}.json`,
-  scope,
-});
-const ruleSet = (level: "deny" | "ask" | "allow" = "ask"): Rule[] => [rule(level)];
+const rule = (level: "deny" | "ask" | "allow" = "ask", scope: "global" | "project" = "global"): PermissionRule => {
+  const parsed = parsePermissionRule("Bash(danger*)", level, `${scope}.json`, scope, "test rule");
+  if (!parsed.ok) throw new Error(parsed.error);
+  return { ...parsed.value, label: "danger command" };
+};
+const ruleSet = (level: "deny" | "ask" | "allow" = "ask"): PermissionRule[] => [rule(level)];
 const config = (rules = ruleSet(), reviewMode: "manual" | "auto" = "manual"): ConfigResult => ({
   ok: true,
   rules,
@@ -65,7 +64,7 @@ function context(overrides: Partial<GateContext> = {}) {
 }
 const event = (command: unknown = "dangerous") => ({ toolName: "bash", input: { command } });
 
-test("non-bash does not load config; unmatched bash confirms in manual mode", async () => {
+test("non-bash loads config and confirms an unmatched call in manual mode", async () => {
   let loads = 0;
   const statuses: string[] = [];
   const { ctx, calls } = context();
@@ -93,9 +92,99 @@ test("non-bash does not load config; unmatched bash confirms in manual mode", as
     ),
     undefined,
   );
-  assert.equal(loads, 1);
+  assert.equal(loads, 2);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(statuses, ["approval-required", "approved", "approval-required", "approved"]);
+});
+
+const parsedRule = (raw: string, level: "deny" | "ask" | "allow" = "deny"): PermissionRule => {
+  const parsed = parsePermissionRule(raw, level, "global.json", "global", "test rule");
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
+};
+const approving = (calls: { count: number }) => async (input: ReviewInput) => {
+  calls.count++;
+  return { ok: true as const, verdict: { decision: "approve" as const, reason: "ok" } };
+};
+
+test("every exposed tool is matched by the same permission rules", async () => {
+  const rules = [parsedRule("Read(./.env)"), parsedRule("Edit(./secrets/**)"), parsedRule("CronCreate")];
+  const { ctx, calls } = context();
+  const denied = async (toolName: string, input: unknown) => (await handleToolCall({ toolName, input }, ctx, () => config(rules), {}))?.reason;
+  assert.equal(await denied("read", { path: ".env" }), "Blocked by auto-approval (Read(./.env), global.json)");
+  assert.equal(await denied("write", { path: "secrets/key.pem", content: "x" }), "Blocked by auto-approval (Edit(./secrets/**), global.json)");
+  assert.equal(await denied("edit", { path: "secrets/key.pem", edits: [] }), "Blocked by auto-approval (Edit(./secrets/**), global.json)");
+  assert.equal(await denied("CronCreate", {}), "Blocked by auto-approval (CronCreate, global.json)");
+  assert.equal(calls.length, 0);
+});
+
+test("explicit file allow bypasses review without the bash compound check, and non-string paths never match", async () => {
+  const review = { count: 0 };
+  const { ctx, calls } = context();
+  const allowRules = [parsedRule("Read(./notes&;$(x).md)", "allow"), parsedRule("Read(./.env)", "allow")];
+  assert.equal(await handleToolCall({ toolName: "read", input: { path: "notes&;$(x).md" } }, ctx, () => config(allowRules, "auto"), { review: approving(review) }), undefined);
+  assert.equal(review.count, 0);
+  assert.equal(await handleToolCall({ toolName: "read", input: { path: 5 } }, ctx, () => config(allowRules, "auto"), { review: approving(review) }), undefined);
+  assert.equal(review.count, 1, "non-string path is unmatched and goes to review, never allow");
+  assert.equal(calls.length, 0);
+});
+
+test("unmatched non-bash review receives the tool identity and complete arguments", async () => {
+  const review = { count: 0 };
+  const received: ReviewInput[] = [];
+  const { ctx, calls } = context();
+  const args = { path: "notes.md", content: "z".repeat(3000) };
+  const deps = { review: async (input: ReviewInput) => { received.push(input); return approving(review)(input); } };
+  assert.equal(await handleToolCall({ toolName: "write", input: args }, ctx, () => config([], "auto"), deps), undefined);
+  assert.equal(received[0]?.tool, "write");
+  assert.deepEqual(received[0]?.arguments, args);
+  assert.equal(received[0]?.command, undefined);
+  assert.equal(calls.length, 0);
+});
+
+test("unmatched non-bash review outcomes route to confirmation or block; no UI blocks ask", async () => {
+  const input = { path: "notes.md", content: "ok" };
+  const outcomes: Array<{ name: string; result: unknown; prompts: number; reason?: string }> = [
+    { name: "failure", result: { ok: false, error: "reviewer unavailable" }, prompts: 1 },
+    { name: "ask_user", result: { ok: true, verdict: { decision: "ask_user", reason: "Check." } }, prompts: 1 },
+    { name: "budget", result: { ok: false, error: BUDGET_EXCEEDED_ERROR }, prompts: 1 },
+    { name: "revise", result: { ok: true, verdict: { decision: "revise", reason: "Narrow it." } }, prompts: 0, reason: "Reviewer requested a revision: Narrow it." },
+    { name: "cancelled", result: { ok: false, cancelled: true, error: "cancelled" }, prompts: 0, reason: "Review cancelled" },
+  ];
+  for (const outcome of outcomes) {
+    const { ctx, calls } = context();
+    const decision = await handleToolCall({ toolName: "write", input }, ctx, () => config([], "auto"), { review: async () => outcome.result as never });
+    assert.equal(calls.length, outcome.prompts, outcome.name);
+    if (outcome.reason) assert.equal(decision?.reason, outcome.reason, outcome.name);
+  }
+  const noUi = context({ hasUI: false });
+  const blocked = await handleToolCall({ toolName: "write", input }, noUi.ctx, () => config([], "auto"), { review: async () => ({ ok: true, verdict: { decision: "ask_user", reason: "Check." } }) as never });
+  assert.equal(blocked?.reason, "Reviewer needs user approval: Check.");
+  assert.equal(noUi.calls.length, 0);
+});
+
+test("non-bash prompt names the tool and shows its JSON input truncated at 2000 characters", async () => {
+  const content = "q".repeat(3000);
+  const json = JSON.stringify({ path: "notes.md", content });
+  const { ctx, calls } = context();
+  await handleToolCall({ toolName: "write", input: { path: "notes.md", content } }, ctx, () => config([], "manual"));
+  assert.equal(calls[0]?.[0], "Approve command?");
+  assert.equal(calls[0]?.[1], `Unmatched write call requires confirmation\n\nwrite ${json.slice(0, 2000)}...`);
+});
+
+test("invalid config blocks a non-bash tool before review or confirmation", async () => {
+  const { ctx, calls } = context();
+  const review = { count: 0 };
+  const decision = await handleToolCall({ toolName: "read", input: { path: "notes.md" } }, ctx, () => ({ ok: false, error: "bad file" }), { review: approving(review) });
+  assert.equal(decision?.reason, "auto-approval: invalid config - bad file. Fix it to run tools.");
+  assert.equal(review.count, 0);
+  assert.equal(calls.length, 0);
+});
+
+test("bash-only input and compound checks do not apply to other tools", async () => {
+  const { ctx, calls } = context();
+  assert.equal(await handleToolCall({ toolName: "custom", input: { command: 5 } }, ctx, () => config([], "manual")), undefined);
   assert.equal(calls.length, 1);
-  assert.deepEqual(statuses, ["approval-required", "approved"]);
 });
 
 test("invalid bash input and config failures block", async () => {
@@ -116,11 +205,11 @@ test("invalid bash input and config failures block", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("convention blocks with configured message", async () => {
+test("deny rule blocks with attribution", async () => {
   const { ctx, calls } = context();
   assert.equal(
-    (await handleToolCall(event(), ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }])))?.reason,
-    "Blocked by auto-approval (danger command, global.json): Use the approved workflow.",
+    (await handleToolCall(event(), ctx, () => config([rule("deny")])))?.reason,
+    "Blocked by auto-approval (danger command, global.json)",
   );
   assert.equal(calls.length, 0);
 });
@@ -288,11 +377,11 @@ test("untrusted project allow confirms; deny cannot bypass", async () => {
     undefined,
   );
   assert.equal(calls.length, 1);
-  const blocked = await handleToolCall(event(), ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }]), {
+  const blocked = await handleToolCall(event(), ctx, () => config([rule("deny")]), {
 
     status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
-  assert.equal(blocked?.reason, "Blocked by auto-approval (danger command, global.json): Use the approved workflow.");
+  assert.equal(blocked?.reason, "Blocked by auto-approval (danger command, global.json)");
   assert.deepEqual(statuses, ["approval-required", "approved", "blocked"]);
 });
 
@@ -320,11 +409,11 @@ test("status disabled hides reports without changing enforcement", async () => {
   assert.equal(trusted.calls.length, 0);
   assert.equal(statuses.length, 0);
 
-  const convention = await handleToolCall(event(), trusted.ctx, () => hiddenConfig([{ ...rule(), level: "deny", message: "Use the approved workflow." }]), {
+  const convention = await handleToolCall(event(), trusted.ctx, () => hiddenConfig([rule("deny")]), {
 
     status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
-  assert.equal(convention?.reason, "Blocked by auto-approval (danger command, global.json): Use the approved workflow.");
+  assert.equal(convention?.reason, "Blocked by auto-approval (danger command, global.json)");
   assert.equal(statuses.length, 0);
 });
 
@@ -354,8 +443,8 @@ test("status reporter failures do not change allow or block decisions", async ()
   const denied = context({ ui: { confirm: async () => false, notify: () => {} } });
   assert.match((await handleToolCall(event(), denied.ctx, loadConfig, { status: throwing }))!.reason, /user declined/);
   assert.equal(
-    (await handleToolCall(event(), context().ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }]), { status: throwing }))?.reason,
-    "Blocked by auto-approval (danger command, global.json): Use the approved workflow.",
+    (await handleToolCall(event(), context().ctx, () => config([rule("deny")]), { status: throwing }))?.reason,
+    "Blocked by auto-approval (danger command, global.json)",
   );
 });
 
@@ -456,6 +545,18 @@ test("factory registers tool, session reset and permissions command", async (t) 
   const { registrations, commands } = await factoryHarness(t, async () => true);
   assert.equal(registrations.length, 4);
   assert.ok(commands.permissions);
+});
+
+test("factory harnesses restore HOME before returning, even when several share one test", async (t) => {
+  const originalHome = process.env.HOME;
+  const first = await factoryHarness(t, async () => true);
+  assert.equal(process.env.HOME, originalHome);
+  const second = await factoryHarness(t, async () => true);
+  assert.equal(process.env.HOME, originalHome);
+  assert.notEqual(first.globalDir, second.globalDir);
+  assert.equal(await first.invoke(), undefined);
+  assert.equal(await second.invoke(), undefined);
+  assert.equal(process.env.HOME, originalHome);
 });
 
 test("factory ignores trusted-ops changes and always confirms ask rules", async (t) => {
@@ -560,12 +661,17 @@ async function factoryHarness(
     registerCommand: ((name: string, options: { handler: (args: string, ctx: any) => Promise<void> }) => { commands[name] = options; }) as ExtensionAPI["registerCommand"],
   } as ExtensionAPI;
   const cwd = mkdtempSync(join(tmpdir(), "auto-approval-"));
-  const globalDir = join(cwd, "global");
-  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = globalDir;
-  t.after(() => { if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgentDir; });
-  autoApproval(pi);
-  mkdirSync(globalDir);
+  const home = join(cwd, "home");
+  const globalDir = join(home, ".pi", "pi-auto-approval");
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    mkdirSync(globalDir, { recursive: true });
+    autoApproval(pi);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  }
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   mkdirSync(join(cwd, ".pi"));
   writeFileSync(
@@ -573,7 +679,7 @@ async function factoryHarness(
     JSON.stringify({
       enabled: true,
       reviewMode: guardian ? "auto" : "manual",
-      rules: guardian ? [] : [{ pattern: "danger", level: "ask", label: "danger" }],
+      permissions: guardian ? {} : { ask: ["Bash(danger*)"] },
       ui: { status: uiStatus, placement: "widget" },
     }),
   );
@@ -626,8 +732,44 @@ async function factoryHarness(
     });
   const menu = (selection: string | undefined) => commands.permissions!.handler("", { ...ctx, ui: { ...ctx.ui, select: async () => selection } });
   const reset = (reason: string) => registrations.find((registration) => registration.eventName === "session_start")!.callback({ reason }, ctx);
-  return { cwd, globalDir, ctx, registrations, commands, menu, reset, setWidget, invoke, prompts, streamOptions, snapshots };
+  const invokeTool = (toolName: string, input: unknown, toolCallId: string, confirmPrompt = confirm) =>
+    registrations.find((registration) => registration.eventName === "tool_call")!.callback({ type: "tool_call", toolName, toolCallId, input }, {
+      ...ctx,
+      ui: { ...ctx.ui, confirm: confirmPrompt },
+    });
+  return { cwd, globalDir, ctx, registrations, commands, menu, reset, setWidget, invoke, invokeTool, prompts, streamOptions, snapshots };
 }
+
+test("factory gates a non-bash call under the same single confirmation lock", async (t) => {
+  let release!: (approved: boolean) => void;
+  const prompts: unknown[][] = [];
+  const h = await factoryHarness(t, (...args: unknown[]) => {
+    prompts.push(args);
+    return new Promise<boolean>((resolve) => { release = resolve; });
+  });
+  const first = h.invokeTool("read", { path: "README.md" }, "read-1");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(await h.invokeTool("write", { path: "x.md", content: "" }, "write-2"), {
+    block: true,
+    reason: "Unmatched write call requires confirmation (confirmation failed)",
+  });
+  release(true);
+  assert.equal(await first, undefined);
+  assert.equal(prompts.length, 1);
+});
+
+test("factory reviews an unmatched non-bash call with full arguments and shows it in the widget", async (t) => {
+  const content = "z".repeat(3000);
+  const h = await factoryHarness(t, async () => true, { guardian: true });
+  assert.equal(await h.invokeTool("write", { path: "notes.md", content }, "write-review"), undefined);
+  assert.equal(h.prompts.length, 1);
+  assert.match(h.prompts[0]!, /"tool": "write"/);
+  assert.ok(h.prompts[0]!.includes(content), "reviewer receives the complete content, not the display excerpt");
+  const widgets = h.setWidget.mock.calls.map((call) => JSON.stringify(call.arguments));
+  assert.ok(widgets.length > 0);
+  assert.ok(widgets.some((text) => text.includes("Unmatched write call")), "non-bash status uses the widget fallback");
+});
 
 test("guardian ask_user without UI blocks; parent cancellation never prompts", async () => {
   const noUi = context({ hasUI: false });
@@ -704,8 +846,8 @@ test("guardian bypasses reviewer for trusted, convention, and unmatched routes",
     undefined,
   );
   assert.equal(
-    (await handleToolCall(event(), ctx, () => config([{ ...rule(), level: "deny", message: "Use the approved workflow." }], "auto"), deps))?.reason,
-    "Blocked by auto-approval (danger command, global.json): Use the approved workflow.",
+    (await handleToolCall(event(), ctx, () => config([rule("deny")], "auto"), deps))?.reason,
+    "Blocked by auto-approval (danger command, global.json)",
   );
   assert.equal(await handleToolCall(event("echo safe"), ctx, () => config([], "auto"), deps), undefined);
   assert.equal(reviews, 1, "unmatched auto command must be reviewed");
@@ -1565,13 +1707,13 @@ test("factory widget shows reviewing, then approved or blocked, and clears after
   const pending = approve.invoke();
   assert.deepEqual(
     approve.setWidget.mock.calls.map((call) => call.arguments),
-    [["auto-approval:1", ["auto-approval: reviewing [danger]"], { placement: "aboveEditor" }]],
+    [["auto-approval:1", ["auto-approval: reviewing [Bash(danger*)]"], { placement: "aboveEditor" }]],
   );
   finish(true);
   assert.equal(await pending, undefined);
   assert.deepEqual(approve.setWidget.mock.calls.at(-1)?.arguments, [
     "auto-approval:1",
-    ["auto-approval: approved [danger]"],
+    ["auto-approval: approved [Bash(danger*)]"],
     { placement: "aboveEditor" },
   ]);
   mock.timers.tick(1999);
@@ -1584,8 +1726,8 @@ test("factory widget shows reviewing, then approved or blocked, and clears after
   assert.deepEqual(
     deny.setWidget.mock.calls.map((call) => call.arguments),
     [
-      ["auto-approval:1", ["auto-approval: reviewing [danger]"], { placement: "aboveEditor" }],
-      ["auto-approval:1", ["auto-approval: blocked [danger]"], { placement: "aboveEditor" }],
+      ["auto-approval:1", ["auto-approval: reviewing [Bash(danger*)]"], { placement: "aboveEditor" }],
+      ["auto-approval:1", ["auto-approval: blocked [Bash(danger*)]"], { placement: "aboveEditor" }],
     ],
   );
   mock.timers.tick(2000);
@@ -1607,11 +1749,12 @@ test("ui.status false suppresses factory widget calls without changing enforceme
   assert.equal(declined.setWidget.mock.callCount() + approved.setWidget.mock.callCount(), 0);
 });
 
-test("shipped rules are empty", () => {
+test("shipped example is the exact starter config", () => {
   const raw = JSON.parse(readFileSync(new URL("../examples/auto-permissions.json", import.meta.url), "utf8"));
+  assert.deepEqual(raw, { permissions: SEED_CONFIG.permissions });
   const parsed = parseConfig(raw, "example");
   assert.equal(parsed.ok, true);
-  if (parsed.ok) assert.deepEqual(parsed.rules, []);
+  if (parsed.ok) assert.equal(parsed.rules.length, 16);
 });
 
 function deferred<T>() {
@@ -1639,9 +1782,9 @@ test("menu cancellation settles an abort-ignoring dialog and retains its lock un
     const h = await factoryHarness(t, async () => { opened.resolve(); return old.promise; });
     if (selection === "Clear session choices / reload") await h.menu("Auto review");
     if (selection === "Clear session choices / reload") {
-      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "manual", rules: [] }));
+      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "manual", permissions: {} }));
       await h.menu("Manual review");
-      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", rules: [] }));
+      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", permissions: {} }));
     }
     const pending = h.invoke();
     await opened.promise;
@@ -1655,7 +1798,7 @@ test("menu cancellation settles an abort-ignoring dialog and retains its lock un
     }
     let newDialog = false;
     // Ask still owns human approval even when mode switched to auto.
-    writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ rules: [{ pattern: "danger", level: "ask", label: "danger" }] }));
+    writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ permissions: { ask: ["Bash(danger*)"] } }));
     assert.match(((await h.invoke(async () => { newDialog = true; return true; })) as { reason: string }).reason, /confirmation failed/);
     assert.equal(newDialog, false, "unresolved old dialog must retain its lock");
     old.resolve(true);
@@ -1767,4 +1910,112 @@ test("off validation exception and cancelled reviewer routes fail closed", async
   assert.match((await handleToolCall(event(), ctx, () => ({ ok: false, error: "bad project" }), {}, { enabled: true }))!.reason, /bad project/);
   assert.notEqual(await handleToolCall(event(), ctx, () => config([], "auto"), { review: async () => ({ ok: false, error: "aborted", cancelled: true }) }), undefined);
   assert.equal(calls.length, 0);
+});
+
+const historyLog = () => {
+  const entries: unknown[] = [];
+  return { entries, history: (entry: unknown) => { entries.push(entry); return { ok: true as const }; } };
+};
+const approveReview = () => async () => ({ ok: true, verdict: { decision: "approve", reason: "Safe." } }) as never;
+const historyFields = (row: Record<string, unknown>) => ({ tool: row.tool, command: row.command, decision: row.decision });
+function historyRowsOf(cwd: string): Array<Record<string, unknown>> {
+  return readFileSync(join(cwd, ".pi", "pi-auto-approval", "history.jsonl"), "utf8").trimEnd().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+async function settle(ticks = 10): Promise<void> {
+  for (let tick = 0; tick < ticks; tick++) await Promise.resolve();
+}
+
+test("terminal history records allow, deny, and confirmation outcomes once with tool, command, and decision", async () => {
+  const allowed = historyLog();
+  assert.equal(await handleToolCall(event("danger now"), context().ctx, () => config(ruleSet("allow")), { history: allowed.history }), undefined);
+  const denied = historyLog();
+  assert.equal((await handleToolCall(event("danger now"), context().ctx, () => config(ruleSet("deny")), { history: denied.history }))?.block, true);
+  const accepted = historyLog();
+  assert.equal(await handleToolCall(event("danger now"), context({ ui: { confirm: async () => true, notify: () => {} } }).ctx, () => config(ruleSet("ask")), { history: accepted.history }), undefined);
+  const declined = historyLog();
+  assert.equal((await handleToolCall(event("danger now"), context({ ui: { confirm: async () => false, notify: () => {} } }).ctx, () => config(ruleSet("ask")), { history: declined.history }))?.block, true);
+  assert.deepEqual(allowed.entries, [{ tool: "bash", command: "danger now", decision: "approved" }]);
+  assert.deepEqual(denied.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
+  assert.deepEqual(accepted.entries, [{ tool: "bash", command: "danger now", decision: "approved" }]);
+  assert.deepEqual(declined.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
+});
+
+test("terminal history covers AI approve, revise, no-UI blocks, and failed confirmation", async () => {
+  const approved = historyLog();
+  assert.equal(await handleToolCall(event("ls"), context().ctx, () => config([], "auto"), { review: approveReview(), history: approved.history }), undefined);
+  const revised = historyLog();
+  assert.equal((await handleToolCall(event("ls"), context().ctx, () => config([], "auto"), { review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Narrow it." } }) as never, history: revised.history }))?.block, true);
+  const noUi = historyLog();
+  assert.equal((await handleToolCall(event("danger now"), context({ hasUI: false }).ctx, () => config(ruleSet("ask")), { history: noUi.history }))?.block, true);
+  const failed = historyLog();
+  assert.equal((await handleToolCall(event("danger now"), context({ ui: { confirm: async () => { throw new Error("dialog broke"); }, notify: () => {} } }).ctx, () => config(ruleSet("ask")), { history: failed.history }))?.block, true);
+  assert.deepEqual(approved.entries, [{ tool: "bash", command: "ls", decision: "approved" }]);
+  assert.deepEqual(revised.entries, [{ tool: "bash", command: "ls", decision: "blocked" }]);
+  assert.deepEqual(noUi.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
+  assert.deepEqual(failed.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
+});
+
+test("terminal history uses only path for file tools, command for powershell, and empty command otherwise", async () => {
+  const log = historyLog();
+  const options = { review: approveReview(), history: log.history };
+  await handleToolCall({ toolName: "write", input: { path: "out.txt", content: "SECRET-BODY" } }, context().ctx, () => config([], "auto"), options);
+  await handleToolCall({ toolName: "read", input: { path: "notes.txt" } }, context().ctx, () => config([], "auto"), options);
+  await handleToolCall({ toolName: "powershell", input: { command: "Write-Output hello" } }, context().ctx, () => config([], "auto"), options);
+  await handleToolCall({ toolName: "grep", input: { pattern: "x", path: "src" } }, context().ctx, () => config([], "auto"), options);
+  assert.deepEqual(log.entries, [
+    { tool: "write", command: "out.txt", decision: "approved" },
+    { tool: "read", command: "notes.txt", decision: "approved" },
+    { tool: "powershell", command: "Write-Output hello", decision: "approved" },
+    { tool: "grep", command: "", decision: "approved" },
+  ]);
+});
+
+test("protection off writes no history and recorder failures never change a decision", async () => {
+  const off = historyLog();
+  assert.equal(await handleToolCall(event("ls"), context().ctx, () => config([], "auto"), { history: off.history }, { enabled: false }), undefined);
+  assert.equal(await handleToolCall(event("ls"), context().ctx, () => ({ ...config([], "auto"), enabled: false }), { history: off.history }), undefined);
+  assert.deepEqual(off.entries, []);
+  const throwing = { history: () => { throw new Error("recorder down"); } };
+  assert.equal(await handleToolCall(event("danger now"), context().ctx, () => config(ruleSet("allow")), throwing), undefined);
+  assert.equal((await handleToolCall(event("danger now"), context().ctx, () => config(ruleSet("deny")), throwing))?.block, true);
+  const failed = { history: () => ({ ok: false as const, error: "History save failed" }) };
+  assert.equal(await handleToolCall(event("danger now"), context().ctx, () => config(ruleSet("allow")), failed), undefined);
+});
+
+test("handleToolCall warns exactly once for a returned or thrown history failure on approve and deny outcomes", async () => {
+  const returned: GateDeps = { history: () => ({ ok: false, error: "History save failed" }) };
+  const thrown: GateDeps = { history: () => { throw new Error("recorder down"); } };
+  const cases: Array<{ level: "allow" | "deny"; deps: GateDeps; approved: boolean; message: RegExp }> = [
+    { level: "allow", deps: returned, approved: true, message: /History save failed/ },
+    { level: "deny", deps: returned, approved: false, message: /History save failed/ },
+    { level: "allow", deps: thrown, approved: true, message: /recorder down/ },
+    { level: "deny", deps: thrown, approved: false, message: /recorder down/ },
+  ];
+  for (const { level, deps, approved, message } of cases) {
+    const warnings: string[] = [];
+    const { ctx } = context({ ui: { confirm: async () => true, notify: (text: string, type?: string) => { if (type === "warning") warnings.push(text); } } });
+    const decision = await handleToolCall(event("danger now"), ctx, () => config(ruleSet(level)), deps);
+    assert.equal(decision === undefined, approved, `${level} decision is unchanged`);
+    assert.equal(warnings.length, 1, `${level} warns exactly once`);
+    assert.match(warnings[0]!, message);
+  }
+});
+
+test("outer abort with pending confirmation records exactly one blocked entry, ignoring late approval", async (t) => {
+  const late = deferred<boolean>();
+  const harness = await factoryHarness(t, async () => true);
+  const controller = new AbortController();
+  const handler = harness.registrations.find((registration) => registration.eventName === "tool_call")!.callback;
+  const pending = handler(
+    { type: "tool_call", toolName: "bash", toolCallId: "pending-confirm", input: { command: "danger now" } },
+    { ...harness.ctx, signal: controller.signal, ui: { ...harness.ctx.ui, confirm: () => late.promise } },
+  ) as Promise<{ block?: boolean } | undefined>;
+  await settle();
+  controller.abort();
+  assert.equal((await pending)?.block, true);
+  late.resolve(true);
+  await settle();
+  const rows = historyRowsOf(harness.cwd);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(historyFields(rows[0]!), { tool: "bash", command: "danger now", decision: "blocked" });
 });

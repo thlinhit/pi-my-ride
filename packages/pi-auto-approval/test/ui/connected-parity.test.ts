@@ -31,48 +31,49 @@ type Scenario = {
 };
 
 const scenarios: Scenario[] = [
-  { name: "deny", config: { rules: [{ pattern: "danger", level: "deny", label: "danger" }] }, expectedBlock: /Blocked by auto-approval/, expectedStatuses: ["blocked"], expectedConfirmations: 0, expectedProviderCalls: 0 },
-  { name: "ordinary allow", config: { rules: [{ pattern: "danger", level: "allow", label: "danger" }] }, command: "danger", expectedStatuses: ["approved"], expectedConfirmations: 0, expectedProviderCalls: 0 },
-  { name: "suspicious allow", config: { rules: [{ pattern: "danger", level: "allow", label: "danger" }] }, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "manual unmatched approval", config: { rules: [] }, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "manual unmatched denial", config: { rules: [] }, confirm: "no", expectedBlock: /user declined/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "manual unmatched confirmation error", config: { rules: [] }, confirm: "error", expectedBlock: /confirmation failed/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "ask confirmation approved", config: { rules: [{ pattern: "danger", level: "ask", label: "danger" }] }, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "ask confirmation denied", config: { rules: [{ pattern: "danger", level: "ask", label: "danger" }] }, confirm: "no", expectedBlock: /user declined/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "ask confirmation error", config: { rules: [{ pattern: "danger", level: "ask", label: "danger" }] }, confirm: "error", expectedBlock: /confirmation failed/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "untrusted project allow", config: { rules: [], projectRules: [{ pattern: "danger", level: "allow", label: "project allow" }] }, trusted: false, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "review approve", config: { reviewMode: "auto", rules: [] }, reply: '{"decision":"approve","reason":"safe"}', expectedStatuses: ["guardian-running", "approved"], expectedConfirmations: 0, expectedProviderCalls: 1 },
-  { name: "review revise", config: { reviewMode: "auto", rules: [] }, reply: '{"decision":"revise","reason":"change target"}', expectedBlock: /Reviewer requested a revision/, expectedStatuses: ["guardian-running", "revision-requested"], expectedConfirmations: 0, expectedProviderCalls: 1 },
-  { name: "review ask_user", config: { reviewMode: "auto", rules: [] }, reply: '{"decision":"ask_user","reason":"confirm target"}', expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
-  { name: "review malformed response fallback", config: { reviewMode: "auto", rules: [] }, reply: "not JSON", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
-  { name: "review provider failure fallback", config: { reviewMode: "auto", rules: [] }, reply: "provider-error", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
+  { name: "deny", config: { permissions: { deny: ["Bash(danger)"] } }, expectedBlock: /Blocked by auto-approval/, expectedStatuses: ["blocked"], expectedConfirmations: 0, expectedProviderCalls: 0 },
+  { name: "ordinary allow", config: { permissions: { allow: ["Bash(danger)"] } }, command: "danger", expectedStatuses: ["approved"], expectedConfirmations: 0, expectedProviderCalls: 0 },
+  { name: "suspicious allow", config: { permissions: { allow: ["Bash(danger; echo harmless)"] } }, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "manual unmatched approval", config: {}, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "manual unmatched denial", config: {}, confirm: "no", expectedBlock: /user declined/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "manual unmatched confirmation error", config: {}, confirm: "error", expectedBlock: /confirmation failed/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "ask confirmation approved", config: { permissions: { ask: ["Bash(danger)"] } }, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "ask confirmation denied", config: { permissions: { ask: ["Bash(danger)"] } }, confirm: "no", expectedBlock: /user declined/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "ask confirmation error", config: { permissions: { ask: ["Bash(danger)"] } }, confirm: "error", expectedBlock: /confirmation failed/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "untrusted project allow", config: { projectPermissions: { allow: ["Bash(danger; echo harmless)"] } }, trusted: false, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "review approve", config: { reviewMode: "auto" }, reply: '{"decision":"approve","reason":"safe"}', expectedStatuses: ["guardian-running", "approved"], expectedConfirmations: 0, expectedProviderCalls: 1 },
+  { name: "review revise", config: { reviewMode: "auto" }, reply: '{"decision":"revise","reason":"change target"}', expectedBlock: /Reviewer requested a revision/, expectedStatuses: ["guardian-running", "revision-requested"], expectedConfirmations: 0, expectedProviderCalls: 1 },
+  { name: "review ask_user", config: { reviewMode: "auto" }, reply: '{"decision":"ask_user","reason":"confirm target"}', expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
+  { name: "review malformed response fallback", config: { reviewMode: "auto" }, reply: "not JSON", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
+  { name: "review provider failure fallback", config: { reviewMode: "auto" }, reply: "provider-error", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
   { name: "invalid config", config: { invalid: true }, expectedBlock: /invalid config/, expectedStatuses: [], expectedConfirmations: 0, expectedProviderCalls: 0 },
-  { name: "explicit off", config: { enabled: false, rules: [] }, expectedStatuses: [], expectedConfirmations: 0, expectedProviderCalls: 0 },
+  { name: "explicit off", config: { enabled: false }, expectedStatuses: [], expectedConfirmations: 0, expectedProviderCalls: 0 },
 ];
 
 async function runFactoryScenario(scenario: Scenario, placement: "widget" | "toolRow") {
   const root = mkdtempSync(join(tmpdir(), "auto-approval-connected-parity-"));
-  const agentDir = join(root, "global");
-  mkdirSync(agentDir);
-  const configuredRules = Array.isArray(scenario.config.rules) ? scenario.config.rules : [];
+  const home = join(root, "home");
+  const globalDir = join(home, ".pi", "pi-auto-approval");
+  mkdirSync(globalDir, { recursive: true });
+  const configured = (scenario.config.permissions ?? {}) as { allow?: string[]; ask?: string[]; deny?: string[] };
   const global = {
     enabled: true,
     reviewMode: "manual",
-    rules: [{ pattern: "^seed$", level: "allow", label: "seed" }, ...configuredRules],
+    permissions: { allow: ["Bash(seed)", ...(configured.allow ?? [])], ask: configured.ask ?? [], deny: configured.deny ?? [] },
     ui: { status: true, placement },
     ...(scenario.config.reviewMode ? { reviewMode: scenario.config.reviewMode } : {}),
     ...(scenario.config.enabled === false ? { enabled: false } : {}),
   };
-  if (scenario.config.invalid) writeFileSync(join(agentDir, "auto-permissions.json"), "{");
+  if (scenario.config.invalid) writeFileSync(join(globalDir, "auto-permissions.json"), "{");
   else {
-    writeFileSync(join(agentDir, "auto-permissions.json"), JSON.stringify(global));
-    if (scenario.config.projectRules) {
-      mkdirSync(join(root, ".pi"));
-      writeFileSync(join(root, ".pi", "auto-permissions.json"), JSON.stringify({ rules: scenario.config.projectRules }));
+    writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify(global));
+    if (scenario.config.projectPermissions) {
+      mkdirSync(join(root, ".pi", "pi-auto-approval"), { recursive: true });
+      writeFileSync(join(root, ".pi", "pi-auto-approval", "auto-permissions.json"), JSON.stringify({ permissions: scenario.config.projectPermissions }));
     }
   }
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const previous = process.env.HOME;
+  process.env.HOME = home;
   try {
     const handlers = new Map<string, (...args: any[]) => unknown>();
     let resolver: ToolRendererResolver | undefined;
@@ -203,8 +204,8 @@ async function runFactoryScenario(scenario: Scenario, placement: "widget" | "too
       visible,
     };
   } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previous;
+    if (previous === undefined) delete process.env.HOME;
+    else process.env.HOME = previous;
     rmSync(root, { recursive: true, force: true });
   }
 }
@@ -224,18 +225,19 @@ async function createLifecycleHarness(
   } = {},
 ) {
   const root = mkdtempSync(join(tmpdir(), "auto-approval-connected-lifecycle-"));
-  const agentDir = join(root, "global");
-  mkdirSync(agentDir);
-  writeFileSync(join(agentDir, "auto-permissions.json"), JSON.stringify({
+  const home = join(root, "home");
+  const globalDir = join(home, ".pi", "pi-auto-approval");
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
     reviewMode: "auto",
-    rules: [{ pattern: "^seed$", level: "allow", label: "seed" }],
+    permissions: { allow: ["Bash(seed)"] },
     ui: { status: true, placement },
     reviewer: options.reviewer,
     reviewEvidence: options.reviewEvidence,
   }));
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const previous = process.env.HOME;
+  process.env.HOME = home;
   const handlers = new Map<string, (...args: any[]) => unknown>();
   let resolver: ToolRendererResolver | undefined;
   const widgets: unknown[][] = [];
@@ -313,8 +315,8 @@ async function createLifecycleHarness(
     rows,
     cancel: () => handlers.get("session_start")?.({}, ctx),
     close: () => {
-      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
-      else process.env.PI_CODING_AGENT_DIR = previous;
+      if (previous === undefined) delete process.env.HOME;
+      else process.env.HOME = previous;
       rmSync(root, { recursive: true, force: true });
     },
   };

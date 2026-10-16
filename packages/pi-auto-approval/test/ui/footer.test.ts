@@ -39,7 +39,7 @@ test("suppresses valid status when ui status is disabled", () => {
 
 test("invalid config shows error unless session protection is explicitly off", () => {
   const invalid: ConfigResult = { ok: false, error: "bad config" };
-  assert.equal(footerText(invalid, choices()), "⚠ protection config error · Bash blocked");
+  assert.equal(footerText(invalid, choices()), "⚠ protection config error · tools blocked");
   assert.equal(footerText(invalid, choices({ enabled: false })), "🛡️ guardian: off");
   assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "auto" })), "🛡️ guardian: off");
   assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "manual" })), "🛡️ guardian: off");

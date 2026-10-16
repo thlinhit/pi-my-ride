@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ConfigResult, Rule } from "../src/config.ts";
+import type { ConfigResult } from "../src/config.ts";
 import { handleToolCall } from "../src/index.ts";
 import type { ReviewResult } from "../src/index.ts";
+import { parsePermissionRule } from "../src/rules.ts";
+import type { PermissionRule } from "../src/rules.ts";
 
 const bashEvent = { toolName: "bash", toolCallId: "parity-call", input: { command: "danger; echo harmless" } };
-const baseRule = (level: Rule["level"], scope: Rule["scope"] = "global"): Rule => ({
-  pattern: /danger/i,
-  level,
-  label: `${scope} ${level}`,
-  source: `${scope}.json`,
-  scope,
-});
+function baseRule(level: PermissionRule["level"], scope: PermissionRule["scope"] = "global", specifier = "danger"): PermissionRule {
+  const parsed = parsePermissionRule(`Bash(${specifier})`, level, `${scope}.json`, scope, "fixture");
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.value;
+}
 
 interface RunResult {
   decision: unknown;
@@ -21,7 +21,7 @@ interface RunResult {
 }
 
 async function runRoute(placement: "widget" | "toolRow", options: {
-  rules?: Rule[];
+  rules?: PermissionRule[];
   mode?: "manual" | "auto";
   enabled?: boolean;
   trusted?: boolean;
@@ -69,8 +69,8 @@ test("direct gate calls preserve authorization decisions and inputs across place
     { name: "ask rule", options: { rules: [baseRule("ask")] }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
     { name: "manual confirmation denied", options: { rules: [baseRule("ask")], confirm: async () => false }, expectedReason: /user declined/i, expectedReports: ["approval-required", "blocked"], confirmations: 1, reviews: 0 },
     { name: "ordinary allow", options: { command: "danger", rules: [baseRule("allow")] }, expectedReports: ["approved"], confirmations: 0, reviews: 0 },
-    { name: "suspicious allow", options: { rules: [baseRule("allow")] }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
-    { name: "untrusted project allow", options: { rules: [baseRule("allow", "project")], trusted: false }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
+    { name: "suspicious allow", options: { rules: [baseRule("allow", "global", "danger; echo harmless")] }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
+    { name: "untrusted project allow", options: { rules: [baseRule("allow", "project", "danger; echo harmless")], trusted: false }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
     { name: "review approve", options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "approve", reason: "safe" } }) }, expectedReports: ["guardian-running", "approved"], confirmations: 0, reviews: 1 },
     { name: "review revise", options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "revise", reason: "change target" } }) }, expectedReason: /Reviewer requested a revision/, expectedReports: ["guardian-running", "revision-requested"], confirmations: 0, reviews: 1 },
     { name: "aborted call", options: { aborted: true }, expectedReason: /confirmation failed/, expectedReports: [], confirmations: 0, reviews: 0 },

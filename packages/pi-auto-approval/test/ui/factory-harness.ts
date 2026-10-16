@@ -27,7 +27,7 @@ export function reviewerReply(decision: "approve" | "revise", reason = REVIEW_RE
 export interface HarnessOptions {
   readonly reviewMode: "manual" | "auto";
   readonly placement?: "widget" | "toolRow";
-  readonly rules?: readonly Record<string, unknown>[];
+  readonly permissions?: { readonly allow?: readonly string[]; readonly ask?: readonly string[]; readonly deny?: readonly string[] };
   readonly confirm?: (...args: unknown[]) => Promise<boolean>;
   readonly provider?: (call: number) => Promise<unknown>;
 }
@@ -39,6 +39,7 @@ export interface Harness {
   readonly providerRequests: unknown[];
   readonly controller: AbortController;
   call(command: string, toolCallId: string): Promise<unknown>;
+  callTool(toolName: string, input: Record<string, unknown>, toolCallId: string): Promise<unknown>;
   row(command: string, toolCallId: string): { row: ToolExecutionComponent; frames: string[]; renderers: ToolRenderers };
   nativeRow(command: string, toolCallId: string): ToolExecutionComponent;
   sessionStart(): Promise<unknown> | unknown;
@@ -49,19 +50,24 @@ const PADDING = /^\u001b\[[0-9;]*m *\u001b\[[0-9;]*m$/;
 
 export async function createHarness(t: TestContext, options: HarnessOptions): Promise<Harness> {
   const root = mkdtempSync(join(tmpdir(), "auto-approval-factory-"));
-  const agentDir = join(root, "global");
-  mkdirSync(agentDir);
-  writeFileSync(join(agentDir, "auto-permissions.json"), JSON.stringify({
+  const home = join(root, "home");
+  const globalDir = join(home, ".pi", "pi-auto-approval");
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
     reviewMode: options.reviewMode,
-    rules: [{ pattern: "^seed$", level: "allow", label: "seed" }, ...(options.rules ?? [])],
+    permissions: {
+      allow: ["Bash(seed)", ...(options.permissions?.allow ?? [])],
+      ask: options.permissions?.ask ?? [],
+      deny: options.permissions?.deny ?? [],
+    },
     ui: { status: true, placement: options.placement ?? "toolRow" },
   }));
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDir;
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
   t.after(() => {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previous;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -127,6 +133,7 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
     providerRequests,
     controller,
     call: (command, toolCallId) => toolCall({ type: "tool_call", toolName: "bash", toolCallId, input: { command } }, ctx),
+    callTool: (toolName, input, toolCallId) => toolCall({ type: "tool_call", toolName, toolCallId, input }, ctx),
     row(command, toolCallId) {
       const frames: string[] = [];
       const renderers = resolve(toolCallId);

@@ -10,7 +10,9 @@ export type ReviewResult =
   | { readonly ok: true; readonly verdict: Verdict }
   | { readonly ok: false; readonly error: string; readonly cancelled?: true };
 export interface ReviewInput {
-  readonly command: string;
+  readonly command?: string;
+  readonly tool?: string;
+  readonly arguments?: unknown;
   readonly reviewer: ReviewerConfig;
   readonly reviewEvidence: ReviewEvidenceConfig;
   readonly signal: AbortSignal | undefined;
@@ -96,7 +98,9 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
       discard();
       base = undefined;
     }
-    const request: ReviewRequest = { tool: "bash", command: input.command, cwd: ctx.cwd, gate: "Unmatched Bash command", group: null };
+    const tool = input.tool ?? "bash";
+    const gate = tool === "bash" ? "Unmatched Bash command" : `Unmatched ${tool} tool call`;
+    const request: ReviewRequest = { tool, command: input.command, arguments: input.arguments, cwd: ctx.cwd, gate, group: null };
     const makeUser = (selected: readonly EvidenceRecord[], mode: "full" | "delta") => ({
       role: "user" as const,
       content: [{ type: "text" as const, text: buildReviewPrompt(selected, request, mode) }],

@@ -37,12 +37,26 @@ test("invalid saved config permits explicit off, but reports invalid state on en
   try {
     let pending = h.controller.menu("", h.ctx); await Promise.resolve(); await Promise.resolve(); h.select("Protection off"); await pending;
     assert.equal(h.controller.snapshot().enabled, false);
-    assert.doesNotMatch(h.messages.at(-1)!, /still blocks Bash/);
+    assert.doesNotMatch(h.messages.at(-1)!, /still blocks tools/);
     pending = h.controller.menu("", h.ctx); await Promise.resolve(); await Promise.resolve(); h.select("Protection on"); await pending;
-    assert.match(h.messages.at(-1)!, /invalid config still blocks Bash/);
+    assert.match(h.messages.at(-1)!, /invalid config still blocks tools/);
     pending = h.controller.menu("", h.ctx); await Promise.resolve(); await Promise.resolve(); h.select("Save settings"); await pending;
     assert.match(h.messages.at(-1)!, /Could not save settings/);
     assert.equal(readFileSync(join(h.globalDir, "auto-permissions.json"), "utf8"), "{");
+  } finally { rmSync(h.root, { recursive: true, force: true }); }
+});
+
+test("save settings reports that tools remain blocked by an invalid project config", async () => {
+  const h = harness();
+  try {
+    mkdirSync(h.globalDir, { recursive: true });
+    writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ permissions: {}, reviewMode: "manual" }));
+    mkdirSync(join(h.cwd, ".pi", "pi-auto-approval"), { recursive: true });
+    writeFileSync(join(h.cwd, ".pi", "pi-auto-approval", "auto-permissions.json"), "{");
+    const pending = h.controller.menu("", h.ctx);
+    await Promise.resolve(); await Promise.resolve();
+    h.select("Save settings"); await pending;
+    assert.match(h.messages.at(-1)!, /^Tools remain blocked by config: /);
   } finally { rmSync(h.root, { recursive: true, force: true }); }
 });
 
@@ -82,7 +96,7 @@ function pickerHarness(models: { provider: string; id: string }[] = [], availabl
   const globalDir = join(root, "global");
   mkdirSync(globalDir);
   const path = join(globalDir, "auto-permissions.json");
-  writeFileSync(path, JSON.stringify({ rules: [], reviewer: { provider: "old", model: "old-model" } }));
+  writeFileSync(path, JSON.stringify({ permissions: {}, reviewer: { provider: "old", model: "old-model" } }));
   const registry = { getAll: () => models, getAvailable: () => available };
   const selects: PickerRequest[] = [];
   const messages: string[] = [];
@@ -284,7 +298,7 @@ test("partial reviewer save failure reports the retained prior selection", async
 test("Use active model is the first reviewer option and clearing keeps other reviewer settings without cancelling", async () => {
   const h = pickerHarness([{ provider: "p", id: "m" }]);
   try {
-    writeFileSync(h.path, JSON.stringify({ rules: [], reviewer: { provider: "p", model: "m", timeoutMs: 5000 } }));
+    writeFileSync(h.path, JSON.stringify({ permissions: {}, reviewer: { provider: "p", model: "m", timeoutMs: 5000 } }));
     await seedSessionChoices(h);
     const choices = h.controller.snapshot();
     const cancels = h.cancels();
@@ -295,7 +309,7 @@ test("Use active model is the first reviewer option and clearing keeps other rev
     assert.deepEqual(picker.options, ["Use active model", "1. p/m"]);
     assert.equal(picker.title, "Reviewer model (current: p/m)");
     picker.resolve("Use active model"); await pending;
-    assert.deepEqual(JSON.parse(readFileSync(h.path, "utf8")), { rules: [], reviewer: { timeoutMs: 5000 } });
+    assert.deepEqual(JSON.parse(readFileSync(h.path, "utf8")), { permissions: {}, reviewer: { timeoutMs: 5000 } });
     assert.equal(h.cancels(), cancels);
     assert.deepEqual(h.controller.snapshot(), choices);
     assert.deepEqual(choices, { enabled: false, reviewMode: "manual" });
@@ -303,7 +317,7 @@ test("Use active model is the first reviewer option and clearing keeps other rev
   } finally { h.close(); }
   const empty = pickerHarness();
   try {
-    writeFileSync(empty.path, JSON.stringify({ rules: [] }));
+    writeFileSync(empty.path, JSON.stringify({ permissions: {} }));
     await seedSessionChoices(empty);
     const choices = empty.controller.snapshot();
     const cancels = empty.cancels();

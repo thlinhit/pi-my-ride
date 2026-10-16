@@ -110,16 +110,23 @@ function exerciseResult(component: ToolExecutionComponent, isError = false): voi
 test("actual factory keeps unverified row placement on widget fallback", async (t: TestContext) => {
   const root = mkdtempSync(join(tmpdir(), "auto-approval-renderer-"));
   const agentDir = join(root, "global");
+  const home = join(root, "home");
+  const globalDir = join(home, ".pi", "pi-auto-approval");
   mkdirSync(agentDir);
-  writeFileSync(join(agentDir, "auto-permissions.json"), JSON.stringify({
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
     reviewMode: "manual",
-    rules: [],
+    permissions: {},
     ui: { status: true, placement: "toolRow" },
   }));
+  const previousHome = process.env.HOME;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = home;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(root, { recursive: true, force: true });
@@ -366,19 +373,23 @@ test("supports partial arguments, terminal status, long output, errors and durat
 test("actual ready row stays cancelled across late confirmation and session reset/shutdown", async (t: TestContext) => {
   const root = mkdtempSync(join(tmpdir(), "auto-approval-late-row-"));
   const agentDir = join(root, "global");
+  const home = join(root, "home");
+  const globalDir = join(home, ".pi", "pi-auto-approval");
   mkdirSync(agentDir);
-  writeFileSync(join(agentDir, "auto-permissions.json"), JSON.stringify({
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
     reviewMode: "manual",
-    rules: [
-      { pattern: "seed", level: "allow", label: "seed" },
-      { pattern: "danger", level: "ask", label: "danger" },
-    ],
+    permissions: { allow: ["Bash(seed)"], ask: ["Bash(danger)"] },
     ui: { status: true, placement: "toolRow" },
   }));
+  const previousHome = process.env.HOME;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = home;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(root, { recursive: true, force: true });
@@ -453,16 +464,23 @@ test("actual ready row stays cancelled across late confirmation and session rese
 test("session reset redraws an ended native row without rebinding it", async (t: TestContext) => {
   const root = mkdtempSync(join(tmpdir(), "auto-approval-ended-row-"));
   const agentDir = join(root, "global");
+  const home = join(root, "home");
+  const globalDir = join(home, ".pi", "pi-auto-approval");
   mkdirSync(agentDir);
-  writeFileSync(join(agentDir, "auto-permissions.json"), JSON.stringify({
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
     reviewMode: "manual",
-    rules: [{ pattern: "safe", level: "allow", label: "safe" }],
+    permissions: { allow: ["Bash(safe)"] },
     ui: { status: true, placement: "toolRow" },
   }));
+  const previousHome = process.env.HOME;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = home;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(root, { recursive: true, force: true });
@@ -509,16 +527,23 @@ test("session reset redraws an ended native row without rebinding it", async (t:
 test("actual extension factory routes a ready native row through Pi's resolver chain", async (t: TestContext) => {
   const root = mkdtempSync(join(tmpdir(), "auto-approval-connected-row-"));
   const agentDir = join(root, "global");
+  const home = join(root, "home");
+  const globalDir = join(home, ".pi", "pi-auto-approval");
   mkdirSync(agentDir);
-  writeFileSync(join(agentDir, "auto-permissions.json"), JSON.stringify({
+  mkdirSync(globalDir, { recursive: true });
+  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
     reviewMode: "manual",
-    rules: [],
+    permissions: {},
     ui: { status: true, placement: "toolRow" },
   }));
+  const previousHome = process.env.HOME;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.HOME = home;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     rmSync(root, { recursive: true, force: true });

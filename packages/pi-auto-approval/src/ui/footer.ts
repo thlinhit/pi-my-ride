@@ -3,7 +3,7 @@ import type { ConfigResult, SessionChoices } from "../config.ts";
 export function footerText(config: ConfigResult, choices: SessionChoices): string | undefined {
   if (!config.ok) {
     if (choices.enabled === false) return "🛡️ guardian: off";
-    return "⚠ protection config error · Bash blocked";
+    return "⚠ protection config error · tools blocked";
   }
 
   if (!config.ui.status) return undefined;

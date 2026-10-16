@@ -86,7 +86,7 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
           const result = saveGlobalSettings(globalDir, settings);
           notify(ctx, result.ok ? `Saved settings to ${result.path}` : `Could not save settings to ${result.path}: ${result.error}`, result.ok ? "info" : "error");
           const combined = loadConfig(ctx.cwd, globalDir);
-          if (!combined.ok) notify(ctx, choices.enabled === false ? `Protection is explicitly off; config remains invalid: ${combined.error}` : `Bash remains blocked by config: ${combined.error}`, "error");
+          if (!combined.ok) notify(ctx, choices.enabled === false ? `Protection is explicitly off; config remains invalid: ${combined.error}` : `Tools remain blocked by config: ${combined.error}`, "error");
           return;
         } else return;
         const after = loadSettings(ctx, saved);
@@ -95,7 +95,7 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
         else if (!before && changed) cancelPending();
         const effective = after ?? { enabled: choices.enabled ?? (saved.ok ? saved.enabled : true), reviewMode: choices.reviewMode ?? (saved.ok ? saved.reviewMode : "manual") };
         const invalid = !saved.ok && !(choices.enabled === false);
-        notify(ctx, `Protection ${effective.enabled ? "on" : "off"} · ${effective.reviewMode}${invalid ? " · invalid config still blocks Bash" : ""}`, invalid ? "error" : "info");
+        notify(ctx, `Protection ${effective.enabled ? "on" : "off"} · ${effective.reviewMode}${invalid ? " · invalid config still blocks tools" : ""}`, invalid ? "error" : "info");
       } catch (err) { notify(ctx, `Could not open /permissions: ${(err as Error).message}`, "error"); }
       finally { refreshFooter(ctx); locked = false; }
     },

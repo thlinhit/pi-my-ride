@@ -1,17 +1,13 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync, chmodSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { parsePermissionRule } from "./rules.ts";
+import type { PermissionRule } from "./rules.ts";
 
 export type RuleLevel = "deny" | "ask" | "allow";
 export type ReviewMode = "manual" | "auto";
-export interface Rule {
-  readonly pattern: RegExp;
-  readonly level: RuleLevel;
-  readonly label: string;
-  readonly message?: string;
-  readonly source: string;
-  readonly scope: "global" | "project";
-}
+export type { PermissionRule } from "./rules.ts";
 export interface PermissionSettings { readonly enabled: boolean; readonly reviewMode: ReviewMode }
 export interface SessionChoices { readonly enabled?: boolean; readonly reviewMode?: ReviewMode }
 export type UiPlacement = "widget" | "toolRow";
@@ -33,10 +29,13 @@ export interface ReviewerConfig {
 }
 export const DEFAULT_REVIEWER: ReviewerConfig = { reasoningEffort: DEFAULT_REASONING_EFFORT, timeoutMs: REVIEW_TIMEOUT_DEFAULT_MS };
 export type ConfigResult =
-  | ({ readonly ok: true; readonly rules: readonly Rule[]; readonly ui: ConfigUi; readonly reviewer: ReviewerConfig; readonly reviewEvidence: ReviewEvidenceConfig } & PermissionSettings)
+  | ({ readonly ok: true; readonly rules: readonly PermissionRule[]; readonly ui: ConfigUi; readonly reviewer: ReviewerConfig; readonly reviewEvidence: ReviewEvidenceConfig } & PermissionSettings)
   | { readonly ok: false; readonly error: string };
 export const CONFIG_FILENAME = "auto-permissions.json";
-const ALLOWED_FLAGS = "dimsuv";
+export const CONFIG_DIRNAME = "pi-auto-approval";
+export function globalConfigDir(home = homedir()): string { return join(home, ".pi", CONFIG_DIRNAME); }
+export function projectConfigPath(cwd: string): string { return join(cwd, ".pi", CONFIG_DIRNAME, CONFIG_FILENAME); }
+export const SEED_CONFIG = { permissions: { allow: ["Bash(git status)", "Bash(git diff)", "Bash(git diff --stat)", "Bash(git log -5 --oneline)"], ask: ["Bash(git push *)", "Bash(git reset *)", "Bash(git clean *)", "Bash(rm *)"], deny: ["Bash(security)", "Bash(security *)", "Read(./.env)", "Read(./.env.*)", "Read(./secrets/**)", "Edit(./.env)", "Edit(./.env.*)", "Edit(./secrets/**)"], defaultMode: "manual" as const } };
 type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string };
 const fail = (error: string): { ok: false; error: string } => ({ ok: false, error });
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
@@ -44,27 +43,6 @@ function isNonBlank(value: unknown): value is string { return typeof value === "
 function checkKeys(value: Record<string, unknown>, keys: readonly string[], where: string): string | undefined {
   for (const key of Object.keys(value)) if (!keys.includes(key)) return `${where}: unsupported field "${key}"`;
   return undefined;
-}
-function parseFlags(flags: unknown, where: string): Parsed<string> {
-  if (flags === undefined) return { ok: true, value: "" };
-  if (typeof flags !== "string") return fail(`${where}: flags must be a string`);
-  if (/[gy]/.test(flags)) return fail(`${where}: flags must not include g or y (stateful matching)`);
-  if ([...flags].some((f) => !ALLOWED_FLAGS.includes(f))) return fail(`${where}: flags contain an unsupported character`);
-  return { ok: true, value: flags };
-}
-function parseRule(entry: unknown, where: string, source: string, scope: "global" | "project"): Parsed<Rule> {
-  if (!isObject(entry)) return fail(`${where} must be an object`);
-  const unknown = checkKeys(entry, ["pattern", "flags", "level", "label", "message"], where);
-  if (unknown) return fail(unknown);
-  if (!isNonBlank(entry.pattern)) return fail(`${where}: pattern must be a non-empty string`);
-  if (!isNonBlank(entry.label)) return fail(`${where}: label must be a non-empty string`);
-  if (typeof entry.level !== "string" || !["deny", "ask", "allow"].includes(entry.level)) return fail(`${where}: level must be "deny", "ask", or "allow"`);
-  const flags = parseFlags(entry.flags, where);
-  if (!flags.ok) return flags;
-  let pattern: RegExp;
-  try { pattern = new RegExp(entry.pattern, flags.value); } catch (err) { return fail(`${where}: invalid regex (${(err as Error).message})`); }
-  if (entry.message !== undefined && !isNonBlank(entry.message)) return fail(`${where}: message must be a non-empty string`);
-  return { ok: true, value: { pattern, level: entry.level as RuleLevel, label: entry.label, ...(entry.message === undefined ? {} : { message: entry.message as string }), source, scope } };
 }
 function parseNested<T>(raw: unknown, source: string, key: string, allowed: readonly string[], parse: (obj: Record<string, unknown>) => Parsed<T>, fallback: T): Parsed<T> {
   if (raw === undefined) return { ok: true, value: fallback };
@@ -102,17 +80,27 @@ function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<Re
 }
 export function parseConfig(raw: unknown, source: string, baseDir = ".", scope: "global" | "project" = "global"): ConfigResult {
   if (!isObject(raw)) return fail(`${source}: root must be an object`);
-  const allowed = scope === "global" ? ["enabled", "reviewMode", "rules", "reviewer", "reviewEvidence", "ui"] : ["rules"];
+  const allowed = scope === "global" ? ["enabled", "reviewMode", "permissions", "reviewer", "reviewEvidence", "ui"] : ["permissions"];
   const unknown = checkKeys(raw, allowed, source);
   if (unknown) return fail(unknown);
   if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") return fail(`${source}: enabled must be a boolean`);
   if (raw.reviewMode !== undefined && raw.reviewMode !== "manual" && raw.reviewMode !== "auto") return fail(`${source}: reviewMode must be "manual" or "auto"`);
-  if (raw.rules !== undefined && !Array.isArray(raw.rules)) return fail(`${source}: rules must be an array`);
-  const rules: Rule[] = [];
-  for (const [i, entry] of (raw.rules as unknown[] | undefined ?? []).entries()) {
-    const rule = parseRule(entry, `${source}: rules[${i}]`, source, scope);
-    if (!rule.ok) return rule;
-    rules.push(rule.value);
+  const permissions = raw.permissions === undefined ? {} : raw.permissions;
+  if (!isObject(permissions)) return fail(`${source}: permissions must be an object`);
+  const permissionKeys = scope === "global" ? ["allow", "ask", "deny", "defaultMode"] : ["allow", "ask", "deny"];
+  const permissionUnknown = checkKeys(permissions, permissionKeys, `${source}: permissions`);
+  if (permissionUnknown) return fail(permissionUnknown);
+  if (permissions.defaultMode !== undefined && permissions.defaultMode !== "manual") return fail(`${source}: permissions.defaultMode must be "manual"`);
+  const rules: PermissionRule[] = [];
+  for (const level of ["deny", "ask", "allow"] as const) {
+    const entries = permissions[level];
+    if (entries !== undefined && !Array.isArray(entries)) return fail(`${source}: permissions.${level} must be an array`);
+    for (const [i, entry] of ((entries as unknown[] | undefined) ?? []).entries()) {
+      if (!isNonBlank(entry)) return fail(`${source}: permissions.${level}[${i}] must be a non-empty string`);
+      const parsed = parsePermissionRule(entry, level, source, scope, `${source}: permissions.${level}[${i}]`);
+      if (!parsed.ok) return fail(parsed.error);
+      rules.push(parsed.value);
+    }
   }
   const reviewer = parseReviewer(raw.reviewer, source, baseDir);
   if (!reviewer.ok) return reviewer;
@@ -128,13 +116,16 @@ export function parseConfig(raw: unknown, source: string, baseDir = ".", scope: 
     return { ok: true, value: { status: obj.status !== false, placement } };
   }, { status: true, placement: "widget" });
   if (!ui.ok) return ui;
-  return { ok: true, enabled: scope === "global" ? (raw.enabled as boolean | undefined ?? true) : true, reviewMode: scope === "global" ? (raw.reviewMode as ReviewMode | undefined ?? "manual") : "manual", rules, reviewer: reviewer.value, reviewEvidence: evidence.value, ui: ui.value };
+  return { ok: true, enabled: scope === "global" ? (raw.enabled as boolean | undefined ?? true) : true, reviewMode: scope === "global" ? (raw.reviewMode as ReviewMode | undefined ?? "auto") : "auto", rules, reviewer: reviewer.value, reviewEvidence: evidence.value, ui: ui.value };
 }
 function readConfig(path: string, scope: "global" | "project"): ConfigResult {
   let text: string;
   try { text = readFileSync(path, "utf8"); } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return { ok: true, enabled: true, reviewMode: "manual", rules: [], ui: { status: true, placement: "widget" }, reviewer: DEFAULT_REVIEWER, reviewEvidence: DEFAULT_REVIEW_EVIDENCE };
+    if (code === "ENOENT") {
+      if (scope === "global") return parseConfig(SEED_CONFIG, path, dirname(path), scope);
+      return { ok: true, enabled: true, reviewMode: "auto", rules: [], ui: { status: true, placement: "widget" }, reviewer: DEFAULT_REVIEWER, reviewEvidence: DEFAULT_REVIEW_EVIDENCE };
+    }
     return { ok: false, error: `${path}: cannot read config (${code ?? "unknown error"})` };
   }
   let raw: unknown;
@@ -144,12 +135,22 @@ function readConfig(path: string, scope: "global" | "project"): ConfigResult {
 export function loadGlobalConfig(globalDir: string): ConfigResult { return readConfig(join(globalDir, CONFIG_FILENAME), "global"); }
 export function loadConfig(cwd: string, globalDir: string): ConfigResult {
   const globalPath = join(globalDir, CONFIG_FILENAME);
-  const projectPath = join(cwd, ".pi", CONFIG_FILENAME);
+  const projectPath = projectConfigPath(cwd);
   const global = readConfig(globalPath, "global");
   if (!global.ok) return global;
   const project = readConfig(projectPath, "project");
   if (!project.ok) return project;
   return { ...global, rules: [...global.rules, ...project.rules] };
+}
+export function ensureGlobalConfig(globalDir: string): { created: boolean } | { created: false; error: string } {
+  try { mkdirSync(globalDir, { recursive: true }); } catch (err) { return { created: false, error: (err as Error).message }; }
+  try {
+    writeFileSync(join(globalDir, CONFIG_FILENAME), JSON.stringify(SEED_CONFIG, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
+    return { created: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return { created: false };
+    return { created: false, error: (err as Error).message };
+  }
 }
 export type SaveResult = { readonly ok: true; readonly path: string } | { readonly ok: false; readonly path: string; readonly error: string };
 export function saveGlobalReviewerModel(
@@ -158,7 +159,7 @@ export function saveGlobalReviewerModel(
 ): SaveResult {
   const path = join(globalDir, CONFIG_FILENAME);
   let before: string | undefined;
-  let raw: Record<string, unknown> = { rules: [] };
+  let raw: Record<string, unknown> = structuredClone(SEED_CONFIG) as Record<string, unknown>;
   try { before = readFileSync(path, "utf8"); } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { ok: false, path, error: `cannot read config (${(err as NodeJS.ErrnoException).code ?? "unknown error"})` };
   }
@@ -208,7 +209,7 @@ export function saveGlobalReviewerModel(
 export function saveGlobalSettings(globalDir: string, settings: PermissionSettings): SaveResult {
   const path = join(globalDir, CONFIG_FILENAME);
   let before: string | undefined;
-  let raw: Record<string, unknown> = {};
+  let raw: Record<string, unknown> = structuredClone(SEED_CONFIG) as Record<string, unknown>;
   try { before = readFileSync(path, "utf8"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { ok: false, path, error: `cannot read config (${(err as NodeJS.ErrnoException).code ?? "unknown error"})` }; }
   if (before !== undefined) {
     let parsed: unknown;
@@ -217,7 +218,7 @@ export function saveGlobalSettings(globalDir: string, settings: PermissionSettin
     if (!checked.ok) return { ok: false, path, error: checked.error };
     raw = parsed as Record<string, unknown>;
   }
-  const output = JSON.stringify(before === undefined ? { enabled: settings.enabled, reviewMode: settings.reviewMode, rules: [] } : { ...raw, enabled: settings.enabled, reviewMode: settings.reviewMode }, null, 2) + "\n";
+  const output = JSON.stringify({ ...raw, enabled: settings.enabled, reviewMode: settings.reviewMode }, null, 2) + "\n";
   try {
     mkdirSync(globalDir, { recursive: true });
     let current: string | undefined;
