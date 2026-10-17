@@ -1,5 +1,5 @@
 {
-  "name": "@thlinhit/pi-auto-approval",
+  "name": "@thlinh/pi-auto-approval",
   "version": "0.1.0",
   "description": "Regex-based approval gates for Pi bash tool calls.",
   "type": "module",
