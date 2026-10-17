@@ -33,8 +33,7 @@ Two files hold permission rules. Both use the `permissions` shape. The global fi
   "permissions": {
     "allow": ["Bash(git status)"],
     "ask": ["Bash(git push *)"],
-    "deny": ["Read(./.env)"],
-    "defaultMode": "manual"
+    "deny": ["Read(./.env)"]
   }
 }
 ```
@@ -48,9 +47,8 @@ A missing global file uses the seed in memory without writing it. If startup can
 - `allow`: `Bash(git status)`, `Bash(git diff)`, `Bash(git diff --stat)`, `Bash(git log -5 --oneline)`
 - `ask`: `Bash(git push *)`, `Bash(git reset *)`, `Bash(git clean *)`, `Bash(rm *)`
 - `deny`: `Bash(security)`, `Bash(security *)`, `Read(./.env)`, `Read(./.env.*)`, `Read(./secrets/**)`, `Edit(./.env)`, `Edit(./.env.*)`, `Edit(./secrets/**)`
-- `defaultMode`: `"manual"`
 
-The shipped [`examples/auto-permissions.json`](examples/auto-permissions.json) has the same content. It includes the global-only `defaultMode` field; omit that field if adapting the example for a project. No example or seed is copied into projects automatically.
+The shipped [`examples/auto-permissions.json`](examples/auto-permissions.json) has the same content. No example or seed is copied into projects automatically.
 
 ### Rule grammar
 
@@ -84,9 +82,9 @@ Matching is lexical after this normalization. Symlinks and case-insensitive file
 - In an untrusted project, project `allow` rules are ignored and a notice names the file. Project `deny` and `ask` rules still apply.
 - A project allow cannot weaken a global deny or ask. A project deny can still block a global allow, and a project ask can require confirmation for one.
 
-### `defaultMode` and `reviewMode`
+### `reviewMode`
 
-- `permissions.defaultMode` accepts only `"manual"`. Any other value is a config error. It does not change routing. Unmatched calls use `reviewMode`, which defaults to `"auto"`.
+Unmatched calls use `reviewMode`, which defaults to `"auto"`.
 - `reviewMode` (global only) is `"auto"` or `"manual"`. Auto sends unmatched calls to the AI reviewer. Manual asks you for every unmatched call and never calls the reviewer. An explicit `"manual"` is a human-only override.
 
 ### Config errors
@@ -97,7 +95,7 @@ A missing global file uses the starter seed; a missing project file adds no rule
 auto-approval: invalid config - <error>. Fix it to run tools.
 ```
 
-Errors include unknown keys, an object where a string is expected, a bad rule, `permissions.defaultMode` other than `"manual"`, and the legacy `rules` key:
+Errors include unknown keys, an object where a string is expected, a bad rule, and removed keys such as `permissions.defaultMode` and the legacy `rules` key:
 
 ```text
 <path>: unsupported field "rules"

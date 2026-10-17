@@ -44,7 +44,7 @@ test("permissions schema, paths, and absent global policy use the approved seed 
   try {
     assert.equal(globalConfigDir(t.root), join(t.root, ".pi", "pi-auto-approval"));
     assert.equal(projectConfigPath(t.cwd), join(t.cwd, ".pi", "pi-auto-approval", "auto-permissions.json"));
-    const parsed = parseConfig({ permissions: { allow: ["Bash(git status)"], ask: [], deny: [], defaultMode: "manual" } }, "global.json");
+    const parsed = parseConfig({ permissions: { allow: ["Bash(git status)"], ask: [], deny: [] } }, "global.json");
     assert.equal(parsed.ok, true);
     if (parsed.ok) { assert.equal(parsed.reviewMode, "auto"); assert.equal(parsed.rules[0]?.label, "Bash(git status)"); }
     assert.equal(parseConfig({ permissions: { allow: [], ask: [], deny: [], defaultMode: "auto" } }, "bad.json").ok, false);
@@ -95,12 +95,15 @@ test("legacy rules key is rejected at both new paths and old paths are ignored",
   } finally { t.cleanup(); }
 });
 
-test("project defaultMode is rejected while global defaultMode must be manual", () => {
+test("removed defaultMode is rejected in global and project config", () => {
   const project = parseConfig({ permissions: { allow: [], defaultMode: "manual" } }, "project.json", ".", "project");
   assert.equal(project.ok, false);
   if (!project.ok) assert.match(project.error, /unsupported field "defaultMode"/);
   assert.equal(parseConfig({ permissions: { defaultMode: "auto" } }, "global.json").ok, false);
-  assert.equal(parseConfig({ permissions: { defaultMode: "manual" } }, "global.json").ok, true);
+  const global = parseConfig({ permissions: { defaultMode: "manual" } }, "global.json");
+  assert.equal(global.ok, false);
+  if (!global.ok) assert.match(global.error, /unsupported field "defaultMode"/);
+  assert.equal("defaultMode" in SEED_CONFIG.permissions, false);
 });
 
 test("project permissions merge after global rules; project settings are rejected", () => {

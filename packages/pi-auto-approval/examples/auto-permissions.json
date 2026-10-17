@@ -21,7 +21,6 @@
       "Edit(./.env)",
       "Edit(./.env.*)",
       "Edit(./secrets/**)"
-    ],
-    "defaultMode": "manual"
+    ]
   }
 }
