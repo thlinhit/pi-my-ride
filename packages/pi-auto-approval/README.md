@@ -5,7 +5,7 @@ A Pi extension that gates every tool call. Permission rules decide whether a cal
 ## Install
 
 ```bash
-pi install npm:@thlinhit/pi-auto-approval
+pi install npm:@thlinh/pi-auto-approval
 ```
 
 ## Local testing
