@@ -1,6 +1,6 @@
 {
   "name": "@thlinh/pi-auto-approval",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Regex-based approval gates for Pi bash tool calls.",
   "type": "module",
   "keywords": [
