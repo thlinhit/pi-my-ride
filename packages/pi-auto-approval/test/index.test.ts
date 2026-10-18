@@ -1754,7 +1754,7 @@ test("shipped example is the exact starter config", () => {
   assert.deepEqual(raw, { permissions: SEED_CONFIG.permissions });
   const parsed = parseConfig(raw, "example");
   assert.equal(parsed.ok, true);
-  if (parsed.ok) assert.equal(parsed.rules.length, 16);
+  if (parsed.ok) assert.equal(parsed.rules.length, 22);
 });
 
 function deferred<T>() {

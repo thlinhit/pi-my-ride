@@ -590,7 +590,7 @@ test("connected accumulated prompt budget retries fresh with projected evidence 
     const harness = await createLifecycleHarness(placement, {
       reviewer: { provider: "mock", model: "gpt-6-luna", reasoningEffort: "medium", timeoutMs: 30_000 },
       reviewEvidence: { projectInstructions: false },
-      contextWindow: 5_000,
+      contextWindow: 6_000,
       projection: () => evidence.map((content, index) => ({
         sourceEntry: { type: "message", id: `budget-${index + 1}` },
         messages: [{ role: "user", content }],

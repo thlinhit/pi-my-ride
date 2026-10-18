@@ -99,8 +99,7 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
       base = undefined;
     }
     const tool = input.tool ?? "bash";
-    const gate = tool === "bash" ? "Unmatched Bash command" : `Unmatched ${tool} tool call`;
-    const request: ReviewRequest = { tool, command: input.command, arguments: input.arguments, cwd: ctx.cwd, gate, group: null };
+    const request: ReviewRequest = { tool, command: input.command, arguments: input.arguments, cwd: ctx.cwd };
     const makeUser = (selected: readonly EvidenceRecord[], mode: "full" | "delta") => ({
       role: "user" as const,
       content: [{ type: "text" as const, text: buildReviewPrompt(selected, request, mode) }],

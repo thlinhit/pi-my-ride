@@ -2,14 +2,20 @@
   "permissions": {
     "allow": [
       "Bash(git status)",
+      "Bash(git status --short)",
       "Bash(git diff)",
       "Bash(git diff --stat)",
+      "Bash(git diff --check)",
       "Bash(git log -5 --oneline)"
     ],
     "ask": [
+      "Bash(git push)",
       "Bash(git push *)",
+      "Bash(git reset)",
       "Bash(git reset *)",
+      "Bash(git clean)",
       "Bash(git clean *)",
+      "Bash(rm)",
       "Bash(rm *)"
     ],
     "deny": [

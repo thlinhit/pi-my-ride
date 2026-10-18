@@ -7,7 +7,7 @@ import {
   type EvidenceRecord, type ReviewRequest,
 } from "../../src/review/protocol.ts";
 
-const request: ReviewRequest = { tool: "bash", command: "git push origin main", cwd: "/repo", gate: "git push", group: "git" };
+const request: ReviewRequest = { tool: "bash", command: "git push origin main", cwd: "/repo" };
 const userMsg = (text: string, id?: string) => ({ type: "message", ...(id === undefined ? {} : { id }), message: { role: "user", content: text } });
 const assistantMsg = (content: unknown, id = "assistant") => ({ type: "message", id, message: { role: "assistant", content } });
 
@@ -37,6 +37,18 @@ describe("collectEvidence", () => {
 });
 
 describe("review prompts", () => {
+  test("request cards exclude permission-routing metadata", () => {
+    const prompt = buildReviewPrompt([], request, "full");
+    const card = JSON.parse(prompt.split("<LATEST_PROPOSED_ACTION>\n")[1]!.split("\n</LATEST_PROPOSED_ACTION>")[0]!);
+    assert.equal("gate" in card, false);
+    assert.equal("group" in card, false);
+  });
+  test("policy grounds restrictions and rejects inherited reviewer assumptions", () => {
+    assert.match(POLICY_PROMPT, /Do not invent platform requirements/);
+    assert.match(POLICY_PROMPT, /Previous reviewer replies are fallible assessments/);
+    assert.match(POLICY_PROMPT, /skill or reference file's location does not change the target repository/);
+    assert.match(POLICY_PROMPT, /Identify the applicable constraint/);
+  });
   test("full and delta modes carry JSON evidence and an untrimmed action card", () => {
     const records: EvidenceRecord[] = [{ key: "u:0:user", source: "user", text: 'USER: {"source":"user"}' }];
     const full = buildReviewPrompt(records, request, "full");
@@ -108,17 +120,17 @@ describe("tool-neutral review requests", () => {
   });
   test("non-Bash cards carry full identity and complete untruncated arguments", () => {
     const content = "y".repeat(5000);
-    const prompt = buildReviewPrompt([], { tool: "write", arguments: { path: "notes.md", content }, cwd: "/repo", gate: "Unmatched write call", group: null }, "full");
-    assert.deepEqual(JSON.parse(cardOf(prompt)), { tool: "write", arguments: { path: "notes.md", content }, cwd: "/repo", gate: "Unmatched write call", group: null });
+    const prompt = buildReviewPrompt([], { tool: "write", arguments: { path: "notes.md", content }, cwd: "/repo" }, "full");
+    assert.deepEqual(JSON.parse(cardOf(prompt)), { tool: "write", arguments: { path: "notes.md", content }, cwd: "/repo" });
   });
   test("non-JSON arguments fail to build a card instead of silently dropping values", () => {
     for (const args of [{ run() {} }, { value: Symbol("x") }, { count: 1n }]) {
-      assert.throws(() => buildReviewPrompt([], { tool: "custom", arguments: args, cwd: "/repo", gate: "Unmatched custom call", group: null }, "full"));
+      assert.throws(() => buildReviewPrompt([], { tool: "custom", arguments: args, cwd: "/repo" }, "full"));
     }
   });
-  test("legacy command-only Bash card keeps the exact old bytes", () => {
-    const prompt = buildReviewPrompt([], { tool: "bash", command: "git push origin main", cwd: "/repo", gate: "Unmatched Bash command", group: null }, "full");
-    assert.equal(cardOf(prompt), JSON.stringify({ tool: "bash", command: "git push origin main", cwd: "/repo", gate: "Unmatched Bash command", group: null }, null, 2));
+  test("command-only Bash card preserves action details without routing metadata", () => {
+    const prompt = buildReviewPrompt([], { tool: "bash", command: "git push origin main", cwd: "/repo" }, "full");
+    assert.equal(cardOf(prompt), JSON.stringify({ tool: "bash", command: "git push origin main", cwd: "/repo" }, null, 2));
   });
 });
 

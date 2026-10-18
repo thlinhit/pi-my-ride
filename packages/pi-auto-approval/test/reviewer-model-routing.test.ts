@@ -497,14 +497,14 @@ test("non-Bash review sends exact tool identity and complete arguments to the se
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, FAKE_A);
     assert.equal(call.context.systemPrompt, POLICY_PROMPT);
-    assert.deepEqual(JSON.parse(cardOf(userText(call))), { tool: "write", arguments: args, cwd: host.cwd, gate: "Unmatched write tool call", group: null });
+    assert.deepEqual(JSON.parse(cardOf(userText(call))), { tool: "write", arguments: args, cwd: host.cwd });
     call.release?.("approve");
     const result = await decision;
     assert.equal(result.ok && result.verdict.decision, "approve");
   } finally { await host.close(); }
 });
 
-test("legacy command-only review reaches the provider with the exact old Bash card bytes", async () => {
+test("command-only review reaches the provider without routing metadata", async () => {
   const host = await createHost();
   try {
     const command = "git push origin main";
@@ -512,7 +512,7 @@ test("legacy command-only review reaches the provider with the exact old Bash ca
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, FAKE_A);
     const text = userText(call);
-    assert.equal(cardOf(text), JSON.stringify({ tool: "bash", command, cwd: host.cwd, gate: "Unmatched Bash command", group: null }, null, 2));
+    assert.equal(cardOf(text), JSON.stringify({ tool: "bash", command, cwd: host.cwd }, null, 2));
     assert.equal(text.includes("undefined"), false);
     call.release?.("approve");
     await decision;
@@ -546,7 +546,7 @@ test("real loader sends an unmatched Write through the registered handler with f
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, ACTIVE);
     assert.equal(call.context.systemPrompt, POLICY_PROMPT);
-    assert.deepEqual(JSON.parse(cardOf(userText(call))), { tool: "write", arguments: args, cwd: host.cwd, gate: "Unmatched write tool call", group: null });
+    assert.deepEqual(JSON.parse(cardOf(userText(call))), { tool: "write", arguments: args, cwd: host.cwd });
     call.release?.("approve");
     assert.equal(await decision, undefined);
   } finally { await host.close(); }
