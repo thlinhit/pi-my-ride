@@ -64,6 +64,25 @@ function context(overrides: Partial<GateContext> = {}) {
 }
 const event = (command: unknown = "dangerous") => ({ toolName: "bash", input: { command } });
 
+test("allowing codemode does not allow denied nested tool calls", async () => {
+  const settings = parseConfig({ permissions: { allow: ["codemode"], deny: ["Bash(danger*)", "Read(./.env)", "Edit(./protected.txt)", "Write(./protected.txt)"] } }, "test.json");
+  assert.equal(settings.ok, true);
+  const { ctx, calls } = context();
+  const load = () => settings;
+  const parent = { toolName: "codemode", toolCallId: "parent", input: { code: "await tools.bash({ command: 'danger' })" } };
+  assert.equal(await handleToolCall(parent, ctx, load), undefined);
+  for (const [toolName, input] of [
+    ["bash", { command: "danger" }],
+    ["read", { path: "/tmp/.env" }],
+    ["edit", { path: "/tmp/protected.txt", edits: [] }],
+    ["write", { path: "/tmp/protected.txt", content: "blocked" }],
+  ] as const) {
+    const child = { toolName, input, parentToolCallId: "parent" };
+    assert.equal((await handleToolCall(child, ctx, load))?.block, true, toolName);
+  }
+  assert.equal(calls.length, 0, "denials must not offer an approval override");
+});
+
 test("non-bash loads config and confirms an unmatched call in manual mode", async () => {
   let loads = 0;
   const statuses: string[] = [];
@@ -1754,7 +1773,7 @@ test("shipped example is the exact starter config", () => {
   assert.deepEqual(raw, { permissions: SEED_CONFIG.permissions });
   const parsed = parseConfig(raw, "example");
   assert.equal(parsed.ok, true);
-  if (parsed.ok) assert.equal(parsed.rules.length, 22);
+  if (parsed.ok) assert.equal(parsed.rules.length, 23);
 });
 
 function deferred<T>() {

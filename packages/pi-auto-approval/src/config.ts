@@ -35,7 +35,7 @@ export const CONFIG_FILENAME = "auto-permissions.json";
 export const CONFIG_DIRNAME = "pi-auto-approval";
 export function globalConfigDir(home = homedir()): string { return join(home, ".pi", CONFIG_DIRNAME); }
 export function projectConfigPath(cwd: string): string { return join(cwd, ".pi", CONFIG_DIRNAME, CONFIG_FILENAME); }
-export const SEED_CONFIG = { permissions: { allow: ["Bash(git status)", "Bash(git status --short)", "Bash(git diff)", "Bash(git diff --stat)", "Bash(git diff --check)", "Bash(git log -5 --oneline)"], ask: ["Bash(git push)", "Bash(git push *)", "Bash(git reset)", "Bash(git reset *)", "Bash(git clean)", "Bash(git clean *)", "Bash(rm)", "Bash(rm *)"], deny: ["Bash(security)", "Bash(security *)", "Read(./.env)", "Read(./.env.*)", "Read(./secrets/**)", "Edit(./.env)", "Edit(./.env.*)", "Edit(./secrets/**)"] } };
+export const SEED_CONFIG = { permissions: { allow: ["codemode", "Bash(git status)", "Bash(git status --short)", "Bash(git diff)", "Bash(git diff --stat)", "Bash(git diff --check)", "Bash(git log -5 --oneline)"], ask: ["Bash(git push)", "Bash(git push *)", "Bash(git reset)", "Bash(git reset *)", "Bash(git clean)", "Bash(git clean *)", "Bash(rm)", "Bash(rm *)"], deny: ["Bash(security)", "Bash(security *)", "Read(./.env)", "Read(./.env.*)", "Read(./secrets/**)", "Edit(./.env)", "Edit(./.env.*)", "Edit(./secrets/**)"] } };
 type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string };
 const fail = (error: string): { ok: false; error: string } => ({ ok: false, error });
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

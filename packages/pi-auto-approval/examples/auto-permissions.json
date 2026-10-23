@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "codemode",
       "Bash(git status)",
       "Bash(git status --short)",
       "Bash(git diff)",

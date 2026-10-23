@@ -9,6 +9,10 @@ import * as config from "../src/config.ts";
 import { loadConfig, loadGlobalConfig, parseConfig, saveGlobalSettings, globalConfigDir, projectConfigPath, SEED_CONFIG } from "../src/config.ts";
 
 const rule = "Bash(cmd)";
+test("seed policy allows codemode by default", () => {
+  assert.ok(SEED_CONFIG.permissions.allow.includes("codemode"));
+});
+
 const seedLabels = () => [...SEED_CONFIG.permissions.deny, ...SEED_CONFIG.permissions.ask, ...SEED_CONFIG.permissions.allow];
 function temp() { const root = mkdtempSync(join(tmpdir(), "permissions-")); return { root, global: join(root, "home", ".pi", "pi-auto-approval"), cwd: join(root, "project"), cleanup: () => rmSync(root, { recursive: true, force: true }) }; }
 
