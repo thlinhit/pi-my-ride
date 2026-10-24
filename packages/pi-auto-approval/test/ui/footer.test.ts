@@ -17,20 +17,20 @@ const valid = (overrides: Partial<Extract<ConfigResult, { ok: true }>> = {}): Ex
 
 const choices = (overrides: SessionChoices = {}): SessionChoices => overrides;
 
-test("shows compact guardian modes", () => {
-  assert.equal(footerText(valid(), choices()), "🛡️ guardian: manual");
-  assert.equal(footerText(valid({ reviewMode: "auto" }), choices()), "🛡️ guardian: auto");
+test("shows compact modes", () => {
+  assert.equal(footerText(valid(), choices()), "🛡️ manual");
+  assert.equal(footerText(valid({ reviewMode: "auto" }), choices()), "🛡️ auto");
 });
 
 test("shows off regardless of configured review mode", () => {
-  assert.equal(footerText(valid({ enabled: false, reviewMode: "manual" }), choices()), "🛡️ guardian: off");
-  assert.equal(footerText(valid({ enabled: false, reviewMode: "auto" }), choices()), "🛡️ guardian: off");
+  assert.equal(footerText(valid({ enabled: false, reviewMode: "manual" }), choices()), "🛡️ off");
+  assert.equal(footerText(valid({ enabled: false, reviewMode: "auto" }), choices()), "🛡️ off");
 });
 
 test("uses session choices over valid config", () => {
-  assert.equal(footerText(valid({ reviewMode: "auto" }), choices({ enabled: false, reviewMode: "manual" })), "🛡️ guardian: off");
-  assert.equal(footerText(valid({ enabled: false, reviewMode: "manual" }), choices({ enabled: true, reviewMode: "auto" })), "🛡️ guardian: auto");
-  assert.equal(footerText(valid({ reviewMode: "auto" }), choices({ reviewMode: "manual" })), "🛡️ guardian: manual");
+  assert.equal(footerText(valid({ reviewMode: "auto" }), choices({ enabled: false, reviewMode: "manual" })), "🛡️ off");
+  assert.equal(footerText(valid({ enabled: false, reviewMode: "manual" }), choices({ enabled: true, reviewMode: "auto" })), "🛡️ auto");
+  assert.equal(footerText(valid({ reviewMode: "auto" }), choices({ reviewMode: "manual" })), "🛡️ manual");
 });
 
 test("suppresses valid status when ui status is disabled", () => {
@@ -41,7 +41,7 @@ test("suppresses valid status when ui status is disabled", () => {
 test("invalid config shows error unless session protection is explicitly off", () => {
   const invalid: ConfigResult = { ok: false, error: "bad config" };
   assert.equal(footerText(invalid, choices()), "⚠ protection config error · tools blocked");
-  assert.equal(footerText(invalid, choices({ enabled: false })), "🛡️ guardian: off");
-  assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "auto" })), "🛡️ guardian: off");
-  assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "manual" })), "🛡️ guardian: off");
+  assert.equal(footerText(invalid, choices({ enabled: false })), "🛡️ off");
+  assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "auto" })), "🛡️ off");
+  assert.equal(footerText(invalid, choices({ enabled: false, reviewMode: "manual" })), "🛡️ off");
 });

@@ -991,7 +991,7 @@ test("factory hides statuses by default while retaining approval and footer", as
   const h = await factoryHarness(t, async () => true, { debug: null });
   assert.equal(await h.invoke(), undefined);
   assert.equal(h.setWidget.mock.callCount(), 0);
-  assert.match(h.setStatus.mock.calls.at(-1)!.arguments[1]!, /guardian: manual/);
+  assert.match(h.setStatus.mock.calls.at(-1)!.arguments[1]!, /🛡️ manual/);
   writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "manual", ui: { status: true, placement: "toolRow" } }));
   const notify = mock.fn();
   const handler = h.registrations.find(r => r.eventName === "tool_call")!.callback;
@@ -999,7 +999,7 @@ test("factory hides statuses by default while retaining approval and footer", as
   assert.equal(notify.mock.callCount(), 0, "hidden status does not attempt row attribution or fallback warnings");
   assert.equal(h.setWidget.mock.callCount(), 0);
   await h.menu("Debug: off");
-  assert.match(h.setStatus.mock.calls.at(-1)!.arguments[1]!, /guardian: manual/);
+  assert.match(h.setStatus.mock.calls.at(-1)!.arguments[1]!, /🛡️ manual/);
 });
 
 test("debug off clears pending status and off-on rejects late normal and abort reports", async (t) => {
