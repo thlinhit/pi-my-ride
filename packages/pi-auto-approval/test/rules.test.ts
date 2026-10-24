@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createReadTool } from "@earendil-works/pi-coding-agent";
-import { matchPermission, parsePermissionRule, ruleMatches } from "../src/rules.ts";
+import { matchPermission, matchPermissionExact, parsePermissionRule, ruleMatches } from "../src/rules.ts";
 import type { PermissionRule } from "../src/rules.ts";
 
 function parse(
@@ -18,6 +18,17 @@ function parse(
   return result.value;
 }
 const call = (toolName: string, input: unknown = {}): { toolName: string; input: unknown } => ({ toolName, input });
+
+test("exact Bash matching does not split quoted delimiters and retains precedence and trust", () => {
+  const deny = parse("Bash(rm *)", "deny");
+  const ask = parse("Bash(echo *)", "ask");
+  const allow = parse("Bash(*)");
+  const quoted = call("bash", { command: "echo 'x;rm file;z'" });
+  assert.equal(matchPermissionExact(quoted, "/tmp", [allow, deny, ask], true), ask);
+  assert.equal(matchPermissionExact(call("bash", { command: "rm file" }), "/tmp", [allow, deny], true), deny);
+  assert.equal(matchPermissionExact(quoted, "/tmp", [parse("Bash(*)", "allow", "project")], false), undefined);
+  assert.equal(matchPermissionExact(quoted, "/tmp", [parse("Bash(*)", "ask", "project"), ask], true), ask);
+});
 
 describe("permission grammar", () => {
   test("maps builtin aliases case-insensitively and custom tool names exactly", () => {

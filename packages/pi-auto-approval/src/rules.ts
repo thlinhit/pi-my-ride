@@ -120,13 +120,13 @@ function filePatternMatches(specifier: string, actual: string, cwd: string): boo
   return globRegex(resolve(cwd, configured), true, wildcard).test(actual);
 }
 
-export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string): boolean {
+export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string, scanSegments = true): boolean {
   const tool = rule.tool === "edit" && call.toolName === "write" ? "edit" : call.toolName;
   if (tool !== rule.tool) return false;
   if (rule.specifier === undefined) return true;
   if (rule.tool === "bash") {
     if (!isObject(call.input) || typeof call.input.command !== "string") return false;
-    return bashMatches(rule.specifier, call.input.command, rule.level !== "allow");
+    return bashMatches(rule.specifier, call.input.command, scanSegments && rule.level !== "allow");
   }
   if (["read", "edit", "write"].includes(rule.tool)) {
     if (!isObject(call.input) || typeof call.input.path !== "string") return false;
@@ -136,16 +136,21 @@ export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string): 
   return false;
 }
 
+export function matchPermissionExact(call: ToolCall, cwd: string, rules: readonly PermissionRule[], projectTrusted: boolean): PermissionRule | undefined {
+  return matchPermission(call, cwd, rules, projectTrusted, false);
+}
+
 export function matchPermission(
   call: ToolCall,
   cwd: string,
   rules: readonly PermissionRule[],
   projectTrusted: boolean,
+  scanSegments = true,
 ): PermissionRule | undefined {
   for (const level of ["deny", "ask", "allow"] as const) {
     for (const scope of ["global", "project"] as const) {
       if (scope === "project" && level === "allow" && !projectTrusted) continue;
-      const match = rules.find((rule) => rule.level === level && rule.scope === scope && ruleMatches(rule, call, cwd));
+      const match = rules.find((rule) => rule.level === level && rule.scope === scope && ruleMatches(rule, call, cwd, scanSegments));
       if (match) return match;
     }
   }

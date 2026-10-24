@@ -3,8 +3,8 @@ import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ConfigResult, PermissionRule, SessionChoices } from "./config.ts";
 import { CONFIG_FILENAME, ensureGlobalConfig, globalConfigDir, loadConfig } from "./config.ts";
-import { isSuspiciousAllow } from "./gates.ts";
-import { matchPermission } from "./rules.ts";
+import { analyzeShell } from "./shell.ts";
+import { matchPermission, matchPermissionExact } from "./rules.ts";
 import { createPermissionsController } from "./permissions.ts";
 import { recordHistory, type HistoryEntry, type HistoryResult } from "./history.ts";
 import { createReviewDisplay } from "./ui/display.ts";
@@ -100,12 +100,14 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
   if (!enabled) return isAborted(ctx) ? block(CONFIRMATION_FAILED) : NOT_GATED;
   let projectTrusted = false;
   try { projectTrusted = ctx.isProjectTrusted(); } catch {}
-  const matcher = deps.matcher ?? matchPermission;
+  const analysis = bash ? analyzeShell(command!) : undefined;
+  const matcher = deps.matcher ?? (bash ? matchPermissionExact : matchPermission);
   let ignored: PermissionRule[] = [];
   let rule: PermissionRule | undefined;
   try {
-    if (!projectTrusted) ignored = config.rules.filter((candidate) => candidate.scope === "project" && candidate.level === "allow" && matcher({ toolName: event.toolName, input: event.input }, ctx.cwd, [candidate], true) !== undefined);
+    if (!projectTrusted) ignored = config.rules.filter((candidate) => candidate.scope === "project" && candidate.level === "allow" && [event, ...(analysis?.supported ? analysis.components.map(component => ({ toolName: "bash", input: { command: component.command } })) : [])].some(call => matcher(call, ctx.cwd, [candidate], true) !== undefined));
     rule = matcher({ toolName: event.toolName, input: event.input }, ctx.cwd, config.rules, projectTrusted);
+    if (bash && !analysis?.supported) rule = matchPermission(event, ctx.cwd, config.rules.filter(candidate => candidate.level === "deny"), projectTrusted) ?? rule;
   } catch { return block("auto-approval: matcher error"); }
   const ignoredNote = ignored.length ? `Ignored project allow rule(s) from ${[...new Set(ignored.map((r) => r.source))].join(", ")} because the project is untrusted.` : "";
   if (ignoredNote) safeNotify(ctx, ignoredNote);
@@ -130,9 +132,47 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
     } catch { report("blocked"); return block(`${reason} (confirmation failed)${ignoredNote ? ` ${ignoredNote}` : ""}`); }
   };
   if (rule?.level === "deny") { report("blocked"); return block(`Blocked by auto-approval ${attribution}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+  if (bash && analysis) {
+    if (!analysis.supported) return confirm(`${analysis.reason} requires confirmation`);
+    const reasons: string[] = rule?.level === "ask" ? [`Requires confirmation ${attribution}`] : [];
+    let componentRules: (PermissionRule | undefined)[];
+    try {
+      componentRules = analysis.components.map(component => matcher({ toolName: "bash", input: { command: component.command } }, ctx.cwd, config.rules, projectTrusted));
+    } catch { return block("auto-approval: matcher error"); }
+    const denied = componentRules.find(candidate => candidate?.level === "deny");
+    if (denied) { report("blocked"); return block(`Blocked by auto-approval (${denied.label}, ${denied.source})${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+    for (let index = 0; index < analysis.components.length; index++) {
+      if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+      const component = analysis.components[index]!;
+      const componentRule = componentRules[index];
+      if (componentRule?.level === "allow") {
+        safeNotify(ctx, `Allowed by rule (${componentRule.label}, ${componentRule.source})`);
+        continue;
+      }
+      if (componentRule?.level === "ask") { reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`); continue; }
+      if (mode === "manual") { reasons.push(`${label} requires confirmation`); continue; }
+      report("guardian-running");
+      if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+      let result: ReviewResult;
+      try {
+        result = deps.review ? await deps.review({ command: component.command, component: { originalCommand: command!, index: index + 1, count: analysis.components.length, start: component.start, end: component.end, context: component.context }, reviewer: config.reviewer, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" };
+      } catch { result = { ok: false, error: "reviewer unavailable" }; }
+      if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
+      if (!result.ok) {
+        if (result.cancelled) { report("blocked", "Cancelled"); return block(`Review cancelled${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+        reasons.push(`Automatic review failed: ${result.error}`);
+        continue;
+      }
+      if (result.verdict.decision === "revise") { report("revision-requested"); return block(`Reviewer requested a revision: ${result.verdict.reason}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+      if (result.verdict.decision === "ask_user") reasons.push(`Reviewer needs user approval: ${result.verdict.reason}`);
+    }
+    if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+    if (reasons.length) return confirm([...new Set(reasons)].join("\n"));
+    report("approved");
+    return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+  }
   if (rule?.level === "ask") return confirm(`Requires confirmation ${attribution}`);
   if (rule?.level === "allow") {
-    if (bash && command !== undefined && isSuspiciousAllow(command)) return confirm(`Combined or nested command requires confirmation ${attribution}`);
     safeNotify(ctx, `Allowed by rule (${rule.label}, ${rule.source})`);
     report("approved");
     return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;

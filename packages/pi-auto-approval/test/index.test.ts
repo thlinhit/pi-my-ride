@@ -64,6 +64,117 @@ function context(overrides: Partial<GateContext> = {}) {
 }
 const event = (command: unknown = "dangerous") => ({ toolName: "bash", input: { command } });
 
+test("compound policy preflight denies later components before any confirmation or review", async () => {
+  for (const mode of ["auto", "manual"] as const) {
+    const { ctx, calls } = context();
+    const seen: ReviewInput[] = [];
+    const rules = [parsedRule("Bash(first)", "ask"), parsedRule("Bash(last)", "deny"), parsedRule("Bash(first;last)", "allow")];
+    assert.equal((await handleToolCall(event("first;last"), ctx, () => config(rules, mode), { review: async input => { seen.push(input); return { ok: true, verdict: { decision: "approve", reason: "ok" } }; } }))?.block, true);
+    assert.equal(calls.length, 0);
+    assert.equal(seen.length, 0);
+  }
+});
+
+test("compound reviewers run serially through asks and failures until later revision", async () => {
+  for (const first of ["ask_user", "failure"] as const) {
+    const { ctx, calls } = context();
+    const seen: string[] = [];
+    const statuses: string[] = [];
+    const outcome = await handleToolCall(event("first;last;never"), ctx, () => config([], "auto"), {
+      review: async input => {
+        seen.push(input.command!);
+        if (input.command === "first") return first === "failure" ? { ok: false, error: "failed" } : { ok: true, verdict: { decision: "ask_user", reason: "ask" } };
+        return { ok: true, verdict: { decision: "revise", reason: "forbidden" } };
+      },
+      status: report => statuses.push(report.state),
+    });
+    assert.match(outcome!.reason, /forbidden/);
+    assert.deepEqual(seen, ["first", "last"]);
+    assert.equal(calls.length, 0);
+    assert.equal(statuses.includes("approved"), false);
+  }
+});
+
+test("whole allow never skips components; component allows pass and quoted deny text stays data", async () => {
+  const { ctx, calls } = context();
+  const seen: ReviewInput[] = [];
+  const command = "echo 'x;rm file;z';pwd";
+  const rules = [parsedRule(`Bash(${command})`, "allow"), parsedRule("Bash(echo *)", "allow"), parsedRule("Bash(rm *)", "deny")];
+  assert.equal(await handleToolCall(event(command), ctx, () => config(rules, "auto"), { review: async input => { seen.push(input); return { ok: true, verdict: { decision: "approve", reason: "ok" } }; } }), undefined);
+  assert.deepEqual(seen.map(input => input.command), ["pwd"]);
+  assert.equal(calls.length, 0);
+});
+
+test("component reviews retain source context and unchanged frozen input with one final outcome", async () => {
+  const command = "cd dir && pwd | cat;echo '😀' & printf end";
+  const input = Object.freeze({ command, timeout: 30 });
+  const original = Object.freeze({ toolName: "bash", input });
+  const { ctx, calls } = context();
+  const seen: ReviewInput[] = [];
+  const outcomes: unknown[] = [];
+  const states: string[] = [];
+  assert.equal(await handleToolCall(original, ctx, () => config([], "auto"), {
+    review: async input => { seen.push(input); return { ok: true, verdict: { decision: "approve", reason: "ok" } }; },
+    history: entry => { outcomes.push(entry); return { ok: true }; }, status: r => states.push(r.state),
+  }), undefined);
+  assert.deepEqual(seen.map(i => i.command), ["cd dir", "pwd", "cat", "echo '😀'", "printf end"]);
+  seen.forEach((i, n) => {
+    assert.equal(i.component?.originalCommand, command);
+    assert.equal(i.component?.index, n + 1);
+    assert.equal(i.component?.count, 5);
+    assert.equal(command.slice(i.component!.start, i.component!.end), i.command);
+    assert.ok(i.component!.context.length);
+  });
+  assert.equal(original.input, input);
+  assert.deepEqual(input, { command, timeout: 30 });
+  assert.equal(calls.length, 0);
+  assert.equal(outcomes.length, 1);
+  assert.equal(states.filter(s => s === "approved").length, 1);
+});
+
+test("asks and failures accumulate into one full-original confirmation after all reviews", async () => {
+  for (const hasUI of [true, false]) {
+    const { ctx, calls } = context({ hasUI });
+    const seen: string[] = [];
+    const command = "first;second;third";
+    const outcome = await handleToolCall(event(command), ctx, () => config([parsedRule(`Bash(${command})`, "ask")], "auto"), { review: async input => {
+      seen.push(input.command!);
+      return input.command === "first" ? { ok: false, error: "unavailable" } : { ok: true, verdict: { decision: "ask_user", reason: "check target" } };
+    } });
+    assert.deepEqual(seen, ["first", "second", "third"]);
+    assert.equal(calls.length, hasUI ? 1 : 0);
+    if (hasUI) assert.ok(String(calls[0]![1]).endsWith(command));
+    assert.equal(outcome?.block, hasUI ? undefined : true);
+  }
+});
+
+for (const source of ["echo $(pwd)", "for x in a; do pwd; done", "f() { pwd; }", "echo ok &&", "echo $HOME", "echo x >out"]) test(`unsupported syntax requires manual fallback: ${source}`, async () => {
+  for (const hasUI of [true, false]) {
+    const { ctx, calls } = context({ hasUI });
+    const result = await handleToolCall(event(source), ctx, () => config([parsedRule("Bash(*)", "allow")], "auto"), { review: async () => { assert.fail("unsupported syntax must not reach reviewer"); } });
+    assert.equal(result?.block, hasUI ? undefined : true);
+    assert.equal(calls.length, hasUI ? 1 : 0);
+  }
+});
+
+test("unsupported deny scanning cannot be overridden; cancellation stops later components", async () => {
+  const { ctx, calls } = context();
+  assert.equal((await handleToolCall(event("echo $(rm file)"), ctx, () => config([parsedRule("Bash(rm *)", "deny")], "auto")))?.block, true);
+  assert.equal(calls.length, 0);
+  for (const cancel of ["signal", "result"] as const) {
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const result = await handleToolCall(event("first;last"), { ...ctx, signal: controller.signal }, () => config([], "auto"), { review: async input => {
+      seen.push(input.command!);
+      if (cancel === "signal") controller.abort();
+      return { ok: false, cancelled: true, error: "cancelled" };
+    } });
+    assert.equal(result?.block, true);
+    assert.deepEqual(seen, ["first"]);
+    assert.equal(calls.length, 0);
+  }
+});
+
 test("allowing codemode does not allow denied nested tool calls", async () => {
   const settings = parseConfig({ permissions: { allow: ["codemode"], deny: ["Bash(danger*)", "Read(./.env)", "Edit(./protected.txt)", "Write(./protected.txt)"] } }, "test.json");
   assert.equal(settings.ok, true);
@@ -236,7 +347,7 @@ test("deny rule blocks with attribution", async () => {
 test("guarded command confirms exact raw command and label", async () => {
   const { ctx, calls } = context();
   assert.equal(await handleToolCall(event("danger; echo hi"), ctx, loadConfig), undefined);
-  assert.deepEqual(calls[0]?.slice(0, 2), ["Approve command? [danger command]", "Requires confirmation (danger command, global.json)\n\ndanger; echo hi"]);
+  assert.deepEqual(calls[0]?.slice(0, 2), ["Approve command? [danger command]", "Requires confirmation (danger command, global.json)\ndanger command requires confirmation\n\ndanger; echo hi"]);
 });
 
 test("guardian abort during synchronous running report skips reviewer", async () => {
@@ -1884,7 +1995,7 @@ test("external edits do not cancel pending review and session overrides persist 
   assert.match(((await h.invoke()) as { reason: string }).reason, /invalid config/);
 });
 
-test("authorization routes enforce priority, attribution, trust and suspicious allows", async () => {
+test("authorization routes enforce priority, attribution, trust and unsupported fallback", async () => {
   let reviews = 0; const notices: string[] = []; const prompts: string[] = [];
   let trusted = false; let trustSamples = 0;
   const { ctx } = context({ isProjectTrusted: () => { trustSamples++; return trusted; }, ui: {
@@ -1903,10 +2014,15 @@ test("authorization routes enforce priority, attribution, trust and suspicious a
     assert.equal(await handleToolCall(event(), ctx, () => ({ ...config([allow], mode), ui: { status: false, placement: "widget" } }), deps), undefined);
     assert.equal(prompts.length, before);
     assert.match(notices.at(-1)!, /Allowed by rule .*global.json/);
-    // Raw-text markers, including accepted false positives; not a shell-safety proof.
-    for (const marker of [";", "&&", "||", "|", "&", "\n", "\r", "$(x)", "`x`", "<(x)", ">(x)", '"a; b"', "2>&1"]) {
+    // Supported literal words and list terminators no longer require raw-marker confirmation.
+    for (const marker of [";", "&", "\n", '"a; b"']) {
+      const before = prompts.length;
+      assert.equal(await handleToolCall(event(`danger ${marker}`), { ...ctx, hasUI: false }, () => config([allow], mode), deps), undefined);
+      assert.equal(prompts.length, before);
+    }
+    for (const marker of ["&&", "||", "|", "\r", "$(x)", "`x`", "<(x)", ">(x)", "2>&1"]) {
       assert.equal(await handleToolCall(event(`danger ${marker}`), ctx, () => config([allow], mode), deps), undefined);
-      assert.match(prompts.at(-1)!, /Combined or nested/);
+      assert.match(prompts.at(-1)!, /Unsupported or malformed shell syntax/);
       assert.notEqual(await handleToolCall(event(`danger ${marker}`), { ...ctx, hasUI: false }, () => config([allow], mode), deps), undefined);
     }
     assert.equal(await handleToolCall(event(), ctx, () => config([rule("allow", "project"), allow], mode), deps), undefined);
