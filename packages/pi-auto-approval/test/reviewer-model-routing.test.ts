@@ -90,7 +90,7 @@ async function createHost(startup: GlobalStartup = "written") {
       signal: options?.signal,
       release: (decision) => settle({
         role: "assistant",
-        content: [{ type: "text", text: JSON.stringify({ decision, reason: `${decision} for ${model.provider}/${model.id}` }) }],
+        content: [{ type: "text", text: JSON.stringify({ decision, reason: `${decision} for ${model.provider}/${model.id}`, ...(decision === "revise" ? { constraint: "target", source: "user" } : {}) }) }],
         stopReason: "stop",
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       } as unknown as AssistantMessage),
@@ -296,6 +296,9 @@ test("a queued attempt keeps its captured reviewer while a later selection appli
     assertRouted(host, callA2, FAKE_A);
     assert.equal(callA2.signal?.aborted, false);
     callA2.release?.("revise");
+    const revision = await waitFor(host.confirms, 0);
+    assert.match(revision.message, /Reviewer requested a revision/);
+    revision.resolve(false);
     assert.equal((await second)?.block, true);
     const third = bash(host, extension, "whoami");
     const callB = await waitFor(host.calls, 2);

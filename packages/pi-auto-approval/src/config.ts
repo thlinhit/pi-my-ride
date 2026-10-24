@@ -8,8 +8,8 @@ import type { PermissionRule } from "./rules.ts";
 export type RuleLevel = "deny" | "ask" | "allow";
 export type ReviewMode = "manual" | "auto";
 export type { PermissionRule } from "./rules.ts";
-export interface PermissionSettings { readonly enabled: boolean; readonly reviewMode: ReviewMode }
-export interface SessionChoices { readonly enabled?: boolean; readonly reviewMode?: ReviewMode }
+export interface PermissionSettings { readonly enabled: boolean; readonly reviewMode: ReviewMode; readonly debug: boolean }
+export interface SessionChoices { readonly enabled?: boolean; readonly reviewMode?: ReviewMode; readonly debug?: boolean }
 export type UiPlacement = "widget" | "toolRow";
 export interface ConfigUi { readonly status: boolean; readonly placement: UiPlacement }
 export interface ReviewEvidenceConfig { readonly projectInstructions: boolean }
@@ -80,9 +80,10 @@ function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<Re
 }
 export function parseConfig(raw: unknown, source: string, baseDir = ".", scope: "global" | "project" = "global"): ConfigResult {
   if (!isObject(raw)) return fail(`${source}: root must be an object`);
-  const allowed = scope === "global" ? ["enabled", "reviewMode", "permissions", "reviewer", "reviewEvidence", "ui"] : ["permissions"];
+  const allowed = scope === "global" ? ["enabled", "reviewMode", "debug", "permissions", "reviewer", "reviewEvidence", "ui"] : ["permissions"];
   const unknown = checkKeys(raw, allowed, source);
   if (unknown) return fail(unknown);
+  if (raw.debug !== undefined && typeof raw.debug !== "boolean") return fail(`${source}: debug must be a boolean`);
   if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") return fail(`${source}: enabled must be a boolean`);
   if (raw.reviewMode !== undefined && raw.reviewMode !== "manual" && raw.reviewMode !== "auto") return fail(`${source}: reviewMode must be "manual" or "auto"`);
   const permissions = raw.permissions === undefined ? {} : raw.permissions;
@@ -115,7 +116,7 @@ export function parseConfig(raw: unknown, source: string, baseDir = ".", scope: 
     return { ok: true, value: { status: obj.status !== false, placement } };
   }, { status: true, placement: "widget" });
   if (!ui.ok) return ui;
-  return { ok: true, enabled: scope === "global" ? (raw.enabled as boolean | undefined ?? true) : true, reviewMode: scope === "global" ? (raw.reviewMode as ReviewMode | undefined ?? "auto") : "auto", rules, reviewer: reviewer.value, reviewEvidence: evidence.value, ui: ui.value };
+  return { ok: true, debug: raw.debug === true, enabled: scope === "global" ? (raw.enabled as boolean | undefined ?? true) : true, reviewMode: scope === "global" ? (raw.reviewMode as ReviewMode | undefined ?? "auto") : "auto", rules, reviewer: reviewer.value, reviewEvidence: evidence.value, ui: ui.value };
 }
 function readConfig(path: string, scope: "global" | "project"): ConfigResult {
   let text: string;
@@ -123,7 +124,7 @@ function readConfig(path: string, scope: "global" | "project"): ConfigResult {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") {
       if (scope === "global") return parseConfig(SEED_CONFIG, path, dirname(path), scope);
-      return { ok: true, enabled: true, reviewMode: "auto", rules: [], ui: { status: true, placement: "widget" }, reviewer: DEFAULT_REVIEWER, reviewEvidence: DEFAULT_REVIEW_EVIDENCE };
+      return { ok: true, debug: false, enabled: true, reviewMode: "auto", rules: [], ui: { status: true, placement: "widget" }, reviewer: DEFAULT_REVIEWER, reviewEvidence: DEFAULT_REVIEW_EVIDENCE };
     }
     return { ok: false, error: `${path}: cannot read config (${code ?? "unknown error"})` };
   }
@@ -205,7 +206,7 @@ export function saveGlobalReviewerModel(
     if (!committed) { try { rmSync(stage, { force: true }); } catch { /* best-effort staging cleanup */ } }
   }
 }
-export function saveGlobalSettings(globalDir: string, settings: PermissionSettings): SaveResult {
+export function saveGlobalSettings(globalDir: string, settings: Omit<PermissionSettings, "debug"> & { readonly debug?: boolean }): SaveResult {
   const path = join(globalDir, CONFIG_FILENAME);
   let before: string | undefined;
   let raw: Record<string, unknown> = structuredClone(SEED_CONFIG) as Record<string, unknown>;
@@ -217,7 +218,7 @@ export function saveGlobalSettings(globalDir: string, settings: PermissionSettin
     if (!checked.ok) return { ok: false, path, error: checked.error };
     raw = parsed as Record<string, unknown>;
   }
-  const output = JSON.stringify({ ...raw, enabled: settings.enabled, reviewMode: settings.reviewMode }, null, 2) + "\n";
+  const output = JSON.stringify({ ...raw, enabled: settings.enabled, reviewMode: settings.reviewMode, ...(settings.debug === undefined ? {} : { debug: settings.debug }) }, null, 2) + "\n";
   try {
     mkdirSync(globalDir, { recursive: true });
     let current: string | undefined;

@@ -36,6 +36,7 @@ async function runRoute(placement: "widget" | "toolRow", options: {
   const reviews: unknown[] = [];
   const config: ConfigResult = options.invalid ? { ok: false, error: "invalid fixture" } : {
     ok: true,
+    debug: true,
     rules: options.rules ?? [],
     enabled: options.enabled ?? true,
     reviewMode: options.mode ?? "manual",
@@ -72,7 +73,7 @@ test("direct gate calls preserve authorization decisions and inputs across place
     { name: "suspicious allow", options: { rules: [baseRule("allow", "global", "danger; echo harmless")] }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
     { name: "untrusted project allow", options: { rules: [baseRule("allow", "project", "danger; echo harmless")], trusted: false }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
     { name: "review approve", options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "approve", reason: "safe" } }) }, expectedReports: ["guardian-running", "guardian-running", "approved"], confirmations: 0, reviews: 2 },
-    { name: "review revise", options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "revise", reason: "change target" } }) }, expectedReason: /Reviewer requested a revision/, expectedReports: ["guardian-running", "revision-requested"], confirmations: 0, reviews: 1 },
+    { name: "review revise", options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "revise", reason: "change target", constraint: "target", source: "user" } }) }, expectedReports: ["guardian-running", "revision-requested", "guardian-running", "revision-requested", "approval-required", "approved"], confirmations: 1, reviews: 2 },
     { name: "aborted call", options: { aborted: true }, expectedReason: /confirmation failed/, expectedReports: [], confirmations: 0, reviews: 0 },
     { name: "review ask_user", options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "ask_user", reason: "confirm target" } }) }, expectedReports: ["guardian-running", "guardian-running", "approval-required", "approved"], confirmations: 1, reviews: 2 },
     { name: "review failure", options: { mode: "auto", review: async () => ({ ok: false, error: "review failed" }) }, expectedReports: ["guardian-running", "guardian-running", "approval-required", "approved"], confirmations: 1, reviews: 2 },

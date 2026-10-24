@@ -18,6 +18,25 @@ function harness() {
   return { root, globalDir, cwd, ctx, controller, messages, select: (v: string | undefined) => choose(v), cancels: () => cancels };
 }
 
+test("debug toggles session only, saves, clears and resets without cancelling reviews", async () => {
+  const h = harness();
+  const select = async (label: string) => { const pending = h.controller.menu("", h.ctx); await Promise.resolve(); h.select(label); await pending; };
+  try {
+    await select("Debug: off");
+    assert.equal(h.controller.snapshot().debug, true);
+    assert.equal(loadGlobalConfig(h.globalDir).ok, true);
+    await select("Save settings");
+    const saved = loadGlobalConfig(h.globalDir); assert.ok(saved.ok); if (saved.ok) assert.equal(saved.debug, true);
+    await select("Debug: on"); assert.equal(h.controller.snapshot().debug, false);
+    await select("Clear session choices / reload"); assert.deepEqual(h.controller.snapshot(), {});
+    assert.equal(h.cancels(), 0);
+    mkdirSync(h.globalDir, { recursive: true }); writeFileSync(join(h.globalDir, "auto-permissions.json"), "{");
+    await select("Debug: off"); assert.equal(h.controller.snapshot().debug, true);
+    await select("Clear session choices / reload"); assert.equal(h.cancels(), 0);
+    await select("Debug: off"); h.controller.reset(h.ctx); assert.deepEqual(h.controller.snapshot(), {});
+  } finally { rmSync(h.root, { recursive: true, force: true }); }
+});
+
 test("menu snapshot uses one saved-settings snapshot for change comparison", async () => {
   const h = harness();
   try {
@@ -154,7 +173,7 @@ test("reviewer picker is between Manual review and Save settings", async () => {
   try {
     const pending = h.controller.menu("", h.ctx);
     const main = await nextPick(h, 0);
-    assert.deepEqual(main.options, ["Protection on", "Protection off", "Auto review", "Manual review", "Reviewer model", "Save settings", "Clear session choices / reload"]);
+    assert.deepEqual(main.options, ["Protection on", "Protection off", "Auto review", "Manual review", "Reviewer model", "Debug: off", "Save settings", "Clear session choices / reload"]);
     main.resolve(undefined); await pending;
   } finally { h.close(); }
 });

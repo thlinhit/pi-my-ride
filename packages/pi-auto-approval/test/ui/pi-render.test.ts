@@ -116,6 +116,7 @@ test("actual factory keeps unverified row placement on widget fallback", async (
   mkdirSync(globalDir, { recursive: true });
   writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
+    debug: true,
     reviewMode: "manual",
     permissions: {},
     ui: { status: true, placement: "toolRow" },
@@ -379,6 +380,7 @@ test("actual ready row stays cancelled across late confirmation and session rese
   mkdirSync(globalDir, { recursive: true });
   writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
+    debug: true,
     reviewMode: "manual",
     permissions: { allow: ["Bash(seed)"], ask: ["Bash(danger)"] },
     ui: { status: true, placement: "toolRow" },
@@ -470,6 +472,7 @@ test("session reset redraws an ended native row without rebinding it", async (t:
   mkdirSync(globalDir, { recursive: true });
   writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
+    debug: true,
     reviewMode: "manual",
     permissions: { allow: ["Bash(safe)"] },
     ui: { status: true, placement: "toolRow" },
@@ -533,6 +536,7 @@ test("actual extension factory routes a ready native row through Pi's resolver c
   mkdirSync(globalDir, { recursive: true });
   writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
+    debug: true,
     reviewMode: "manual",
     permissions: {},
     ui: { status: true, placement: "toolRow" },

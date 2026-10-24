@@ -64,9 +64,9 @@ A rule is a tool name, optionally followed by a specifier in parentheses: `Tool`
 
 For supported Bash syntax, rules match the whole raw command and each parser-derived component separately. Exact source text is retained, including quotes and escapes. A quoted `;` does not create another component. Every component must pass; a whole-command allow never bypasses component checks. Explicit component allows satisfy review, so separate `Bash(git status)` and `Bash(git diff)` allows permit `git status; git diff`.
 
-The supported subset is simple commands with literal words, single quotes, safe double-quoted literals and escapes, joined by `;`, `&&`, `||`, `|`, newline, or background `&`. Comments and line continuations are supported. Expansions, substitutions, assignments, redirections, heredocs, loops, functions, grouping, subshells, negation, arithmetic, conditionals, CR/CRLF input and malformed or unknown syntax require manual confirmation. The parser treats CRLF differently from Bash, so CR input is deliberately unsupported.
+The supported subset is simple commands with literal words, single quotes, safe double-quoted literals and escapes, joined by `;`, `&&`, `||`, `|`, newline, or background `&`. Comments and line continuations are supported. Valid syntax outside that subset, including expansions, substitutions, assignments, redirections, heredocs, loops, functions, grouping, subshells, negation, arithmetic and conditionals, receives whole-command model review in auto mode. Allow rules cannot bypass this review. Manual mode still requires confirmation. Malformed, empty/comment-only, NUL, invalid Unicode and CR/CRLF input require manual confirmation. The parser treats CRLF differently from Bash, so CR input is deliberately excluded from model review.
 
-Unsupported input first receives the existing conservative segment scan for **deny only**. It can over-match quoted data. A detected denial blocks the call even if you would confirm; allow and ask scan results cannot automatically approve unsupported syntax.
+Unsupported input first receives the conservative segment scan for **deny and ask**. It can over-match quoted data and is not a complete shell semantic analysis. A detected denial blocks the call; a matching ask rule requires confirmation without model review. Otherwise, valid unsupported input is sent unchanged to the reviewer without component metadata. Failed reviews and ask/revise verdicts require confirmation; cancellation blocks the call.
 
 **Read, Edit, and Write** patterns are matched against the resolved path:
 
@@ -189,6 +189,12 @@ No manual real-Pi or real-model check has been performed for this phase. The sta
 ## Automated coverage
 
 Run `npm test && npm run typecheck` from the repository root. Tests cover strict global/project and nested validation; the rule grammar, precedence, trust, path normalization, attribution, parser-derived components and unsupported fallback; manual/auto/off routes; all five session resets; pending human/model cancellation, late approvals and dialog-lock retention; external-edit selection snapshots; and save conflicts from modification, deletion or appearance. History tests cover the exact record fields, redaction forms, and warning-only write failures. Phase 4 reviewer evidence, budget, cache and lineage tests remain, including five-step comparisons against fresh reviews. Reviewer-selection tests cover the atomic global save (partial-write, rename, and external-change failures), the `/permissions` picker, and routing through the real extension loader and Pi's real model registry and auth path: the real `getAvailable` listing (excluding unconfigured providers), `find` resolution, an unregistered selected model, and a selected provider losing configured auth, which reports Pi's own not-configured error. UI replies and successful provider replies are controlled doubles. These tests do not establish live TUI usability, real-model approval quality, or live Pi behavior.
+
+## Review status visibility
+
+Per-tool review status (editor widgets and inline tool rows) is hidden by default. `/permissions` shows the effective **Debug: off/on** value; selecting it toggles visibility for this session only. **Save settings** persists the effective choice as the global-only boolean `debug` (default `false`). **Clear session choices / reload** and every session start discard unsaved debug overrides.
+
+Turning debug off clears current review indicators, including pending and completed rows, without cancelling reviews or changing approvals. Turning it on does not restore past indicators. Review indicators require both debug and `ui.status: true`; `ui.status: false` still suppresses them. Debug does not change the guardian footer, approval dialogs, errors, history, or tool execution.
 
 ## Phase 5 tool-row status
 

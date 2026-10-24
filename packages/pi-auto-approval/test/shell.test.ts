@@ -30,6 +30,19 @@ for (const source of [
   "echo *.ts", "echo ~", "echo {a,b}", "echo $'abc'", 'echo $"abc"', "a |& b", "coproc pwd", "", "#only comment",
 ]) test(`fails closed: ${JSON.stringify(source)}`, () => assert.equal(analyzeShell(source).supported, false));
 
+test("distinguishes reviewable syntax from invalid or parser-ambiguous input", () => {
+  for (const source of ["echo $HOME", "x=1", "echo x >out", "echo $(pwd)"]) {
+    const result = analyzeShell(source);
+    assert.equal(result.supported, false);
+    if (!result.supported) assert.equal(result.reviewable, true);
+  }
+  for (const source of ["echo &&", "echo '", "", "# comment", "echo\r\npwd", "echo\0x", "echo \ud800"]) {
+    const result = analyzeShell(source);
+    assert.equal(result.supported, false);
+    if (!result.supported) assert.equal(result.reviewable, false);
+  }
+});
+
 test("mixed expressions retain all enclosing relationships", () => {
   const result = analyzeShell("a && b | c || d & e");
   assert.equal(result.supported, true);

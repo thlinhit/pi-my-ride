@@ -8,6 +8,24 @@ import { test } from "node:test";
 import * as config from "../src/config.ts";
 import { loadConfig, loadGlobalConfig, parseConfig, saveGlobalSettings, globalConfigDir, projectConfigPath, SEED_CONFIG } from "../src/config.ts";
 
+test("debug defaults off, validates globally, and saves compatibly", () => {
+  const t = temp();
+  try {
+    const defaults = parseConfig({}, "cfg");
+    assert.ok(defaults.ok); if (defaults.ok) assert.equal(defaults.debug, false);
+    assert.equal(parseConfig({ debug: true }, "cfg").ok, true);
+    for (const debug of [null, "true", 1]) assert.equal(parseConfig({ debug }, "cfg").ok, false);
+    assert.equal(parseConfig({ debug: true }, "cfg", ".", "project").ok, false);
+    for (const debug of [true, false]) {
+      assert.equal(saveGlobalSettings(t.global, { enabled: true, reviewMode: "auto", debug }).ok, true);
+      assert.equal(saveGlobalSettings(t.global, { enabled: false, reviewMode: "manual" }).ok, true);
+      const saved = loadGlobalConfig(t.global);
+      assert.ok(saved.ok); if (saved.ok) assert.equal(saved.debug, debug);
+      assert.deepEqual(JSON.parse(readFileSync(join(t.global, "auto-permissions.json"), "utf8")).permissions, SEED_CONFIG.permissions);
+    }
+  } finally { t.cleanup(); }
+});
+
 const rule = "Bash(cmd)";
 test("seed policy allows codemode by default", () => {
   assert.ok(SEED_CONFIG.permissions.allow.includes("codemode"));

@@ -31,6 +31,7 @@ const rule = (level: "deny" | "ask" | "allow" = "ask", scope: "global" | "projec
 const ruleSet = (level: "deny" | "ask" | "allow" = "ask"): PermissionRule[] => [rule(level)];
 const config = (rules = ruleSet(), reviewMode: "manual" | "auto" = "manual"): ConfigResult => ({
   ok: true,
+  debug: true,
   rules,
   enabled: true,
   reviewMode,
@@ -64,6 +65,34 @@ function context(overrides: Partial<GateContext> = {}) {
 }
 const event = (command: unknown = "dangerous") => ({ toolName: "bash", input: { command } });
 
+test("rule approval notifications require effective debug for Bash and other tools", async () => {
+  for (const toolName of ["bash", "codemode"]) {
+    for (const debug of [undefined, false, true]) for (const sessionDebug of [undefined, false, true]) {
+      const parsed = parseConfig({ ...(debug === undefined ? {} : { debug }), permissions: { allow: ["Bash(safe)", "codemode"] } }, "test.json");
+      const notices: string[] = [];
+      const { ctx } = context({ ui: {
+        confirm: async () => { assert.fail("allowed calls must not prompt"); },
+        notify: message => { notices.push(message); },
+      } });
+      const input = toolName === "bash" ? { command: "safe; safe" } : { code: "return 1" };
+      const choices = sessionDebug === undefined ? {} : { debug: sessionDebug };
+      assert.equal(await handleToolCall({ toolName, input }, ctx, () => parsed, {}, choices), undefined);
+      assert.equal(notices.length, (sessionDebug ?? debug ?? false) ? (toolName === "bash" ? 2 : 1) : 0);
+      for (const notice of notices) assert.match(notice, /^Allowed by rule \(.*test\.json\)$/);
+    }
+  }
+});
+
+test("review indicators require both debug and ui.status without changing approvals", async () => {
+  for (const debug of [false, true]) for (const status of [false, true]) {
+    const parsed = parseConfig({ debug, reviewMode: "manual", ui: { status } }, "test");
+    const reports: string[] = []; const { ctx, calls } = context();
+    assert.equal(await handleToolCall(event(), ctx, () => parsed, { status: report => reports.push(report.state) }), undefined);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(reports, debug && status ? ["approval-required", "approved"] : []);
+  }
+});
+
 test("compound policy preflight denies later components before any confirmation or review", async () => {
   for (const mode of ["auto", "manual"] as const) {
     const { ctx, calls } = context();
@@ -84,14 +113,14 @@ test("compound reviewers run serially through asks and failures until later revi
       review: async input => {
         seen.push(input.command!);
         if (input.command === "first") return first === "failure" ? { ok: false, error: "failed" } : { ok: true, verdict: { decision: "ask_user", reason: "ask" } };
-        return { ok: true, verdict: { decision: "revise", reason: "forbidden" } };
+        return { ok: true, verdict: { decision: "revise", reason: "forbidden", constraint: "target", source: "user" } };
       },
       status: report => statuses.push(report.state),
     });
-    assert.match(outcome!.reason, /forbidden/);
-    assert.deepEqual(seen, ["first", "last"]);
-    assert.equal(calls.length, 0);
-    assert.equal(statuses.includes("approved"), false);
+    assert.equal(outcome, undefined);
+    assert.deepEqual(seen, ["first", "last", "never"]);
+    assert.equal(calls.length, 1);
+    assert.equal(statuses.includes("approved"), true);
   }
 });
 
@@ -148,12 +177,59 @@ test("asks and failures accumulate into one full-original confirmation after all
   }
 });
 
-for (const source of ["echo $(pwd)", "for x in a; do pwd; done", "f() { pwd; }", "echo ok &&", "echo $HOME", "echo x >out"]) test(`unsupported syntax requires manual fallback: ${source}`, async () => {
+for (const source of ["echo ok &&", "echo ok\r\npwd", "", "#only comment"]) test(`invalid syntax requires manual fallback: ${source}`, async () => {
   for (const hasUI of [true, false]) {
     const { ctx, calls } = context({ hasUI });
     const result = await handleToolCall(event(source), ctx, () => config([parsedRule("Bash(*)", "allow")], "auto"), { review: async () => { assert.fail("unsupported syntax must not reach reviewer"); } });
     assert.equal(result?.block, hasUI ? undefined : true);
     assert.equal(calls.length, hasUI ? 1 : 0);
+  }
+});
+
+for (const source of ["echo $(pwd)", "for x in a; do pwd; done", "f() { pwd; }", "echo $HOME", "echo x >out", "npm test > /tmp/test.log 2>&1; result=$?; tail -18 /tmp/test.log; exit $result"]) test(`valid unsupported syntax gets whole-command review: ${source}`, async () => {
+  for (const hasUI of [true, false]) {
+    const { ctx, calls } = context({ hasUI });
+    const seen: ReviewInput[] = [];
+    const result = await handleToolCall(event(source), ctx, () => config([parsedRule("Bash(*)", "allow")], "auto"), { review: async input => {
+      seen.push(input);
+      return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+    } });
+    assert.equal(result, undefined);
+    assert.equal(calls.length, 0);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]!.command, source);
+    assert.equal(seen[0]!.component, undefined);
+  }
+});
+
+test("whole-command review preserves manual mode and restrictive rules", async () => {
+  for (const mode of ["manual", "auto"] as const) for (const level of ["allow", "ask", "deny"] as const) {
+    if (mode === "auto" && level === "allow") continue;
+    for (const hasUI of [true, false]) {
+      const { ctx, calls } = context({ hasUI });
+      const rules = [parsedRule("Bash(*)", "allow"), parsedRule("Bash(pwd)", level)];
+      const result = await handleToolCall(event("echo $(pwd)"), ctx, () => config(rules, mode), { review: async () => { assert.fail("must not review"); } });
+      assert.equal(result?.block, level === "deny" || !hasUI ? true : undefined);
+      assert.equal(calls.length, level !== "deny" && hasUI ? 1 : 0);
+    }
+  }
+});
+
+test("whole-command review retains failure, escalation and cancellation handling", async () => {
+  const outcomes = [
+    { ok: false, error: "unavailable" },
+    { ok: true, verdict: { decision: "ask_user", reason: "risk" } },
+    { ok: true, verdict: { decision: "revise", reason: "constraint", constraint: "target", source: "user" } },
+    { ok: false, cancelled: true, error: "cancelled" },
+  ] as const;
+  for (const outcome of outcomes) for (const hasUI of [true, false]) {
+    const { ctx, calls } = context({ hasUI });
+    let reviews = 0;
+    const result = await handleToolCall(event("echo $HOME"), ctx, () => config([parsedRule("Bash(*)", "allow")], "auto"), { review: async () => { reviews++; return outcome; } });
+    const cancelled = !outcome.ok && "cancelled" in outcome;
+    assert.equal(reviews, 1);
+    assert.equal(result?.block, cancelled || !hasUI ? true : undefined);
+    assert.equal(calls.length, !cancelled && hasUI ? 1 : 0);
   }
 });
 
@@ -278,7 +354,7 @@ test("unmatched non-bash review outcomes route to confirmation or block; no UI b
     { name: "failure", result: { ok: false, error: "reviewer unavailable" }, prompts: 1 },
     { name: "ask_user", result: { ok: true, verdict: { decision: "ask_user", reason: "Check." } }, prompts: 1 },
     { name: "budget", result: { ok: false, error: BUDGET_EXCEEDED_ERROR }, prompts: 1 },
-    { name: "revise", result: { ok: true, verdict: { decision: "revise", reason: "Narrow it." } }, prompts: 0, reason: "Reviewer requested a revision: Narrow it." },
+    { name: "revise", result: { ok: true, verdict: { decision: "revise", reason: "Narrow it.", constraint: "target", source: "user" } }, prompts: 1 },
     { name: "cancelled", result: { ok: false, cancelled: true, error: "cancelled" }, prompts: 0, reason: "Review cancelled" },
   ];
   for (const outcome of outcomes) {
@@ -387,12 +463,13 @@ test("guardian approves without confirmation and reports review status", async (
   assert.deepEqual((received as { reviewEvidence: unknown }).reviewEvidence, { projectInstructions: false });
 });
 
-test("guardian revise blocks and ask_user confirms with the reason", async () => {
+test("guardian revise and ask_user confirm with the reason", async () => {
   const denied = context();
   const revised = await handleToolCall(event(), denied.ctx, () => config([], "auto"), {
-    review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Target mismatch." } }),
+    review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Target mismatch.", constraint: "target", source: "user" } }),
   });
-  assert.match(revised!.reason, /Reviewer requested a revision: Target mismatch/);
+  assert.equal(revised, undefined);
+  assert.match(String(denied.calls[0]?.[1]), /Reviewer requested a revision: Target mismatch/);
   const askCalls = context();
   assert.equal(
     await handleToolCall(event("dangerous exact"), askCalls.ctx, () => config([], "auto"), {
@@ -775,10 +852,11 @@ async function factoryHarness(
   {
     group,
     uiStatus = true,
+    debug = true,
     guardian = false,
     reply = '{"decision":"approve","reason":"Allowed."}',
     branch = [],
-  }: { group?: string; uiStatus?: boolean; guardian?: boolean; reply?: string; branch?: unknown[] } = {},
+  }: { group?: string; uiStatus?: boolean; debug?: boolean | null; guardian?: boolean; reply?: string; branch?: unknown[] } = {},
 ) {
   const { default: autoApproval } = await import("../src/index.ts");
   const registrations: Array<{ eventName: string; callback: (...args: any[]) => unknown }> = [];
@@ -808,12 +886,14 @@ async function factoryHarness(
     join(globalDir, "auto-permissions.json"),
     JSON.stringify({
       enabled: true,
+      ...(debug === null ? {} : { debug }),
       reviewMode: guardian ? "auto" : "manual",
       permissions: guardian ? {} : { ask: ["Bash(danger*)"] },
       ui: { status: uiStatus, placement: "widget" },
     }),
   );
   const setWidget = mock.fn((_key: string, _content: string[] | undefined) => {});
+  const setStatus = mock.fn((_key: string, _content: string | undefined) => {});
   const model = { provider: "fake", id: "reviewer" };
   const prompts: string[] = [];
   const streamOptions: unknown[] = [];
@@ -853,7 +933,7 @@ async function factoryHarness(
         };
       },
     },
-    ui: { confirm, setWidget, notify: () => {} },
+    ui: { confirm, setWidget, setStatus, notify: () => {} },
   } as unknown as Parameters<ToolCallHandler>[1];
   const invoke = (confirmPrompt = confirm, toolCallId?: string) =>
     registrations.find((registration) => registration.eventName === "tool_call")!.callback({ ...event(), toolCallId } as ToolCallEvent, {
@@ -867,8 +947,56 @@ async function factoryHarness(
       ...ctx,
       ui: { ...ctx.ui, confirm: confirmPrompt },
     });
-  return { cwd, globalDir, ctx, registrations, commands, menu, reset, setWidget, invoke, invokeTool, prompts, streamOptions, snapshots };
+  return { cwd, globalDir, ctx, registrations, commands, menu, reset, setWidget, setStatus, invoke, invokeTool, prompts, streamOptions, snapshots };
 }
+
+test("malformed revision evidence uses human confirmation and resets reviewer lineage", async (t) => {
+  for (const accepted of [true, false]) {
+    const messages: string[] = [];
+    const h = await factoryHarness(t, async (_title, message) => { messages.push(String(message)); return accepted; }, { guardian: true, reply: '{"decision":"revise","reason":"unsupported restriction"}' });
+    for (let attempt = 0; attempt < 2; attempt++) assert.equal((await h.invoke()) === undefined, accepted);
+    assert.equal(messages.length, 2);
+    assert.ok(messages.every(message => message.includes("Automatic review failed: reviewer revision requires constraint and source")));
+    assert.ok(h.prompts.every(prompt => !prompt.includes('<EVIDENCE mode="delta">')));
+  }
+});
+
+test("factory hides statuses by default while retaining approval and footer", async (t) => {
+  const h = await factoryHarness(t, async () => true, { debug: null });
+  assert.equal(await h.invoke(), undefined);
+  assert.equal(h.setWidget.mock.callCount(), 0);
+  assert.match(h.setStatus.mock.calls.at(-1)!.arguments[1]!, /guardian: manual/);
+  writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "manual", ui: { status: true, placement: "toolRow" } }));
+  const notify = mock.fn();
+  const handler = h.registrations.find(r => r.eventName === "tool_call")!.callback;
+  assert.equal(await handler(event(), { ...h.ctx, ui: { ...h.ctx.ui, notify } }), undefined);
+  assert.equal(notify.mock.callCount(), 0, "hidden status does not attempt row attribution or fallback warnings");
+  assert.equal(h.setWidget.mock.callCount(), 0);
+  await h.menu("Debug: off");
+  assert.match(h.setStatus.mock.calls.at(-1)!.arguments[1]!, /guardian: manual/);
+});
+
+test("debug off clears pending status and off-on rejects late normal and abort reports", async (t) => {
+  for (const abort of [false, true]) {
+    let release!: (approved: boolean) => void;
+    const h = await factoryHarness(t, () => new Promise<boolean>(resolve => { release = resolve; }));
+    const controller = new AbortController();
+    const handler = h.registrations.find(r => r.eventName === "tool_call")!.callback;
+    const pending = handler({ ...event(), toolCallId: "debug-pending" }, { ...h.ctx, signal: controller.signal });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(h.setWidget.mock.calls.some(call => call.arguments[1] !== undefined));
+    await h.menu("Debug: on");
+    assert.equal(controller.signal.aborted, false);
+    assert.equal(h.setWidget.mock.calls.at(-1)!.arguments[1], undefined);
+    await h.menu("Debug: off");
+    const count = h.setWidget.mock.callCount();
+    if (abort) controller.abort();
+    release(true);
+    const decision = await pending;
+    assert.equal(Boolean(decision), abort);
+    assert.equal(h.setWidget.mock.callCount(), count);
+  }
+});
 
 test("factory gates a non-bash call under the same single confirmation lock", async (t) => {
   let release!: (approved: boolean) => void;
@@ -1586,7 +1714,7 @@ test("reviewer compares five chronological steps against fresh verdicts and pres
         return {
           result: async () => ({
             stopReason: "stop",
-            content: [{ type: "text", text: JSON.stringify({ decision, reason: decision }) }],
+            content: [{ type: "text", text: JSON.stringify({ decision, reason: decision, ...(decision === "revise" ? { constraint: "forbidden target", source: "user evidence" } : {}) }) }],
             usage: { input: 1, cacheRead: 0, cacheWrite: 0 },
           }),
         };
@@ -1644,7 +1772,11 @@ test("reviewer compares five chronological steps against fresh verdicts and pres
     assert.ok(latestAction(reusedRequests[i]), "comparison must extract an action card");
     assert.equal(latestAction(reusedRequests[i]), latestAction(freshRequests[i]), `action at step ${i}`);
     assert.equal(reusedRequests[i]!.options.cacheRetention, "long");
-    if (i > 0) assert.equal(reusedRequests[i]!.options.sessionId, reusedRequests[0]!.options.sessionId);
+    if (i > 0 && i <= 2) assert.equal(reusedRequests[i]!.options.sessionId, reusedRequests[0]!.options.sessionId);
+    if (i >= 3) {
+      assert.notEqual(reusedRequests[i]!.options.sessionId, reusedRequests[i - 1]!.options.sessionId);
+      assert.equal(reusedRequests[i]!.context.messages.length, 1);
+    }
   }
   assert.equal(
     freshRequests.every((request) => request.context.messages.length === 1),
@@ -1912,9 +2044,9 @@ test("menu cancellation settles an abort-ignoring dialog and retains its lock un
     const h = await factoryHarness(t, async () => { opened.resolve(); return old.promise; });
     if (selection === "Clear session choices / reload") await h.menu("Auto review");
     if (selection === "Clear session choices / reload") {
-      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "manual", permissions: {} }));
+      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ debug: true, reviewMode: "manual", permissions: {} }));
       await h.menu("Manual review");
-      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", permissions: {} }));
+      writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ debug: true, reviewMode: "auto", permissions: {} }));
     }
     const pending = h.invoke();
     await opened.promise;
@@ -1928,7 +2060,7 @@ test("menu cancellation settles an abort-ignoring dialog and retains its lock un
     }
     let newDialog = false;
     // Ask still owns human approval even when mode switched to auto.
-    writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ permissions: { ask: ["Bash(danger*)"] } }));
+    writeFileSync(join(h.globalDir, "auto-permissions.json"), JSON.stringify({ debug: true, permissions: { ask: ["Bash(danger*)"] } }));
     assert.match(((await h.invoke(async () => { newDialog = true; return true; })) as { reason: string }).reason, /confirmation failed/);
     assert.equal(newDialog, false, "unresolved old dialog must retain its lock");
     old.resolve(true);
@@ -2020,7 +2152,7 @@ test("authorization routes enforce priority, attribution, trust and unsupported 
       assert.equal(await handleToolCall(event(`danger ${marker}`), { ...ctx, hasUI: false }, () => config([allow], mode), deps), undefined);
       assert.equal(prompts.length, before);
     }
-    for (const marker of ["&&", "||", "|", "\r", "$(x)", "`x`", "<(x)", ">(x)", "2>&1"]) {
+    for (const marker of ["&&", "||", "|", "\r"]) {
       assert.equal(await handleToolCall(event(`danger ${marker}`), ctx, () => config([allow], mode), deps), undefined);
       assert.match(prompts.at(-1)!, /Unsupported or malformed shell syntax/);
       assert.notEqual(await handleToolCall(event(`danger ${marker}`), { ...ctx, hasUI: false }, () => config([allow], mode), deps), undefined);
@@ -2079,7 +2211,7 @@ test("terminal history covers AI approve, revise, no-UI blocks, and failed confi
   const approved = historyLog();
   assert.equal(await handleToolCall(event("ls"), context().ctx, () => config([], "auto"), { review: approveReview(), history: approved.history }), undefined);
   const revised = historyLog();
-  assert.equal((await handleToolCall(event("ls"), context().ctx, () => config([], "auto"), { review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Narrow it." } }) as never, history: revised.history }))?.block, true);
+  assert.equal((await handleToolCall(event("ls"), context({ hasUI: false }).ctx, () => config([], "auto"), { review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Narrow it.", constraint: "target", source: "user" } }) as never, history: revised.history }))?.block, true);
   const noUi = historyLog();
   assert.equal((await handleToolCall(event("danger now"), context({ hasUI: false }).ctx, () => config(ruleSet("ask")), { history: noUi.history }))?.block, true);
   const failed = historyLog();

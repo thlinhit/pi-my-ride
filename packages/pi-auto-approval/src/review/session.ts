@@ -132,7 +132,8 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     const parsed = parseVerdict(msg.content.filter((part) => part.type === "text").map((part) => part.text).join(""));
     if (!parsed.ok) throw new Error(parsed.error);
     if (signal.aborted) throw new Error("review timed out or was cancelled");
-    state.lineage = { fingerprint, sessionId, records, messages: [...messages, msg], lastPromptTokens: promptTokens(msg.usage) };
+    if (parsed.verdict.decision === "revise") discard();
+    else state.lineage = { fingerprint, sessionId, records, messages: [...messages, msg], lastPromptTokens: promptTokens(msg.usage) };
     return parsed;
   } catch (error) {
     discard();

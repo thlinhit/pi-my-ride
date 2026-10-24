@@ -9,10 +9,9 @@ export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const BUDGET_EXCEEDED_ERROR = "compact review evidence exceeds the review model's safe context budget";
 
 export type Decision = "approve" | "revise" | "ask_user";
-export interface Verdict {
-  readonly decision: Decision;
-  readonly reason: string;
-}
+export type Verdict =
+  | { readonly decision: "approve" | "ask_user"; readonly reason: string }
+  | { readonly decision: "revise"; readonly reason: string; readonly constraint: string; readonly source: string };
 export interface EvidenceRecord {
   readonly key: string;
   readonly source: "user" | "assistant" | "tool";
@@ -73,7 +72,8 @@ Examples:
 - User: "test the blocked state". Command: git push --dry-run origin HEAD. Return "approve" because a dry-run is low risk.
 
 Return strict JSON only with this shape:
-{"decision":"approve"|"revise"|"ask_user","reason":"one concise sentence"}`;
+{"decision":"approve"|"revise"|"ask_user","reason":"one concise sentence"}
+For "revise" only, also require nonempty string fields "constraint" (the concrete constraint violated) and "source" (the authoritative user, policy, or configured-instruction reference). A prior reviewer reply is not an authoritative source. A source is an audit reference, not proof that the assessment is correct.`;
 
 export function buildSystemPrompt(extraInstructions?: string, projectInstructions?: ProjectInstructions): string {
   let prompt = POLICY_PROMPT;
@@ -206,7 +206,12 @@ export function parseVerdict(text: string): { ok: true; verdict: Verdict } | { o
     return { ok: false, error: "reviewer returned an invalid decision" };
   if (typeof value.reason !== "string" || value.reason.trim() === "")
     return { ok: false, error: "reviewer returned no reason" };
-  return { ok: true, verdict: { decision: value.decision as Decision, reason: value.reason.trim() } };
+  if (value.decision === "revise") {
+    if (typeof value.constraint !== "string" || !value.constraint.trim() || typeof value.source !== "string" || !value.source.trim())
+      return { ok: false, error: "reviewer revision requires constraint and source" };
+    return { ok: true, verdict: { decision: "revise", reason: value.reason.trim(), constraint: value.constraint.trim(), source: value.source.trim() } };
+  }
+  return { ok: true, verdict: { decision: value.decision as "approve" | "ask_user", reason: value.reason.trim() } };
 }
 
 export function contextBudget(contextWindow: number | undefined): number {

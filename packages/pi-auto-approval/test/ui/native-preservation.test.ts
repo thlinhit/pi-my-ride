@@ -4,12 +4,12 @@ import test from "node:test";
 import type { ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { createHarness, nativeBash, reviewerReply, withoutInsertedStatus } from "./factory-harness.ts";
 
-type State = "guardian-running" | "approval-required" | "revision-requested" | "approved" | "blocked" | "blocked-cancelled";
+type State = "guardian-running" | "approval-required" | "revision-approved" | "approved" | "blocked" | "blocked-cancelled";
 
 const EXPECTED: Record<State, string[]> = {
   "guardian-running": ["◌ guardian running · Unmatched Bash command · mock/reviewer"],
   "approval-required": ["? approval required · Unmatched Bash command"],
-  "revision-requested": ["↻ revision requested · Unmatched Bash command"],
+  "revision-approved": ["✓ approved · Unmatched Bash command"],
   approved: ["✓ approved · Unmatched Bash command"],
   blocked: ["✗ blocked · Unmatched Bash command"],
   "blocked-cancelled": ["✗ blocked · Unmatched Bash command", "Cancelled"],
@@ -33,7 +33,7 @@ async function reachState(t: TestContext, state: State, id: string): Promise<Run
   let pending: Promise<unknown> | undefined;
   if (state === "guardian-running") {
     harness = await createHarness(t, { reviewMode: "auto", provider: () => { started.signal(); return pendingValue(); } });
-  } else if (state === "revision-requested") {
+  } else if (state === "revision-approved") {
     harness = await createHarness(t, { reviewMode: "auto", provider: async () => reviewerReply("revise", "change target") });
   } else if (state === "approved") {
     harness = await createHarness(t, { reviewMode: "manual", confirm: async () => true });

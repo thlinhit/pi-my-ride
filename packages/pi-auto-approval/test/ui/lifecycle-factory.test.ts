@@ -25,6 +25,39 @@ function deferred<T>() {
   return { promise, resolve, enter, arrive: () => reached() };
 }
 
+test("debug off invalidates pending and completed native rows without cancelling reviews", async (t) => {
+  const gate = deferred<unknown>();
+  const h = await createHarness(t, { reviewMode: "auto", provider: () => { gate.arrive(); return gate.promise; } });
+  const completed = h.row("seed", "debug-completed");
+  assert.equal(await h.call("seed", "debug-completed"), undefined);
+  assert.match(plain(completed.row.render(100)).join("\n"), /approved/);
+  const active = h.row("danger", "debug-active");
+  const pending = h.call("danger", "debug-active");
+  await gate.enter;
+  assert.match(plain(active.row.render(100)).join("\n"), /guardian/);
+  await h.menu("Debug: on");
+  assert.equal(h.controller.signal.aborted, false);
+  for (const row of [completed, active]) assert.doesNotMatch(plain(row.row.render(100)).join("\n"), /auto-approval/);
+  await h.menu("Debug: off");
+  gate.resolve(reviewerReply("approve"));
+  assert.equal(await pending, undefined);
+  for (const row of [completed, active]) assert.doesNotMatch(plain(row.row.render(100)).join("\n"), /auto-approval/);
+});
+
+test("debug off clears terminal widgets and cancels obsolete cleanup timers", async (t) => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const h = await createHarness(t, { reviewMode: "manual", placement: "widget", permissions: { allow: ["Bash(safe)"] } });
+    assert.equal(await h.call("safe", "debug-terminal"), undefined);
+    assert.ok(h.widgets.some(item => widgetState(item) === "approved"));
+    await h.menu("Debug: on");
+    assert.equal(h.widgets.at(-1)![1], undefined);
+    const count = h.widgets.length;
+    mock.timers.tick(2000);
+    assert.equal(h.widgets.length, count);
+  } finally { mock.timers.reset(); }
+});
+
 // Reviewer held open: reset or shutdown while unresolved, then the old approval settles late.
 for (const reset of ["session_start", "session_shutdown"] as const) {
   test(`L-1 ${reset} while reviewer is unresolved: late approval cannot publish, prompt, or re-review`, async (t: TestContext) => {

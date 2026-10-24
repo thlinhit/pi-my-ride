@@ -107,7 +107,7 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
   try {
     if (!projectTrusted) ignored = config.rules.filter((candidate) => candidate.scope === "project" && candidate.level === "allow" && [event, ...(analysis?.supported ? analysis.components.map(component => ({ toolName: "bash", input: { command: component.command } })) : [])].some(call => matcher(call, ctx.cwd, [candidate], true) !== undefined));
     rule = matcher({ toolName: event.toolName, input: event.input }, ctx.cwd, config.rules, projectTrusted);
-    if (bash && !analysis?.supported) rule = matchPermission(event, ctx.cwd, config.rules.filter(candidate => candidate.level === "deny"), projectTrusted) ?? rule;
+    if (bash && !analysis?.supported) rule = matchPermission(event, ctx.cwd, config.rules.filter(candidate => candidate.level !== "allow"), projectTrusted) ?? rule;
   } catch { return block("auto-approval: matcher error"); }
   const ignoredNote = ignored.length ? `Ignored project allow rule(s) from ${[...new Set(ignored.map((r) => r.source))].join(", ")} because the project is untrusted.` : "";
   if (ignoredNote) safeNotify(ctx, ignoredNote);
@@ -115,7 +115,7 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
   const label = rule?.label ?? (bash ? "Unmatched Bash command" : `Unmatched ${event.toolName} call`);
   const reviewer = config.reviewer.model ? `${config.reviewer.model.provider}/${config.reviewer.model.id}` : deps.reviewer;
   const report = (state: ReviewState, detail?: string) => {
-    if (!ctx.hasUI || !config.ui.status || !deps.status || isAborted(ctx)) return;
+    if (!ctx.hasUI || !(choices.debug ?? config.debug) || !config.ui.status || !deps.status || isAborted(ctx)) return;
     try { deps.status({ state, label, ...(rule?.source ? { source: rule.source } : {}), ...(state === "guardian-running" && reviewer ? { reviewer } : {}), ...(detail ? { detail } : {}), ui: config.ui }); } catch {}
   };
   const attribution = rule ? `(${rule.label}, ${rule.source})` : "";
@@ -132,8 +132,8 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
     } catch { report("blocked"); return block(`${reason} (confirmation failed)${ignoredNote ? ` ${ignoredNote}` : ""}`); }
   };
   if (rule?.level === "deny") { report("blocked"); return block(`Blocked by auto-approval ${attribution}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
-  if (bash && analysis) {
-    if (!analysis.supported) return confirm(`${analysis.reason} requires confirmation`);
+  if (analysis && !analysis.supported && !analysis.reviewable) return confirm(`${analysis.reason} requires confirmation`);
+  if (bash && analysis?.supported) {
     const reasons: string[] = rule?.level === "ask" ? [`Requires confirmation ${attribution}`] : [];
     let componentRules: (PermissionRule | undefined)[];
     try {
@@ -146,7 +146,7 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
       const component = analysis.components[index]!;
       const componentRule = componentRules[index];
       if (componentRule?.level === "allow") {
-        safeNotify(ctx, `Allowed by rule (${componentRule.label}, ${componentRule.source})`);
+        if (choices.debug ?? config.debug) safeNotify(ctx, `Allowed by rule (${componentRule.label}, ${componentRule.source})`);
         continue;
       }
       if (componentRule?.level === "ask") { reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`); continue; }
@@ -163,7 +163,11 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
         reasons.push(`Automatic review failed: ${result.error}`);
         continue;
       }
-      if (result.verdict.decision === "revise") { report("revision-requested"); return block(`Reviewer requested a revision: ${result.verdict.reason}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+      if (result.verdict.decision === "revise") {
+        report("revision-requested");
+        reasons.push(`Reviewer requested a revision: ${result.verdict.reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`);
+        continue;
+      }
       if (result.verdict.decision === "ask_user") reasons.push(`Reviewer needs user approval: ${result.verdict.reason}`);
     }
     if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
@@ -172,8 +176,8 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
     return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
   }
   if (rule?.level === "ask") return confirm(`Requires confirmation ${attribution}`);
-  if (rule?.level === "allow") {
-    safeNotify(ctx, `Allowed by rule (${rule.label}, ${rule.source})`);
+  if (rule?.level === "allow" && !bash) {
+    if (choices.debug ?? config.debug) safeNotify(ctx, `Allowed by rule (${rule.label}, ${rule.source})`);
     report("approved");
     return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
   }
@@ -190,7 +194,10 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
     return confirm(`Automatic review failed: ${result.error}`);
   }
   const { decision, reason } = result.verdict;
-  if (decision === "revise") { report("revision-requested"); return block(`Reviewer requested a revision: ${reason}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+  if (decision === "revise") {
+    report("revision-requested");
+    return confirm(`Reviewer requested a revision: ${reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`);
+  }
   if (decision === "ask_user") return confirm(`Reviewer needs user approval: ${reason}`);
   report("approved");
   return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
@@ -201,8 +208,8 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
   const controllers = new Set<AbortController>();
   const cancelPending = () => { for (const controller of controllers) controller.abort(); };
   const globalDir = globalConfigDir();
-  const permissions = createPermissionsController(globalDir, cancelPending);
   const display = createReviewDisplay(pi, VERSION, verifiedVersions);
+  const permissions = createPermissionsController(globalDir, cancelPending, (ctx) => display.reset(ctx));
   let approvalDialogOpened = false;
   let historyWarned = false;
   let callId = 0;
@@ -266,7 +273,6 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
     const seeded = ensureGlobalConfig(globalDir);
     if ("error" in seeded) ctx.ui.notify(`Could not create default config ${join(globalDir, CONFIG_FILENAME)}: ${seeded.error}`, "warning");
     permissions.reset(ctx);
-    display.reset(ctx);
     permissions.refreshFooter(ctx);
   });
   pi.on("session_shutdown", (_event, ctx) => { cancelPending(); display.shutdown(ctx); });

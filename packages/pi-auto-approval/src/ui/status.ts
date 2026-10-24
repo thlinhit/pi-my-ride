@@ -10,7 +10,7 @@ export interface ReviewStatus {
 }
 
 export function isTerminal(state: ReviewState): boolean {
-  return state === "approved" || state === "blocked" || state === "revision-requested";
+  return state === "approved" || state === "blocked";
 }
 
 function rowPrefix(state: ReviewState): string {

@@ -48,7 +48,7 @@ test("maps ordinary widget status and cancellation detail", () => {
 test("identifies terminal states", () => {
   assert.equal(isTerminal("approved"), true);
   assert.equal(isTerminal("blocked"), true);
-  assert.equal(isTerminal("revision-requested"), true);
+  assert.equal(isTerminal("revision-requested"), false);
   assert.equal(isTerminal("guardian-running"), false);
   assert.equal(isTerminal("approval-required"), false);
 });

@@ -42,7 +42,7 @@ const scenarios: Scenario[] = [
   { name: "ask confirmation error", config: { permissions: { ask: ["Bash(danger)"] } }, confirm: "error", expectedBlock: /confirmation failed/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "untrusted project allow", config: { projectPermissions: { allow: ["Bash(danger; echo harmless)"] } }, trusted: false, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "review approve", config: { reviewMode: "auto" }, reply: '{"decision":"approve","reason":"safe"}', expectedStatuses: ["guardian-running", "approved"], expectedConfirmations: 0, expectedProviderCalls: 2 },
-  { name: "review revise", config: { reviewMode: "auto" }, reply: '{"decision":"revise","reason":"change target"}', expectedBlock: /Reviewer requested a revision/, expectedStatuses: ["guardian-running", "revision-requested"], expectedConfirmations: 0, expectedProviderCalls: 1 },
+  { name: "review revise", config: { reviewMode: "auto" }, reply: '{"decision":"revise","reason":"change target","constraint":"target","source":"user"}', expectedStatuses: ["guardian-running", "revision-requested", "guardian-running", "revision-requested", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
   { name: "review ask_user", config: { reviewMode: "auto" }, reply: '{"decision":"ask_user","reason":"confirm target"}', expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
   { name: "review malformed response fallback", config: { reviewMode: "auto" }, reply: "not JSON", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
   { name: "review provider failure fallback", config: { reviewMode: "auto" }, reply: "provider-error", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
@@ -58,6 +58,7 @@ async function runFactoryScenario(scenario: Scenario, placement: "widget" | "too
   const configured = (scenario.config.permissions ?? {}) as { allow?: string[]; ask?: string[]; deny?: string[] };
   const global = {
     enabled: true,
+    debug: true,
     reviewMode: "manual",
     permissions: { allow: ["Bash(seed)", ...(configured.allow ?? [])], ask: configured.ask ?? [], deny: configured.deny ?? [] },
     ui: { status: true, placement },
@@ -230,6 +231,7 @@ async function createLifecycleHarness(
   mkdirSync(globalDir, { recursive: true });
   writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
+    debug: true,
     reviewMode: "auto",
     permissions: { allow: ["Bash(seed)"] },
     ui: { status: true, placement },

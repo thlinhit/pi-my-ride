@@ -17,7 +17,7 @@ export interface ShellRelation {
   readonly operator?: string;
   readonly side?: "left" | "right";
 }
-export type ShellAnalysis = { readonly supported: true; readonly components: readonly ShellComponent[] } | { readonly supported: false; readonly reason: string };
+export type ShellAnalysis = { readonly supported: true; readonly components: readonly ShellComponent[] } | { readonly supported: false; readonly reviewable: boolean; readonly reason: string };
 interface Node {
   Pos(): { Offset(): number };
   End(): { Offset(): number };
@@ -38,11 +38,13 @@ interface Node {
 const syntax = sh.syntax as { NewParser(): { Parse(source: string, name: string): Node }; NodeType(node: Node): string };
 
 export function analyzeShell(source: string): ShellAnalysis {
+  let reviewable = false;
   try {
     // This parser treats CRLF as a newline; Bash preserves CR as literal data.
     if (!source || source.includes("\r") || source.includes("\0") || Buffer.from(source).toString("utf8") !== source) throw new Error("invalid source");
     const tree = syntax.NewParser().Parse(source, "command.sh");
-    if (syntax.NodeType(tree) !== "File") throw new Error("unknown root");
+    if (syntax.NodeType(tree) !== "File" || !tree.Stmts.length) throw new Error("empty or unknown root");
+    reviewable = true;
     const offsets = new Map<number, number>([[0, 0]]);
     let bytes = 0;
     let chars = 0;
@@ -72,7 +74,7 @@ export function analyzeShell(source: string): ShellAnalysis {
       if (type !== "Lit") throw new Error("unsupported word");
       const { start, end } = span(node);
       const raw = source.slice(start, end);
-      // Validate literal word forms, not shell boundaries. Expansions need manual review.
+      // Validate literal word forms, not shell boundaries. Expansions need whole-command review.
       if (!quoted) for (let i = 0; i < raw.length; i++) {
         if (raw[i] === "\\") { i++; continue; }
         if ("*?[]{}~$`".includes(raw[i]!)) throw new Error("unsupported literal expansion");
@@ -104,5 +106,5 @@ export function analyzeShell(source: string): ShellAnalysis {
     if (!components.length) throw new Error("no components");
     for (let i = 1; i < components.length; i++) if (components[i]!.start < components[i - 1]!.end) throw new Error("overlapping components");
     return { supported: true, components };
-  } catch { return { supported: false, reason: "Unsupported or malformed shell syntax" }; }
+  } catch { return { supported: false, reviewable, reason: reviewable ? "Shell syntax requires whole-command review" : "Unsupported or malformed shell syntax" }; }
 }

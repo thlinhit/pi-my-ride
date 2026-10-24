@@ -21,7 +21,7 @@ export const nativeExecute = nativeBash.execute;
 
 export const REVIEW_REASON = "ok";
 export function reviewerReply(decision: "approve" | "revise", reason = REVIEW_REASON) {
-  return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ decision, reason }) }], usage: { input: 20, cacheRead: 0, cacheWrite: 0 } };
+  return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ decision, reason, ...(decision === "revise" ? { constraint: "target", source: "user" } : {}) }) }], usage: { input: 20, cacheRead: 0, cacheWrite: 0 } };
 }
 
 export interface HarnessOptions {
@@ -44,6 +44,7 @@ export interface Harness {
   nativeRow(command: string, toolCallId: string): ToolExecutionComponent;
   sessionStart(): Promise<unknown> | unknown;
   shutdown(): unknown;
+  menu(selection: string): Promise<void>;
 }
 
 const PADDING = /^\u001b\[[0-9;]*m *\u001b\[[0-9;]*m$/;
@@ -55,6 +56,7 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
   mkdirSync(globalDir, { recursive: true });
   writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
     enabled: true,
+    debug: true,
     reviewMode: options.reviewMode,
     permissions: {
       allow: ["Bash(seed)", ...(options.permissions?.allow ?? [])],
@@ -73,13 +75,14 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
 
   const handlers = new Map<string, (...args: any[]) => unknown>();
   let resolver: ToolRendererResolver | undefined;
+  let menu!: (args: string, ctx: ExtensionContext) => Promise<void>;
   const widgets: unknown[][] = [];
   const confirmations: unknown[][] = [];
   const providerRequests: unknown[] = [];
   const controller = new AbortController();
   const pi = {
     on: (name: string, handler: (...args: any[]) => unknown) => { handlers.set(name, handler); return () => {}; },
-    registerCommand: () => {},
+    registerCommand: (_name: string, options: { handler: typeof menu }) => { menu = options.handler; },
     getAllTools: () => [{ name: "bash", sourceInfo: { source: "builtin", path: "builtin:bash" } }],
     registerToolRenderer: (value: ToolRendererResolver) => { resolver = value; },
   } as unknown as ExtensionAPI;
@@ -147,6 +150,7 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
     nativeRow: (command, toolCallId) => new ToolExecutionComponent("bash", toolCallId, { command }, {}, nativeBash as never, { requestRender: () => {} } as never, root),
     sessionStart: () => handlers.get("session_start")!({ reason: "new" }, ctx),
     shutdown: () => handlers.get("session_shutdown")!({}, ctx),
+    menu: (selection) => menu("", { ...ctx, ui: { ...ctx.ui, select: async () => selection } }),
   };
 }
 

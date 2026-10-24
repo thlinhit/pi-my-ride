@@ -5,6 +5,7 @@ import type { ConfigResult, SessionChoices } from "../../src/config.ts";
 
 const valid = (overrides: Partial<Extract<ConfigResult, { ok: true }>> = {}): Extract<ConfigResult, { ok: true }> => ({
   ok: true,
+  debug: true,
   enabled: true,
   reviewMode: "manual",
   rules: [],
