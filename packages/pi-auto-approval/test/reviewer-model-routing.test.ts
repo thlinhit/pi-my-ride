@@ -11,6 +11,7 @@ import { discoverAndLoadExtensions, ModelRegistry, ModelRuntime } from "@earendi
 import { DEFAULT_REVIEW_EVIDENCE, DEFAULT_REVIEWER, projectConfigPath, SEED_CONFIG } from "../src/config.ts";
 import { BUDGET_EXCEEDED_ERROR, POLICY_PROMPT } from "../src/review/protocol.ts";
 import { createPiReviewer, createReviewerState, type ReviewContext } from "../src/review/session.ts";
+import { menuDriver } from "./permissions-menu-harness.ts";
 
 type Pair = { readonly provider: string; readonly id: string };
 type Decision = "approve" | "revise" | "ask_user";
@@ -99,6 +100,7 @@ async function createHost(startup: GlobalStartup = "written") {
   }) as typeof registry.streamSimple;
   const sessionManager = { getSessionId: () => "phase6-session", buildSessionProjection: () => ({ entries: [] }) };
   const selects: Select[] = [];
+  const driver = menuDriver();
   const confirms: Confirm[] = [];
   const messages: string[] = [];
   const extensions: Awaited<ReturnType<typeof discoverAndLoadExtensions>>["extensions"] = [];
@@ -106,13 +108,14 @@ async function createHost(startup: GlobalStartup = "written") {
   const context = (hasUI = true) => ({
     cwd,
     hasUI,
-    mode: "rpc",
+    mode: "tui",
     get model() { return registry.find(activePair.provider, activePair.id); },
     modelRegistry: registry,
     sessionManager,
     isProjectTrusted: () => false,
     signal: undefined,
     ui: {
+      custom: driver.custom,
       select: (title: string, options: string[]) => new Promise<string | undefined>((resolve) => { selects.push({ title, options, resolve }); }),
       confirm: (title: string, message: string, opts?: { signal?: AbortSignal }) => new Promise<boolean>((resolve) => { confirms.push({ title, message, signal: opts?.signal, resolve }); }),
       notify: (message: string, type?: string) => { messages.push(`${type ?? "info"}:${message}`); },
@@ -121,7 +124,7 @@ async function createHost(startup: GlobalStartup = "written") {
     },
   }) as never;
   const host = {
-    cwd, home, agentDir, globalDir, registry, calls, selects, confirms, messages, extensions, context,
+    cwd, home, agentDir, globalDir, registry, calls, selects, confirms, messages, extensions, context, driver,
     setActive(pair: Pair) { activePair = pair; },
     async setConfigured(pair: Pair, available: boolean) {
       if (available) configured.add(pair.provider);
@@ -175,15 +178,19 @@ function labelFor(host: Host, pair: Pair): string {
   return `${index + 1}. ${key(pair)}`;
 }
 
-async function chooseReviewer(host: Host, extension: Extension, label: string): Promise<string[]> {
+async function chooseReviewer(host: Host, extension: Extension, label: string, save = false): Promise<string[]> {
   const start = host.selects.length;
   const command = extension.commands.get("permissions");
   assert.ok(command, "permissions command is registered");
   const pending = command.handler("", host.context(true));
-  (await waitFor(host.selects, start)).resolve("Reviewer model");
-  const picker = await waitFor(host.selects, start + 1);
+  let screen = host.driver.screens.length - 1;
+  await host.driver.next(screen++); host.driver.row(2);
+  const picker = await waitFor(host.selects, start);
   const options = picker.options;
   picker.resolve(label);
+  await host.driver.next(screen++);
+  if (save) { host.driver.key("\u0007"); await host.driver.next(screen); }
+  host.driver.key("\u001b");
   await pending;
   return options;
 }
@@ -258,7 +265,7 @@ test("explicit reviewer selection survives every session_start reason and a fres
   const host = await createHost();
   try {
     const extension = await host.load();
-    await chooseReviewer(host, extension, labelFor(host, FAKE_A));
+    await chooseReviewer(host, extension, labelFor(host, FAKE_A), true);
     for (const reason of ["startup", "reload", "new", "resume", "fork"]) {
       await sessionStart(host, extension, reason);
       const index = host.calls.length;
@@ -308,25 +315,29 @@ test("a queued attempt keeps its captured reviewer while a later selection appli
   } finally { await host.close(); }
 });
 
-test("a failed real save keeps the previous persisted reviewer for the next attempt", async () => {
+test("a failed real save keeps disk unchanged but session reviewer governs next attempt", async () => {
   const host = await createHost();
   const injection = injectPartialSaveFailure();
   try {
     const extension = await host.load();
-    await chooseReviewer(host, extension, labelFor(host, FAKE_A));
+    await chooseReviewer(host, extension, labelFor(host, FAKE_A), true);
     const path = join(host.globalDir, "auto-permissions.json");
     const before = readFileSync(path, "utf8");
     injection.state.armed = true;
-    await chooseReviewer(host, extension, labelFor(host, FAKE_B));
+    await chooseReviewer(host, extension, labelFor(host, FAKE_B), true);
     injection.state.armed = false;
     assert.equal(injection.state.injected, 1);
     assert.equal(readFileSync(path, "utf8"), before);
-    assert.match(host.messages.join("\n"), /previous selection retained/);
+    assert.match(host.messages.join("\n"), /Could not save settings/);
     const decision = bash(host, extension, "ls");
     const call = await waitFor(host.calls, 0);
-    assertRouted(host, call, FAKE_A);
+    assertRouted(host, call, FAKE_B);
     call.release?.("approve");
     assert.equal(await decision, undefined);
+    const fresh = await host.load(), next = bash(host, fresh, "pwd"), persisted = await waitFor(host.calls, 1);
+    assertRouted(host, persisted, FAKE_A); persisted.release?.("approve"); await next;
+    await chooseReviewer(host, extension, labelFor(host, FAKE_B), true);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { provider: FAKE_B.provider, model: FAKE_B.id });
   } finally {
     injection.restore();
     await host.close();
@@ -417,10 +428,12 @@ test("Use active model clears the persisted pair and later attempts follow the l
   const host = await createHost();
   try {
     const extension = await host.load();
-    await chooseReviewer(host, extension, labelFor(host, FAKE_A));
-    const options = await chooseReviewer(host, extension, USE_ACTIVE_MODEL);
+    await chooseReviewer(host, extension, labelFor(host, FAKE_A), true);
+    const options = await chooseReviewer(host, extension, USE_ACTIVE_MODEL, true);
     assert.equal(options[0], USE_ACTIVE_MODEL);
-    assert.deepEqual(JSON.parse(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8")), { permissions: {}, reviewMode: "auto" });
+    const persisted = JSON.parse(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8"));
+    assert.equal(persisted.reviewer, undefined);
+    assert.equal(persisted.reviewMode, "auto");
     const first = bash(host, extension, "ls");
     const callActive = await waitFor(host.calls, 0);
     assertRouted(host, callActive, ACTIVE);
@@ -465,13 +478,13 @@ test("session_start while the clear picker is open discards that delayed clear a
   const host = await createHost();
   try {
     const extension = await host.load();
-    await chooseReviewer(host, extension, labelFor(host, FAKE_A));
+    await chooseReviewer(host, extension, labelFor(host, FAKE_A), true);
     const command = extension.commands.get("permissions");
     assert.ok(command, "permissions command is registered");
     const start = host.selects.length;
     const pending = command.handler("", host.context(true));
-    (await waitFor(host.selects, start)).resolve("Reviewer model");
-    const picker = await waitFor(host.selects, start + 1);
+    await host.driver.next(host.driver.screens.length - 1); host.driver.row(2);
+    const picker = await waitFor(host.selects, start);
     await sessionStart(host, extension, "reload");
     picker.resolve(USE_ACTIVE_MODEL);
     await pending;
@@ -481,8 +494,41 @@ test("session_start while the clear picker is open discards that delayed clear a
     assertRouted(host, call, FAKE_A);
     call.release?.("approve");
     assert.equal(await decision, undefined);
-    await chooseReviewer(host, extension, USE_ACTIVE_MODEL);
+    await chooseReviewer(host, extension, USE_ACTIVE_MODEL, true);
     assert.equal(JSON.parse(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8")).reviewer, undefined);
+  } finally { await host.close(); }
+});
+
+test("unsaved explicit selection routes now but resets on session_start and fresh load", async () => {
+  const host = await createHost(); try {
+    const extension = await host.load(); const path = join(host.globalDir, "auto-permissions.json"), before = readFileSync(path, "utf8");
+    await chooseReviewer(host, extension, labelFor(host, FAKE_A)); assert.equal(readFileSync(path, "utf8"), before);
+    for (const [current, expected] of [[extension, FAKE_A], [await host.load(), ACTIVE]] as const) {
+      const index = host.calls.length, pending = bash(host, current, "ls"); const call = await waitFor(host.calls, index); assertRouted(host, call, expected); call.release?.("approve"); assert.equal(await pending, undefined);
+    }
+    await sessionStart(host, extension, "new"); const pending = bash(host, extension, "pwd"), call = await waitFor(host.calls, 2); assertRouted(host, call, ACTIVE); call.release?.("approve"); await pending;
+  } finally { await host.close(); }
+});
+
+test("active session choice follows live model and reset reveals saved explicit pair", async () => {
+  const host = await createHost(); try {
+    const extension = await host.load(); await chooseReviewer(host, extension, labelFor(host, FAKE_A), true);
+    const path = join(host.globalDir, "auto-permissions.json"), before = readFileSync(path, "utf8"); await chooseReviewer(host, extension, USE_ACTIVE_MODEL);
+    host.setActive(ACTIVE_NEXT); const first = bash(host, extension, "ls"), active = await waitFor(host.calls, 0); assertRouted(host, active, ACTIVE_NEXT); active.release?.("approve"); await first;
+    assert.equal(readFileSync(path, "utf8"), before);
+    const command = extension.commands.get("permissions")!; let screen = host.driver.screens.length;
+    const menu = command.handler("", host.context()); await host.driver.next(screen++); host.driver.key("\u0012"); await host.driver.next(screen); host.driver.key("\u001b"); await menu;
+    const second = bash(host, extension, "pwd"), explicit = await waitFor(host.calls, 1); assertRouted(host, explicit, FAKE_A); explicit.release?.("approve"); await second;
+  } finally { await host.close(); }
+});
+
+for (const event of ["session_start", "session_shutdown"] as const) for (const nested of [false, true]) test(`real ${event} invalidates waiting ${nested ? "picker" : "screen"}`, async () => {
+  const host = await createHost(); try {
+    const extension = await host.load(), command = extension.commands.get("permissions")!, before = readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8");
+    const pending = command.handler("", host.context()); await host.driver.next(0); let picker: Select | undefined;
+    if (nested) { host.driver.row(2); picker = await waitFor(host.selects, 0); }
+    const handler = extension.handlers.get(event)![0]!; await handler({ type: event, reason: "reload" }, host.context()); picker?.resolve(labelFor(host, FAKE_A)); await pending;
+    assert.equal(host.driver.mounted, undefined); assert.equal(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8"), before);
   } finally { await host.close(); }
 });
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { menuAction, menuDriver } from "../permissions-menu-harness.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -150,7 +151,10 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
     nativeRow: (command, toolCallId) => new ToolExecutionComponent("bash", toolCallId, { command }, {}, nativeBash as never, { requestRender: () => {} } as never, root),
     sessionStart: () => handlers.get("session_start")!({ reason: "new" }, ctx),
     shutdown: () => handlers.get("session_shutdown")!({}, ctx),
-    menu: (selection) => menu("", { ...ctx, ui: { ...ctx.ui, select: async () => selection } }),
+    menu: async (selection) => {
+      const driver = menuDriver();
+      await menuAction(driver, () => menu("", { ...ctx, ui: { ...ctx.ui, custom: driver.custom } }), selection);
+    },
   };
 }
 

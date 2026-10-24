@@ -113,7 +113,8 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
   if (ignoredNote) safeNotify(ctx, ignoredNote);
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   const label = rule?.label ?? (bash ? "Unmatched Bash command" : `Unmatched ${event.toolName} call`);
-  const reviewer = config.reviewer.model ? `${config.reviewer.model.provider}/${config.reviewer.model.id}` : deps.reviewer;
+  const reviewerConfig = choices.reviewerModel === undefined ? config.reviewer : { ...config.reviewer, model: choices.reviewerModel ?? undefined };
+  const reviewer = reviewerConfig.model ? `${reviewerConfig.model.provider}/${reviewerConfig.model.id}` : deps.reviewer;
   const report = (state: ReviewState, detail?: string) => {
     if (!ctx.hasUI || !(choices.debug ?? config.debug) || !config.ui.status || !deps.status || isAborted(ctx)) return;
     try { deps.status({ state, label, ...(rule?.source ? { source: rule.source } : {}), ...(state === "guardian-running" && reviewer ? { reviewer } : {}), ...(detail ? { detail } : {}), ui: config.ui }); } catch {}
@@ -155,7 +156,7 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
       if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
       let result: ReviewResult;
       try {
-        result = deps.review ? await deps.review({ command: component.command, component: { originalCommand: command!, index: index + 1, count: analysis.components.length, start: component.start, end: component.end, context: component.context }, reviewer: config.reviewer, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" };
+        result = deps.review ? await deps.review({ command: component.command, component: { originalCommand: command!, index: index + 1, count: analysis.components.length, start: component.start, end: component.end, context: component.context }, reviewer: reviewerConfig, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" };
       } catch { result = { ok: false, error: "reviewer unavailable" }; }
       if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
       if (!result.ok) {
@@ -186,7 +187,7 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
   report("guardian-running");
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   let result: ReviewResult;
-  try { result = deps.review ? await deps.review({ ...(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input }), reviewer: config.reviewer, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" }; }
+  try { result = deps.review ? await deps.review({ ...(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input }), reviewer: reviewerConfig, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" }; }
   catch { result = { ok: false, error: "reviewer unavailable" }; }
   if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
   if (!result.ok) {
@@ -275,5 +276,5 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
     permissions.reset(ctx);
     permissions.refreshFooter(ctx);
   });
-  pi.on("session_shutdown", (_event, ctx) => { cancelPending(); display.shutdown(ctx); });
+  pi.on("session_shutdown", (_event, ctx) => { permissions.close(); cancelPending(); display.shutdown(ctx); });
 }

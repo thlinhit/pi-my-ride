@@ -26,6 +26,44 @@ test("debug defaults off, validates globally, and saves compatibly", () => {
   } finally { t.cleanup(); }
 });
 
+test("complete settings save publishes one validated atomic snapshot and preserves raw fields", () => {
+  const t = temp(); mkdirSync(t.global, { recursive: true });
+  try {
+    const path = join(t.global, "auto-permissions.json");
+    const raw = { permissions: { ask: ["Bash(cmd)"] }, ui: { status: false }, reviewEvidence: { projectInstructions: true }, reviewer: { provider: "old", model: "old", timeoutMs: 4000, extraInstructionsFile: "instructions.md" } };
+    writeFileSync(join(t.global, "instructions.md"), "retain instructions");
+    writeFileSync(path, JSON.stringify(raw)); chmodSync(path, 0o640);
+    let renames = 0; const original = fs.renameSync;
+    fs.renameSync = ((...args) => { renames++; return original(...args); }) as typeof original; syncBuiltinESMExports();
+    try { assert.equal(saveGlobalSettings(t.global, { enabled: false, reviewMode: "manual", debug: true }, { provider: "new", id: "new" }).ok, true); }
+    finally { fs.renameSync = original; syncBuiltinESMExports(); }
+    assert.equal(renames, 1);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { ...raw, enabled: false, reviewMode: "manual", debug: true, reviewer: { ...raw.reviewer, provider: "new", model: "new" } });
+    assert.equal(fs.statSync(path).mode & 0o777, 0o640);
+    assert.equal(saveGlobalSettings(t.global, { enabled: true, reviewMode: "auto", debug: false }, null).ok, true);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { timeoutMs: 4000, extraInstructionsFile: "instructions.md" });
+  } finally { t.cleanup(); }
+});
+
+test("complete settings failures preserve all old bytes or absence and clean staging", () => {
+  for (const exists of [true, false]) for (const failure of ["writeFileSync", "renameSync", "mkdirSync", "statSync", "chmodSync"] as const) {
+    if (!exists && (failure === "statSync" || failure === "chmodSync")) continue;
+    const t = temp(); mkdirSync(t.global, { recursive: true });
+    const path = join(t.global, "auto-permissions.json"); const bytes = '{"permissions":{},"reviewer":{"provider":"old","model":"old"}}';
+    if (exists) writeFileSync(path, bytes);
+    const original = fs[failure];
+    try {
+      Object.assign(fs, { [failure]: (...args: unknown[]) => {
+        if (failure === "writeFileSync") (original as typeof fs.writeFileSync)(args[0] as string, "partial", args[2] as never);
+        throw new Error(`injected ${failure}`);
+      } }); syncBuiltinESMExports();
+      assert.equal(saveGlobalSettings(t.global, { enabled: false, reviewMode: "manual", debug: true }, { provider: "new", id: "new" }).ok, false);
+    } finally { Object.assign(fs, { [failure]: original }); syncBuiltinESMExports(); }
+    try { assert.equal(fs.existsSync(path), exists); if (exists) assert.equal(readFileSync(path, "utf8"), bytes); assert.deepEqual(fs.readdirSync(t.global), exists ? ["auto-permissions.json"] : []); }
+    finally { t.cleanup(); }
+  }
+});
+
 const rule = "Bash(cmd)";
 test("seed policy allows codemode by default", () => {
   assert.ok(SEED_CONFIG.permissions.allow.includes("codemode"));
@@ -262,7 +300,7 @@ test("strict nested configuration and values reject malformed inputs with source
     assert.equal(result.ok, false, JSON.stringify(value));
     if (!result.ok) assert.match(result.error, /validation.json/);
   }
-  for (const key of ["enabled", "reviewMode", "reviewer", "reviewEvidence", "ui", "guardian"]) {
+  for (const key of ["enabled", "reviewMode", "debug", "reviewer", "reviewEvidence", "ui", "guardian"]) {
     assert.equal(parseConfig({ [key]: {} }, "project.json", ".", "project").ok, false, key);
   }
   assert.equal(parseConfig({ ui: { placement: "bad" } }, "global.json").ok, false);
@@ -284,6 +322,26 @@ test("strict nested configuration and values reject malformed inputs with source
     writeFileSync(join(t.global, "auto-permissions.json"), JSON.stringify({ enabled: false }));
     writeFileSync(projectConfigPath(t.cwd), "{broken");
     assert.equal(loadConfig(t.cwd, t.global).ok, false, "saved off still validates project");
+  } finally { t.cleanup(); }
+});
+
+test("complete saves reject malformed runtime snapshots without changing target bytes", () => {
+  const t = temp(); mkdirSync(t.global, { recursive: true });
+  try {
+    const path = join(t.global, "auto-permissions.json"), bytes = '{"permissions":{}}';
+    for (const model of [{}, { provider: "p" }, { provider: "", id: "m" }]) {
+      writeFileSync(path, bytes);
+      assert.equal(saveGlobalSettings(t.global, { enabled: false, reviewMode: "manual", debug: true }, model as never).ok, false);
+      assert.equal(readFileSync(path, "utf8"), bytes);
+    }
+    for (const settings of [{ enabled: "yes", reviewMode: "auto" }, { enabled: true, reviewMode: "bad" }, { enabled: false, reviewMode: "manual", debug: "bad" }]) {
+      assert.equal(saveGlobalSettings(t.global, settings as never, null).ok, false);
+      assert.equal(readFileSync(path, "utf8"), bytes);
+    }
+    writeFileSync(path, '{"reviewer":{"extraInstructionsFile":"missing.md"}}');
+    const invalid = readFileSync(path, "utf8");
+    assert.equal(saveGlobalSettings(t.global, { enabled: false, reviewMode: "manual" }, null).ok, false);
+    assert.equal(readFileSync(path, "utf8"), invalid);
   } finally { t.cleanup(); }
 });
 

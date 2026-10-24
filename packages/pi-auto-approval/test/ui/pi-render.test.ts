@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { menuAction, menuDriver } from "../permissions-menu-harness.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -411,6 +412,7 @@ test("actual ready row stays cancelled across late confirmation and session rese
   let confirmStarted!: () => void;
   const opened = new Promise<void>((resolve) => { confirmStarted = resolve; });
   let confirms = 0;
+  const driver = menuDriver();
   const ctx = {
     mode: "tui",
     hasUI: true,
@@ -425,7 +427,7 @@ test("actual ready row stays cancelled across late confirmation and session rese
       },
       setWidget: () => {},
       setStatus: () => {},
-      select: async () => "Protection off",
+      custom: driver.custom,
       notify: () => {},
     },
   } as unknown as ExtensionContext;
@@ -448,7 +450,7 @@ test("actual ready row stays cancelled across late confirmation and session rese
   const pending = toolCall({ type: "tool_call", toolName: "bash", toolCallId: callId, input: { command: "danger" } }, ctx);
   await opened;
   assert.equal(confirms, 1);
-  await permissionCommand!("", ctx);
+  await menuAction(driver, async () => permissionCommand!("", ctx), "Protection off");
   assert.deepEqual(await pending, { block: true, reason: "auto-approval: confirmation failed" });
   const cancelled = render(row).filter((line) => line.includes("Cancelled"));
   assert.equal(cancelled.length, 1, "the ready row gets one attributed cancellation terminal");

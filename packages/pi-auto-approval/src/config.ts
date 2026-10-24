@@ -9,7 +9,7 @@ export type RuleLevel = "deny" | "ask" | "allow";
 export type ReviewMode = "manual" | "auto";
 export type { PermissionRule } from "./rules.ts";
 export interface PermissionSettings { readonly enabled: boolean; readonly reviewMode: ReviewMode; readonly debug: boolean }
-export interface SessionChoices { readonly enabled?: boolean; readonly reviewMode?: ReviewMode; readonly debug?: boolean }
+export interface SessionChoices { readonly enabled?: boolean; readonly reviewMode?: ReviewMode; readonly debug?: boolean; readonly reviewerModel?: NonNullable<ReviewerConfig["model"]> | null }
 export type UiPlacement = "widget" | "toolRow";
 export interface ConfigUi { readonly status: boolean; readonly placement: UiPlacement }
 export interface ReviewEvidenceConfig { readonly projectInstructions: boolean }
@@ -157,6 +157,22 @@ export function saveGlobalReviewerModel(
   globalDir: string,
   model: NonNullable<ReviewerConfig["model"]> | undefined,
 ): SaveResult {
+  if (model !== undefined && (!isObject(model) || !isNonBlank(model.provider) || !isNonBlank(model.id))) return { ok: false, path: join(globalDir, CONFIG_FILENAME), error: "reviewer provider and id must be non-empty strings" };
+  return replaceGlobalConfig(globalDir, (raw, exists) => {
+    if (model === undefined && (!exists || !isObject(raw.reviewer) || raw.reviewer.model === undefined)) return false;
+    setReviewerModel(raw, model);
+    return true;
+  });
+}
+function setReviewerModel(raw: Record<string, unknown>, model: ReviewerConfig["model"]): void {
+  const reviewer = isObject(raw.reviewer) ? raw.reviewer : {};
+  if (model === undefined) {
+    delete reviewer.provider;
+    delete reviewer.model;
+    if (Object.keys(reviewer).length === 0) delete raw.reviewer;
+  } else raw.reviewer = { ...reviewer, provider: model.provider, model: model.id };
+}
+function replaceGlobalConfig(globalDir: string, update: (raw: Record<string, unknown>, exists: boolean) => boolean): SaveResult {
   const path = join(globalDir, CONFIG_FILENAME);
   let before: string | undefined;
   let raw: Record<string, unknown> = structuredClone(SEED_CONFIG) as Record<string, unknown>;
@@ -168,22 +184,9 @@ export function saveGlobalReviewerModel(
     try { parsed = JSON.parse(before); } catch (err) { return { ok: false, path, error: `invalid JSON (${(err as Error).message})` }; }
     const checked = parseConfig(parsed, path, dirname(path));
     if (!checked.ok) return { ok: false, path, error: checked.error };
-    if (model === undefined && checked.reviewer.model === undefined) return { ok: true, path };
     raw = parsed as Record<string, unknown>;
   }
-  if (model === undefined) {
-    if (raw.reviewer !== undefined) {
-      const reviewer = raw.reviewer as Record<string, unknown>;
-      delete reviewer.provider;
-      delete reviewer.model;
-      if (Object.keys(reviewer).length === 0) delete raw.reviewer;
-    }
-    if (before === undefined || JSON.stringify(JSON.parse(before)) === JSON.stringify(raw)) return { ok: true, path };
-  } else {
-    if (!isNonBlank(model.provider) || !isNonBlank(model.id)) return { ok: false, path, error: `${path}: reviewer.provider and reviewer.model must be non-empty strings` };
-    const reviewer = isObject(raw.reviewer) ? raw.reviewer : {};
-    raw.reviewer = { ...reviewer, provider: model.provider, model: model.id };
-  }
+  if (!update(raw, before !== undefined)) return { ok: true, path };
   const checked = parseConfig(raw, path, dirname(path));
   if (!checked.ok) return { ok: false, path, error: checked.error };
   const output = JSON.stringify(raw, null, 2) + "\n";
@@ -206,27 +209,15 @@ export function saveGlobalReviewerModel(
     if (!committed) { try { rmSync(stage, { force: true }); } catch { /* best-effort staging cleanup */ } }
   }
 }
-export function saveGlobalSettings(globalDir: string, settings: Omit<PermissionSettings, "debug"> & { readonly debug?: boolean }): SaveResult {
-  const path = join(globalDir, CONFIG_FILENAME);
-  let before: string | undefined;
-  let raw: Record<string, unknown> = structuredClone(SEED_CONFIG) as Record<string, unknown>;
-  try { before = readFileSync(path, "utf8"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") return { ok: false, path, error: `cannot read config (${(err as NodeJS.ErrnoException).code ?? "unknown error"})` }; }
-  if (before !== undefined) {
-    let parsed: unknown;
-    try { parsed = JSON.parse(before); } catch (err) { return { ok: false, path, error: `invalid JSON (${(err as Error).message})` }; }
-    const checked = parseConfig(parsed, path, dirname(path));
-    if (!checked.ok) return { ok: false, path, error: checked.error };
-    raw = parsed as Record<string, unknown>;
-  }
-  const output = JSON.stringify({ ...raw, enabled: settings.enabled, reviewMode: settings.reviewMode, ...(settings.debug === undefined ? {} : { debug: settings.debug }) }, null, 2) + "\n";
-  try {
-    mkdirSync(globalDir, { recursive: true });
-    let current: string | undefined;
-    try { current = readFileSync(path, "utf8"); } catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
-    if (current !== before) return { ok: false, path, error: "config changed during save; refusing to overwrite" };
-    writeFileSync(path, output, "utf8");
-    return { ok: true, path };
-  } catch (err) { return { ok: false, path, error: (err as Error).message }; }
+export function saveGlobalSettings(globalDir: string, settings: Omit<PermissionSettings, "debug"> & { readonly debug?: boolean }, reviewerModel?: NonNullable<ReviewerConfig["model"]> | null): SaveResult {
+  if (reviewerModel !== undefined && reviewerModel !== null && (!isObject(reviewerModel) || !isNonBlank(reviewerModel.provider) || !isNonBlank(reviewerModel.id))) return { ok: false, path: join(globalDir, CONFIG_FILENAME), error: "reviewer provider and id must be non-empty strings" };
+  return replaceGlobalConfig(globalDir, raw => {
+    raw.enabled = settings.enabled;
+    raw.reviewMode = settings.reviewMode;
+    if (settings.debug !== undefined) raw.debug = settings.debug;
+    if (reviewerModel !== undefined) setReviewerModel(raw, reviewerModel ?? undefined);
+    return true;
+  });
 }
 export function loadProjectInstructions(cwd: string): ProjectInstructions | undefined {
   for (const source of ["AGENTS.md", "CLAUDE.md"] as const) {

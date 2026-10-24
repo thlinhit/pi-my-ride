@@ -65,6 +65,29 @@ function context(overrides: Partial<GateContext> = {}) {
 }
 const event = (command: unknown = "dangerous") => ({ toolName: "bash", input: { command } });
 
+test("session reviewer choices route both review paths and attribution without mutating config", async () => {
+  for (const reviewerModel of [undefined, null, { provider: "session", id: "chosen" }]) {
+    for (const call of [event("first;second"), event("echo $HOME"), { toolName: "read", input: { path: "file" } }]) {
+      const saved = parseConfig({ debug: true, reviewer: { provider: "saved", model: "original", reasoningEffort: "high", timeoutMs: 4000, extraInstructions: "Keep this" } }, "cfg");
+      assert.ok(saved.ok);
+      const original = structuredClone(saved);
+      const seen: ReviewInput[] = [];
+      const labels: (string | undefined)[] = [];
+      const { ctx } = context();
+      assert.equal(await handleToolCall(call, ctx, () => saved, {
+        reviewer: "live/active",
+        review: async input => { seen.push(input); return { ok: true, verdict: { decision: "approve", reason: "ok" } }; },
+        status: report => { if (report.state === "guardian-running") labels.push(report.reviewer); },
+      }, { reviewerModel }), undefined);
+      const model = reviewerModel === undefined ? { provider: "saved", id: "original" } : reviewerModel ?? undefined;
+      assert.ok(seen.length);
+      for (const input of seen) assert.deepEqual(input.reviewer, { ...saved.reviewer, model });
+      assert.deepEqual(labels, seen.map(() => model ? `${model.provider}/${model.id}` : "live/active"));
+      assert.deepEqual(saved, original);
+    }
+  }
+});
+
 test("rule approval notifications require effective debug for Bash and other tools", async () => {
   for (const toolName of ["bash", "codemode"]) {
     for (const debug of [undefined, false, true]) for (const sessionDebug of [undefined, false, true]) {
@@ -846,6 +869,8 @@ test("factory releases confirmation lock after a rejecting prompt", async (t) =>
   assert.equal(confirmations, 1);
 });
 
+import { menuDriver, menuAction } from "./permissions-menu-harness.ts";
+
 async function factoryHarness(
   t: TestContext,
   confirm: (...args: unknown[]) => Promise<boolean>,
@@ -940,7 +965,8 @@ async function factoryHarness(
       ...ctx,
       ui: { ...ctx.ui, confirm: confirmPrompt },
     });
-  const menu = (selection: string | undefined) => commands.permissions!.handler("", { ...ctx, ui: { ...ctx.ui, select: async () => selection } });
+  const driver = menuDriver();
+  const menu = (selection: string | undefined) => menuAction(driver, () => commands.permissions!.handler("", { ...ctx, ui: { ...ctx.ui, custom: driver.custom } }), selection);
   const reset = (reason: string) => registrations.find((registration) => registration.eventName === "session_start")!.callback({ reason }, ctx);
   const invokeTool = (toolName: string, input: unknown, toolCallId: string, confirmPrompt = confirm) =>
     registrations.find((registration) => registration.eventName === "tool_call")!.callback({ type: "tool_call", toolName, toolCallId, input }, {
@@ -2052,7 +2078,7 @@ test("menu cancellation settles an abort-ignoring dialog and retains its lock un
     await opened.promise;
     await h.menu(selection);
     assert.match(((await pending) as { reason: string }).reason, /confirmation failed/);
-    assert.equal(h.setWidget.mock.calls.some((call) => JSON.stringify(call.arguments).includes("Cancelled")), true);
+    assert.equal(h.setWidget.mock.calls.some((call) => JSON.stringify(call.arguments).includes("Cancelled")), selection !== "Clear session choices / reload");
     const published = h.setWidget.mock.callCount();
     if (selection === "Protection off") {
       assert.equal(await h.invoke(), undefined, "off retry is a fresh permitted attempt");
@@ -2102,7 +2128,7 @@ test("fallback cancellation suppresses late approval; unchanged choice and save 
   const h = await factoryHarness(t, async () => { opened.resolve(); return old.promise; }, { guardian: true, reply: "not JSON" });
   let settled = false;
   const pending = Promise.resolve(h.invoke()).then((result) => { settled = true; return result; }); await opened.promise;
-  await h.menu("Auto review");
+  await h.menu(undefined);
   await h.menu("Save settings");
   assert.equal(settled, false, "unchanged choice and saving must leave fallback pending");
   await h.menu("Protection off");
