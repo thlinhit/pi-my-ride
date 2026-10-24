@@ -41,11 +41,11 @@ const scenarios: Scenario[] = [
   { name: "ask confirmation denied", config: { permissions: { ask: ["Bash(danger)"] } }, confirm: "no", expectedBlock: /user declined/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "ask confirmation error", config: { permissions: { ask: ["Bash(danger)"] } }, confirm: "error", expectedBlock: /confirmation failed/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "untrusted project allow", config: { projectPermissions: { allow: ["Bash(danger; echo harmless)"] } }, trusted: false, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "review approve", config: { reviewMode: "auto" }, reply: '{"decision":"approve","reason":"safe"}', expectedStatuses: ["guardian-running", "approved"], expectedConfirmations: 0, expectedProviderCalls: 1 },
+  { name: "review approve", config: { reviewMode: "auto" }, reply: '{"decision":"approve","reason":"safe"}', expectedStatuses: ["guardian-running", "approved"], expectedConfirmations: 0, expectedProviderCalls: 2 },
   { name: "review revise", config: { reviewMode: "auto" }, reply: '{"decision":"revise","reason":"change target"}', expectedBlock: /Reviewer requested a revision/, expectedStatuses: ["guardian-running", "revision-requested"], expectedConfirmations: 0, expectedProviderCalls: 1 },
-  { name: "review ask_user", config: { reviewMode: "auto" }, reply: '{"decision":"ask_user","reason":"confirm target"}', expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
-  { name: "review malformed response fallback", config: { reviewMode: "auto" }, reply: "not JSON", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
-  { name: "review provider failure fallback", config: { reviewMode: "auto" }, reply: "provider-error", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 1 },
+  { name: "review ask_user", config: { reviewMode: "auto" }, reply: '{"decision":"ask_user","reason":"confirm target"}', expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
+  { name: "review malformed response fallback", config: { reviewMode: "auto" }, reply: "not JSON", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
+  { name: "review provider failure fallback", config: { reviewMode: "auto" }, reply: "provider-error", expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
   { name: "invalid config", config: { invalid: true }, expectedBlock: /invalid config/, expectedStatuses: [], expectedConfirmations: 0, expectedProviderCalls: 0 },
   { name: "explicit off", config: { enabled: false }, expectedStatuses: [], expectedConfirmations: 0, expectedProviderCalls: 0 },
 ];
@@ -417,7 +417,7 @@ test("connected abort cancels an in-flight fallback confirmation and retains its
       const recovered = await harness.call();
       assert.equal(recovered.result, undefined, `${placement}: settled confirmation releases the lock`);
       assert.equal(promptCalls, 2);
-      assert.equal(harness.providerRequests.length, 3);
+      assert.equal(harness.providerRequests.length, 6, "three original calls review two components each");
     } finally {
       harness.close();
     }
@@ -467,7 +467,7 @@ test("connected reviewer cancellation ignores a late approval and permits a fres
       assert.equal(harness.providerRequests.length, 1, `${placement}: abandoned approval cannot trigger another provider call`);
       const fresh = await harness.call();
       assert.equal(fresh.result, undefined);
-      assert.equal(harness.providerRequests.length, 2, `${placement}: fresh retry performs a new review`);
+      assert.equal(harness.providerRequests.length, 3, `${placement}: fresh retry reviews both components`);
     } finally {
       harness.close();
     }
@@ -503,7 +503,20 @@ test("connected reviewer projects full and delta evidence, reuses lineage, and i
     try {
       const first = await runCall();
       assert.equal(first.result.result, undefined);
-      assert.equal(first.raw.length, 1);
+      assert.equal(first.raw.length, 2);
+      for (const [index, raw] of first.raw.entries()) {
+        const prompt = raw.prompt.messages.at(-1).content[0].text;
+        const card = JSON.parse(prompt.split("<LATEST_PROPOSED_ACTION>\n")[1].split("\n</LATEST_PROPOSED_ACTION>")[0]);
+        assert.equal(card.command, index === 0 ? "danger" : "echo harmless");
+        assert.equal(card.component.originalCommand, "danger; echo harmless");
+        assert.equal(card.component.index, index + 1);
+        assert.equal(card.component.count, 2);
+        assert.equal(card.component.originalCommand.slice(card.component.start, card.component.end), card.command);
+        assert.ok(card.component.context.length);
+        assert.match(prompt, /initial context only/);
+        assert.match(prompt, /preceding commands have not executed/);
+        assert.match(prompt, /may change shell state/);
+      }
       const firstRaw = first.raw[0]!;
       assert.deepEqual(firstRaw.model, ["mock", "gpt-6-luna"], "provider receives the configured reviewer model");
       assert.equal(firstRaw.options.reasoning, "medium");
@@ -516,21 +529,21 @@ test("connected reviewer projects full and delta evidence, reuses lineage, and i
       evidence.push("user added a follow-up constraint");
       const second = await runCall();
       assert.equal(second.result.result, undefined);
-      assert.equal(second.raw.length, 1);
+      assert.equal(second.raw.length, 2);
       const secondRaw = second.raw[0]!;
       assert.equal(secondRaw.options.sessionId, firstRaw.options.sessionId, "successful projected evidence extends the same reviewer session");
       const secondMessages = normalize.strip(secondRaw.prompt.messages);
-      assert.deepEqual(secondMessages.slice(0, 2), normalize.strip([firstRaw.prompt.messages[0], firstRaw.reply]), "second request retains the exact first user request and reviewer reply");
-      assert.equal(secondMessages.length, 3, "second request appends exactly one reviewer reply and one delta user message");
-      assert.equal(secondMessages[2].role, "user");
-      assert.match(secondMessages[2].content[0].text, /continues the same conversation/);
-      assert.match(secondMessages[2].content[0].text, /user added a follow-up constraint/);
-      assert.doesNotMatch(secondMessages[2].content[0].text, /user-authorized initial action/, "delta carries only new evidence");
+      assert.deepEqual(secondMessages.slice(0, 4), normalize.strip([...first.raw[1]!.prompt.messages, first.raw[1]!.reply]), "second request retains the exact first user request and reviewer reply");
+      assert.equal(secondMessages.length, 5, "next original request follows both component reviews");
+      assert.equal(secondMessages[4].role, "user");
+      assert.match(secondMessages[4].content[0].text, /continues the same conversation/);
+      assert.match(secondMessages[4].content[0].text, /user added a follow-up constraint/);
+      assert.doesNotMatch(secondMessages[4].content[0].text, /user-authorized initial action/, "delta carries only new evidence");
 
       evidence[0] = "user replaced prior authorization evidence";
       const third = await runCall();
       assert.equal(third.result.result, undefined);
-      assert.equal(third.raw.length, 1);
+      assert.equal(third.raw.length, 2);
       const thirdRaw = third.raw[0]!;
       const thirdMessages = normalize.strip(thirdRaw.prompt.messages);
       assert.equal(thirdMessages.length, 1, "changed prior evidence discards old assistant/reviewer lineage");
@@ -538,7 +551,7 @@ test("connected reviewer projects full and delta evidence, reuses lineage, and i
       assert.match(thirdMessages[0].content[0].text, /user replaced prior authorization evidence/);
       assert.doesNotMatch(thirdMessages[0].content[0].text, /user-authorized initial action/, "invalidated evidence is not resent");
       assert.notEqual(thirdRaw.options.sessionId, firstRaw.options.sessionId, "evidence invalidation starts a fresh reviewer session");
-      assert.equal(harness.providerRequests.length, 3);
+      assert.equal(harness.providerRequests.length, 6);
       assert.equal(harness.confirmations.length, 0);
       assert.ok(harness.providerRequests.every((request) => request.options.signal instanceof AbortSignal && !request.options.signal.aborted));
       placementTraces.push(trace);
@@ -606,17 +619,17 @@ test("connected accumulated prompt budget retries fresh with projected evidence 
         const result = await harness.call();
         assert.equal(result.result, undefined, `${placement}: evidence ${index + 1} remains reviewable`);
         const raw = harness.providerRequests.slice(before);
-        assert.equal(raw.length, 1, `${placement}: evidence ${index + 1} performs exactly one provider request`);
+        assert.equal(raw.length, 2, `${placement}: evidence ${index + 1} reviews both components`);
         trace.push({
           outcome: result.result ?? "allowed",
           confirmations: harness.confirmations.length,
           states: observedCallStates(placement, result, true),
           requests: raw.map((request) => normalize.request(request)),
         });
-        raws.push(raw[0]!);
+        raws.push(...raw);
       }
       assert.equal(harness.confirmations.length, 0, `${placement}: accumulated budget uses fresh retry instead of fallback confirmation`);
-      assert.equal(harness.providerRequests.length, 6);
+      assert.equal(harness.providerRequests.length, 12);
       for (const raw of raws) {
         assert.equal(raw.options.reasoning, "medium");
         assert.equal(raw.options.cacheRetention, "long");
@@ -635,12 +648,13 @@ test("connected accumulated prompt budget retries fresh with projected evidence 
           assert.equal(messages.length, previous.length + 2, `${placement}: call ${index + 1} appends exactly reviewer reply and one user delta`);
           assert.equal(latest.role, "user");
           assert.match(latest.content[0].text, /continues the same conversation/);
-          assert.match(latest.content[0].text, new RegExp(`projected authorization ${index + 1}:`));
+          if (index % 2 === 0) assert.match(latest.content[0].text, new RegExp(`projected authorization ${Math.floor(index / 2) + 1}:`));
+          else assert.match(latest.content[0].text, /<no new finalized evidence>/);
         } else {
           resets++;
           assert.equal(messages.length, 1, `${placement}: call ${index + 1} reset sends a compact full prompt, not accumulated history`);
           assert.match(messages[0].content[0].text, /^Review the latest proposed action/);
-          assert.match(messages[0].content[0].text, new RegExp(`projected authorization ${index + 1}:`));
+          assert.match(messages[0].content[0].text, new RegExp(`projected authorization ${Math.floor(index / 2) + 1}:`));
         }
       }
       assert.ok(resets > 1, `${placement}: accumulated budget overflow resets reviewer lineage`);
@@ -662,7 +676,7 @@ test("connected reviewer timeout falls back to confirmation and ignores a late d
     try {
       const result = await harness.call();
       assert.equal(result.result, undefined, placement);
-      assert.equal(harness.providerRequests.length, 1, `${placement}: reviewer request started once`);
+      assert.equal(harness.providerRequests.length, 2, `${placement}: both components time out before confirmation`);
       assert.equal(harness.confirmations.length, 1, `${placement}: timed-out review asks for manual confirmation`);
       assert.match(String(harness.confirmations[0]?.[1]), /Automatic review failed: review timed out or was cancelled/);
       const expectedStates = placement === "widget"
@@ -676,7 +690,7 @@ test("connected reviewer timeout falls back to confirmation and ignores a late d
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert.equal(harness.widgets.length, widgetsBefore, `${placement}: late reviewer reply publishes no widget`);
       assert.equal(harness.rows[0]?.frames.length ?? 0, framesBefore, `${placement}: late reviewer reply publishes no row frame`);
-      assert.equal(harness.providerRequests.length, 1, `${placement}: late reply causes no further provider work`);
+      assert.equal(harness.providerRequests.length, 2, `${placement}: late reply causes no further provider work`);
       assert.equal(harness.confirmations.length, 1, `${placement}: late reply causes no further confirmation`);
       if (placement === "toolRow") {
         assert.deepEqual(harness.widgets.filter((item) => Array.isArray(item[1]) && item[1].some((line) => typeof line === "string" && line.trim())), [], `${placement}: ready row has no content-bearing widget fallback`);

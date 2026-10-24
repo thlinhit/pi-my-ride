@@ -1,6 +1,7 @@
 /** Pure guardian-review helpers: policy prompt, evidence builder, verdict parser. */
 
 import { createHash } from "node:crypto";
+import type { ShellRelation } from "../shell.ts";
 import type { ProjectInstructions, ReasoningEffort } from "../config.ts";
 
 export const CONTEXT_BUDGET_RATIO = 0.8;
@@ -18,7 +19,16 @@ export interface EvidenceRecord {
   readonly text: string;
 }
 export type PromptMode = "full" | "delta";
+export interface ComponentReview {
+  readonly originalCommand: string;
+  readonly index: number;
+  readonly count: number;
+  readonly start: number;
+  readonly end: number;
+  readonly context: readonly ShellRelation[];
+}
 export interface ReviewRequest {
+  readonly component?: ComponentReview;
   readonly tool: string;
   readonly command?: string;
   readonly arguments?: unknown;
@@ -41,7 +51,7 @@ First assess the highest intrinsic risk of the material action:
 - high: destructive, difficult-to-reverse, broad, production-affecting, security-sensitive, or potentially exfiltrating actions.
 - critical: obvious secret exfiltration, broad irreversible destruction, or persistent security weakening.
 
-For bash requests, assess what the shell command actually executes. A dangerous-looking phrase that is only quoted data or explanatory text does not raise risk. For compound commands, use the highest-risk executed segment.
+For bash requests, assess what the shell command actually executes. A dangerous-looking phrase that is only quoted data or explanatory text does not raise risk. For compound commands without component metadata, use the highest-risk executed segment. When component metadata is present, assess the current component in full-original-command structural context, not another component. The cwd is initial context only; preceding commands have not executed and may change shell state. Do not assume earlier reviews executed anything or infer a new cwd, environment, or filesystem state.
 
 Tool requests are often single steps in a multi-step plan. Judge whether this exact step is authorized, safe enough, and consistent with the user's requested outcome and order. Do not return "revise" merely because another requested operation is absent from this command.
 
@@ -174,6 +184,7 @@ export function buildReviewPrompt(
     delta ? '<EVIDENCE mode="delta">' : "<EVIDENCE>",
     lines.length ? lines.join("\n") : delta ? "<no new finalized evidence>" : "<no finalized evidence>",
     "</EVIDENCE>",
+    ...(request.component ? ["Assess the current component in full-command context. cwd is initial context only; preceding commands have not executed and may change shell state."] : []),
     "<LATEST_PROPOSED_ACTION>",
     requestCard(request),
     "</LATEST_PROPOSED_ACTION>",

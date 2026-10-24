@@ -4,12 +4,13 @@ import { randomUUID } from "node:crypto";
 import type { ReviewEvidenceConfig, ReviewerConfig } from "../config.ts";
 import { loadProjectInstructions } from "../config.ts";
 import { BUDGET_EXCEEDED_ERROR, buildReviewPrompt, buildSystemPrompt, collectEvidence, contextBudget, estimateTokens, evidencePrefixMatches, parseVerdict, promptTokens, reviewerFingerprint } from "./protocol.ts";
-import type { EvidenceRecord, ReviewRequest, Verdict } from "./protocol.ts";
+import type { ComponentReview, EvidenceRecord, ReviewRequest, Verdict } from "./protocol.ts";
 
 export type ReviewResult =
   | { readonly ok: true; readonly verdict: Verdict }
   | { readonly ok: false; readonly error: string; readonly cancelled?: true };
 export interface ReviewInput {
+  readonly component?: ComponentReview;
   readonly command?: string;
   readonly tool?: string;
   readonly arguments?: unknown;
@@ -99,7 +100,7 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
       base = undefined;
     }
     const tool = input.tool ?? "bash";
-    const request: ReviewRequest = { tool, command: input.command, arguments: input.arguments, cwd: ctx.cwd };
+    const request: ReviewRequest = { tool, command: input.command, arguments: input.arguments, cwd: ctx.cwd, ...(input.component ? { component: input.component } : {}) };
     const makeUser = (selected: readonly EvidenceRecord[], mode: "full" | "delta") => ({
       role: "user" as const,
       content: [{ type: "text" as const, text: buildReviewPrompt(selected, request, mode) }],

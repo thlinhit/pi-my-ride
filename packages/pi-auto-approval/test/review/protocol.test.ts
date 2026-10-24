@@ -7,6 +7,18 @@ import {
   type EvidenceRecord, type ReviewRequest,
 } from "../../src/review/protocol.ts";
 
+test("component cards retain exact source and state caveats in full and delta prompts", () => {
+  const component = { originalCommand: "cd dir && pwd", index: 2, count: 2, start: 10, end: 13, context: [{ kind: "binary" as const, operator: "&&", side: "right" as const, start: 0, end: 13 }] };
+  for (const mode of ["full", "delta"] as const) {
+    const prompt = buildReviewPrompt([], { tool: "bash", command: "pwd", cwd: "/initial", component }, mode);
+    assert.deepEqual(JSON.parse(prompt.split("<LATEST_PROPOSED_ACTION>\n")[1]!.split("\n</LATEST_PROPOSED_ACTION>")[0]!).component, component);
+    assert.match(prompt, /initial context only/);
+    assert.match(prompt, /preceding commands have not executed/);
+    assert.match(prompt, /may change shell state/);
+    assert.match(prompt, /current component/);
+  }
+});
+
 const request: ReviewRequest = { tool: "bash", command: "git push origin main", cwd: "/repo" };
 const userMsg = (text: string, id?: string) => ({ type: "message", ...(id === undefined ? {} : { id }), message: { role: "user", content: text } });
 const assistantMsg = (content: unknown, id = "assistant") => ({ type: "message", id, message: { role: "assistant", content } });
