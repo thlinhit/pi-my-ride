@@ -116,6 +116,34 @@ test("review indicators require both debug and ui.status without changing approv
   }
 });
 
+test("read-only components skip review and manual confirmation but preserve deny, ask and mixed pipelines", async () => {
+  for (const mode of ["auto", "manual"] as const) for (const debug of [false, true]) {
+    const notices: string[] = [];
+    const { ctx, calls } = context();
+    ctx.ui.notify = message => { notices.push(message); };
+    assert.equal(await handleToolCall(event("cd DIR; nl -ba SKILL.md | sed -n '1,80p;140,260p'; grep -n -iE 'a|b' -r examples references"), ctx, () => config([], mode), {
+      review: async () => { assert.fail("read-only components must not be reviewed"); },
+    }, { debug }), undefined);
+    assert.equal(calls.length, 0);
+    assert.deepEqual(notices, debug ? Array(4).fill("Allowed as read-only command") : []);
+  }
+  for (const level of ["deny", "ask"] as const) {
+    const { ctx, calls } = context();
+    const result = await handleToolCall(event("cat x"), ctx, () => config([parsedRule("Bash(cat *)", level)], "auto"), {
+      review: async () => { assert.fail("rules must win"); },
+    });
+    assert.equal(result?.block, level === "deny" ? true : undefined);
+    assert.equal(calls.length, level === "ask" ? 1 : 0);
+  }
+  const { ctx, calls } = context();
+  const seen: string[] = [];
+  assert.equal(await handleToolCall(event("cat x | tee y"), ctx, () => config([], "auto"), {
+    review: async input => { seen.push(input.command!); return { ok: true, verdict: { decision: "approve", reason: "ok" } }; },
+  }), undefined);
+  assert.deepEqual(seen, ["tee y"]);
+  assert.equal(calls.length, 0);
+});
+
 test("compound policy preflight denies later components before any confirmation or review", async () => {
   for (const mode of ["auto", "manual"] as const) {
     const { ctx, calls } = context();
@@ -150,15 +178,15 @@ test("compound reviewers run serially through asks and failures until later revi
 test("whole allow never skips components; component allows pass and quoted deny text stays data", async () => {
   const { ctx, calls } = context();
   const seen: ReviewInput[] = [];
-  const command = "echo 'x;rm file;z';pwd";
+  const command = "echo 'x;rm file;z';printf end";
   const rules = [parsedRule(`Bash(${command})`, "allow"), parsedRule("Bash(echo *)", "allow"), parsedRule("Bash(rm *)", "deny")];
   assert.equal(await handleToolCall(event(command), ctx, () => config(rules, "auto"), { review: async input => { seen.push(input); return { ok: true, verdict: { decision: "approve", reason: "ok" } }; } }), undefined);
-  assert.deepEqual(seen.map(input => input.command), ["pwd"]);
+  assert.deepEqual(seen.map(input => input.command), ["printf end"]);
   assert.equal(calls.length, 0);
 });
 
 test("component reviews retain source context and unchanged frozen input with one final outcome", async () => {
-  const command = "cd dir && pwd | cat;echo '😀' & printf end";
+  const command = "echo dir && printf middle | tee out;echo '😀' & printf end";
   const input = Object.freeze({ command, timeout: 30 });
   const original = Object.freeze({ toolName: "bash", input });
   const { ctx, calls } = context();
@@ -169,7 +197,7 @@ test("component reviews retain source context and unchanged frozen input with on
     review: async input => { seen.push(input); return { ok: true, verdict: { decision: "approve", reason: "ok" } }; },
     history: entry => { outcomes.push(entry); return { ok: true }; }, status: r => states.push(r.state),
   }), undefined);
-  assert.deepEqual(seen.map(i => i.command), ["cd dir", "pwd", "cat", "echo '😀'", "printf end"]);
+  assert.deepEqual(seen.map(i => i.command), ["echo dir", "printf middle", "tee out", "echo '😀'", "printf end"]);
   seen.forEach((i, n) => {
     assert.equal(i.component?.originalCommand, command);
     assert.equal(i.component?.index, n + 1);
@@ -2235,15 +2263,15 @@ test("terminal history records allow, deny, and confirmation outcomes once with 
 
 test("terminal history covers AI approve, revise, no-UI blocks, and failed confirmation", async () => {
   const approved = historyLog();
-  assert.equal(await handleToolCall(event("ls"), context().ctx, () => config([], "auto"), { review: approveReview(), history: approved.history }), undefined);
+  assert.equal(await handleToolCall(event("echo first"), context().ctx, () => config([], "auto"), { review: approveReview(), history: approved.history }), undefined);
   const revised = historyLog();
-  assert.equal((await handleToolCall(event("ls"), context({ hasUI: false }).ctx, () => config([], "auto"), { review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Narrow it.", constraint: "target", source: "user" } }) as never, history: revised.history }))?.block, true);
+  assert.equal((await handleToolCall(event("echo first"), context({ hasUI: false }).ctx, () => config([], "auto"), { review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Narrow it.", constraint: "target", source: "user" } }) as never, history: revised.history }))?.block, true);
   const noUi = historyLog();
   assert.equal((await handleToolCall(event("danger now"), context({ hasUI: false }).ctx, () => config(ruleSet("ask")), { history: noUi.history }))?.block, true);
   const failed = historyLog();
   assert.equal((await handleToolCall(event("danger now"), context({ ui: { confirm: async () => { throw new Error("dialog broke"); }, notify: () => {} } }).ctx, () => config(ruleSet("ask")), { history: failed.history }))?.block, true);
-  assert.deepEqual(approved.entries, [{ tool: "bash", command: "ls", decision: "approved" }]);
-  assert.deepEqual(revised.entries, [{ tool: "bash", command: "ls", decision: "blocked" }]);
+  assert.deepEqual(approved.entries, [{ tool: "bash", command: "echo first", decision: "approved" }]);
+  assert.deepEqual(revised.entries, [{ tool: "bash", command: "echo first", decision: "blocked" }]);
   assert.deepEqual(noUi.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
   assert.deepEqual(failed.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
 });

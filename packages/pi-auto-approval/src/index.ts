@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ConfigResult, PermissionRule, SessionChoices } from "./config.ts";
 import { CONFIG_FILENAME, ensureGlobalConfig, globalConfigDir, loadConfig } from "./config.ts";
 import { analyzeShell } from "./shell.ts";
+import { isReadOnlyComponent } from "./readonly.ts";
 import { matchPermission, matchPermissionExact } from "./rules.ts";
 import { createPermissionsController } from "./permissions.ts";
 import { recordHistory, type HistoryEntry, type HistoryResult } from "./history.ts";
@@ -151,6 +152,10 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
         continue;
       }
       if (componentRule?.level === "ask") { reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`); continue; }
+      if (isReadOnlyComponent(component.command)) {
+        if (choices.debug ?? config.debug) safeNotify(ctx, "Allowed as read-only command");
+        continue;
+      }
       if (mode === "manual") { reasons.push(`${label} requires confirmation`); continue; }
       report("guardian-running");
       if (isAborted(ctx)) return block(CONFIRMATION_FAILED);

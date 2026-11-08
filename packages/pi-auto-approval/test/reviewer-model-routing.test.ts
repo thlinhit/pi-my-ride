@@ -253,7 +253,7 @@ test("reviewer picker lists only real available entries and routes the selected 
     assert.notEqual(labelFor(host, SLASH_A), labelFor(host, SLASH_B));
     assert.ok(host.registry.find(NOAUTH.provider, NOAUTH.id));
     assert.ok(!options.some((label) => label.endsWith(`. ${key(NOAUTH)}`)));
-    const decision = bash(host, extension, "ls");
+    const decision = bash(host, extension, "echo first");
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, FAKE_A);
     call.release?.("approve");
@@ -269,7 +269,7 @@ test("explicit reviewer selection survives every session_start reason and a fres
     for (const reason of ["startup", "reload", "new", "resume", "fork"]) {
       await sessionStart(host, extension, reason);
       const index = host.calls.length;
-      const decision = bash(host, extension, "ls");
+      const decision = bash(host, extension, "echo first");
       const call = await waitFor(host.calls, index);
       assertRouted(host, call, FAKE_A);
       call.release?.("approve");
@@ -277,7 +277,7 @@ test("explicit reviewer selection survives every session_start reason and a fres
     }
     const fresh = await host.load();
     const index = host.calls.length;
-    const decision = bash(host, fresh, "ls");
+    const decision = bash(host, fresh, "echo first");
     const call = await waitFor(host.calls, index);
     assertRouted(host, call, FAKE_A);
     call.release?.("approve");
@@ -290,9 +290,9 @@ test("a queued attempt keeps its captured reviewer while a later selection appli
   try {
     const extension = await host.load();
     await chooseReviewer(host, extension, labelFor(host, FAKE_A));
-    const first = bash(host, extension, "ls");
+    const first = bash(host, extension, "echo first");
     const callA1 = await waitFor(host.calls, 0);
-    const second = bash(host, extension, "pwd");
+    const second = bash(host, extension, "echo second");
     for (let tick = 0; tick < 20; tick++) await Promise.resolve();
     assert.equal(host.calls.length, 1);
     await chooseReviewer(host, extension, labelFor(host, FAKE_B));
@@ -329,12 +329,12 @@ test("a failed real save keeps disk unchanged but session reviewer governs next 
     assert.equal(injection.state.injected, 1);
     assert.equal(readFileSync(path, "utf8"), before);
     assert.match(host.messages.join("\n"), /Could not save settings/);
-    const decision = bash(host, extension, "ls");
+    const decision = bash(host, extension, "echo first");
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, FAKE_B);
     call.release?.("approve");
     assert.equal(await decision, undefined);
-    const fresh = await host.load(), next = bash(host, fresh, "pwd"), persisted = await waitFor(host.calls, 1);
+    const fresh = await host.load(), next = bash(host, fresh, "echo second"), persisted = await waitFor(host.calls, 1);
     assertRouted(host, persisted, FAKE_A); persisted.release?.("approve"); await next;
     await chooseReviewer(host, extension, labelFor(host, FAKE_B), true);
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { provider: FAKE_B.provider, model: FAKE_B.id });
@@ -351,13 +351,13 @@ test("a selected model removed from the registry asks the human and never stream
     await chooseReviewer(host, extension, labelFor(host, FAKE_B));
     host.registry.unregisterProvider(FAKE_B.provider);
     assert.equal(host.registry.find(FAKE_B.provider, FAKE_B.id), undefined);
-    const approved = bash(host, extension, "ls");
+    const approved = bash(host, extension, "echo first");
     const first = await waitFor(host.confirms, 0);
     assert.match(first.message, /Automatic review failed: review model not found: phase6-b\/model/);
-    assert.match(first.message, /\n\nls$/);
+    assert.match(first.message, /\n\necho first$/);
     first.resolve(true);
     assert.equal(await approved, undefined);
-    const rejected = bash(host, extension, "pwd");
+    const rejected = bash(host, extension, "echo second");
     (await waitFor(host.confirms, 1)).resolve(false);
     assert.equal((await rejected)?.block, true);
     assert.deepEqual(host.calls, []);
@@ -371,7 +371,7 @@ test("a selected model losing configured auth reports the real Pi auth error to 
     await host.setConfigured(NOAUTH, true);
     await chooseReviewer(host, extension, labelFor(host, NOAUTH));
     await host.setConfigured(NOAUTH, false);
-    const decision = bash(host, extension, "ls");
+    const decision = bash(host, extension, "echo first");
     const confirm = await waitFor(host.confirms, 0);
     assert.match(confirm.message, /Automatic review failed: Provider is not configured: phase6-noauth/);
     confirm.resolve(false);
@@ -388,13 +388,13 @@ test("without UI, a missing or unauthenticated selected reviewer blocks without 
     const extension = await host.load();
     await chooseReviewer(host, extension, labelFor(host, FAKE_B));
     host.registry.unregisterProvider(FAKE_B.provider);
-    const missing = await bash(host, extension, "ls", false);
+    const missing = await bash(host, extension, "echo first", false);
     assert.equal(missing?.block, true);
     assert.match(missing?.reason ?? "", /Automatic review failed: review model not found: phase6-b\/model/);
     await host.setConfigured(NOAUTH, true);
     await chooseReviewer(host, extension, labelFor(host, NOAUTH));
     await host.setConfigured(NOAUTH, false);
-    const noauth = await bash(host, extension, "pwd", false);
+    const noauth = await bash(host, extension, "echo second", false);
     assert.equal(noauth?.block, true);
     assert.match(noauth?.reason ?? "", /Provider is not configured: phase6-noauth/);
     assert.equal(host.confirms.length, 0);
@@ -410,13 +410,13 @@ test("selecting another reviewer while an unauthenticated fallback dialog is ope
     await host.setConfigured(NOAUTH, true);
     await chooseReviewer(host, extension, labelFor(host, NOAUTH));
     await host.setConfigured(NOAUTH, false);
-    const first = bash(host, extension, "ls");
+    const first = bash(host, extension, "echo first");
     const confirm = await waitFor(host.confirms, 0);
     await chooseReviewer(host, extension, labelFor(host, FAKE_B));
     assert.equal(confirm.signal?.aborted, false);
     confirm.resolve(true);
     assert.equal(await first, undefined);
-    const next = bash(host, extension, "pwd");
+    const next = bash(host, extension, "echo second");
     const call = await waitFor(host.calls, 1);
     assertRouted(host, call, FAKE_B);
     call.release?.("approve");
@@ -434,13 +434,13 @@ test("Use active model clears the persisted pair and later attempts follow the l
     const persisted = JSON.parse(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8"));
     assert.equal(persisted.reviewer, undefined);
     assert.equal(persisted.reviewMode, "auto");
-    const first = bash(host, extension, "ls");
+    const first = bash(host, extension, "echo first");
     const callActive = await waitFor(host.calls, 0);
     assertRouted(host, callActive, ACTIVE);
     callActive.release?.("approve");
     assert.equal(await first, undefined);
     host.setActive(ACTIVE_NEXT);
-    const second = bash(host, extension, "pwd");
+    const second = bash(host, extension, "echo second");
     const callNext = await waitFor(host.calls, 1);
     assertRouted(host, callNext, ACTIVE_NEXT);
     callNext.release?.("approve");
@@ -453,14 +453,14 @@ test("clearing while an explicit review is unresolved leaves it running and late
   try {
     const extension = await host.load();
     await chooseReviewer(host, extension, labelFor(host, FAKE_A));
-    const first = bash(host, extension, "ls");
+    const first = bash(host, extension, "echo first");
     const callA = await waitFor(host.calls, 0);
     host.setActive(FAKE_B);
     await chooseReviewer(host, extension, USE_ACTIVE_MODEL);
     assert.equal(callA.signal?.aborted, false);
     callA.release?.("approve");
     assert.equal(await first, undefined);
-    const second = bash(host, extension, "pwd");
+    const second = bash(host, extension, "echo second");
     const callB = await waitFor(host.calls, 1);
     assertRouted(host, callB, FAKE_B);
     host.setActive(ACTIVE_NEXT);
@@ -489,7 +489,7 @@ test("session_start while the clear picker is open discards that delayed clear a
     picker.resolve(USE_ACTIVE_MODEL);
     await pending;
     assert.deepEqual(JSON.parse(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8")).reviewer, { provider: FAKE_A.provider, model: FAKE_A.id });
-    const decision = bash(host, extension, "ls");
+    const decision = bash(host, extension, "echo first");
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, FAKE_A);
     call.release?.("approve");
@@ -504,9 +504,9 @@ test("unsaved explicit selection routes now but resets on session_start and fres
     const extension = await host.load(); const path = join(host.globalDir, "auto-permissions.json"), before = readFileSync(path, "utf8");
     await chooseReviewer(host, extension, labelFor(host, FAKE_A)); assert.equal(readFileSync(path, "utf8"), before);
     for (const [current, expected] of [[extension, FAKE_A], [await host.load(), ACTIVE]] as const) {
-      const index = host.calls.length, pending = bash(host, current, "ls"); const call = await waitFor(host.calls, index); assertRouted(host, call, expected); call.release?.("approve"); assert.equal(await pending, undefined);
+      const index = host.calls.length, pending = bash(host, current, "echo first"); const call = await waitFor(host.calls, index); assertRouted(host, call, expected); call.release?.("approve"); assert.equal(await pending, undefined);
     }
-    await sessionStart(host, extension, "new"); const pending = bash(host, extension, "pwd"), call = await waitFor(host.calls, 2); assertRouted(host, call, ACTIVE); call.release?.("approve"); await pending;
+    await sessionStart(host, extension, "new"); const pending = bash(host, extension, "echo second"), call = await waitFor(host.calls, 2); assertRouted(host, call, ACTIVE); call.release?.("approve"); await pending;
   } finally { await host.close(); }
 });
 
@@ -514,11 +514,11 @@ test("active session choice follows live model and reset reveals saved explicit 
   const host = await createHost(); try {
     const extension = await host.load(); await chooseReviewer(host, extension, labelFor(host, FAKE_A), true);
     const path = join(host.globalDir, "auto-permissions.json"), before = readFileSync(path, "utf8"); await chooseReviewer(host, extension, USE_ACTIVE_MODEL);
-    host.setActive(ACTIVE_NEXT); const first = bash(host, extension, "ls"), active = await waitFor(host.calls, 0); assertRouted(host, active, ACTIVE_NEXT); active.release?.("approve"); await first;
+    host.setActive(ACTIVE_NEXT); const first = bash(host, extension, "echo first"), active = await waitFor(host.calls, 0); assertRouted(host, active, ACTIVE_NEXT); active.release?.("approve"); await first;
     assert.equal(readFileSync(path, "utf8"), before);
     const command = extension.commands.get("permissions")!; let screen = host.driver.screens.length;
     const menu = command.handler("", host.context()); await host.driver.next(screen++); host.driver.key("\u0012"); await host.driver.next(screen); host.driver.key("\u001b"); await menu;
-    const second = bash(host, extension, "pwd"), explicit = await waitFor(host.calls, 1); assertRouted(host, explicit, FAKE_A); explicit.release?.("approve"); await second;
+    const second = bash(host, extension, "echo second"), explicit = await waitFor(host.calls, 1); assertRouted(host, explicit, FAKE_A); explicit.release?.("approve"); await second;
   } finally { await host.close(); }
 });
 
@@ -806,7 +806,7 @@ test("real history save failure keeps approve and deny outcomes and warns exactl
     writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }));
     const extension = await host.load();
     mkdirSync(historyPathOf(host.cwd), { recursive: true });
-    const approved = bash(host, extension, "ls");
+    const approved = bash(host, extension, "echo first");
     (await waitFor(host.calls, 0)).release?.("approve");
     assert.equal(await approved, undefined);
     assert.match((await bash(host, extension, "rm file.txt"))!.reason, /^Blocked by auto-approval \(Bash\(rm \*\), /);
@@ -852,7 +852,7 @@ test("real outer abort with pending review records one blocked row and ignores l
     const extension = await host.load();
     const controller = new AbortController();
     const handler = (extension.handlers.get("tool_call") ?? [])[0]!;
-    const pending = handler({ type: "tool_call", toolName: "bash", toolCallId: "abort-review", input: { command: "ls" } }, { ...(host.context(true) as object), signal: controller.signal }) as Promise<Block>;
+    const pending = handler({ type: "tool_call", toolName: "bash", toolCallId: "abort-review", input: { command: "echo first" } }, { ...(host.context(true) as object), signal: controller.signal }) as Promise<Block>;
     const review = await waitFor(host.calls, 0);
     controller.abort();
     assert.equal((await pending)?.block, true);
@@ -860,7 +860,7 @@ test("real outer abort with pending review records one blocked row and ignores l
     await afterTick();
     const rows = historyRowsIn(host.cwd);
     assert.equal(rows.length, 1);
-    assert.deepEqual({ tool: rows[0]!.tool, command: rows[0]!.command, decision: rows[0]!.decision }, { tool: "bash", command: "ls", decision: "blocked" });
+    assert.deepEqual({ tool: rows[0]!.tool, command: rows[0]!.command, decision: rows[0]!.decision }, { tool: "bash", command: "echo first", decision: "blocked" });
   } finally { await host.close(); }
 });
 
