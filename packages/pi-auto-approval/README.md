@@ -44,9 +44,11 @@ On the first `session_start` with no global file, the extension creates it with 
 
 A missing global file uses the seed in memory without writing it. If startup cannot create the file, it warns; a genuinely missing file still uses the seed, while an unreadable or invalid config blocks protected calls.
 
-- `allow`: `Bash(git status)`, `Bash(git diff)`, `Bash(git diff --stat)`, `Bash(git log -5 --oneline)`
-- `ask`: `Bash(git push *)`, `Bash(git reset *)`, `Bash(git clean *)`, `Bash(rm *)`
-- `deny`: `Bash(security)`, `Bash(security *)`, `Read(./.env)`, `Read(./.env.*)`, `Read(./secrets/**)`, `Edit(./.env)`, `Edit(./.env.*)`, `Edit(./secrets/**)`
+- `allow`: `codemode`, `Bash(git status)`, `Bash(git status --short)`, `Bash(git diff)`, `Bash(git diff --stat)`, `Bash(git diff --check)`, `Bash(git log -5 --oneline)`, `Read(./**)`, `Read(~/.pi/agent/git/**/SKILL.md)`
+- `ask`: `Bash(git push)`, `Bash(git push *)`, `Bash(git reset)`, `Bash(git reset *)`, `Bash(git clean)`, `Bash(git clean *)`, `Bash(rm)`, `Bash(rm *)`
+- `deny`: `Bash(security)`, `Bash(security *)`, `Read(./.env)`, `Read(./.env.*)`, `Read(./secrets/**)`, `Edit(./.env)`, `Edit(./.env.*)`, `Edit(./secrets/**)`, `Read(./**/.env)`, `Read(./**/.env.*)`, `Read(./**/*.pem)`, `Read(./**/*.key)`, `Read(~/.ssh/**)`, `Read(~/.aws/**)`
+
+`Read(./**)` lets agents read any file in the current project without review. Deny rules still win, so the secret patterns above stay blocked. Paths are matched as written; symbolic links are not followed.
 
 The shipped [`examples/auto-permissions.json`](examples/auto-permissions.json) has the same content. No example or seed is copied into projects automatically.
 
@@ -114,17 +116,17 @@ Each tool call is checked in this order:
 1. **Session protection off**: bypasses config validation and gating.
 2. **Config error**: blocked, see above. Otherwise, global `enabled: false` bypasses gating unless the session explicitly turns protection on.
 3. **Deny match**: blocked. No review.
-4. **Supported Bash**: preflight all component rules. Any deny blocks. Component allows pass; asks are collected. Each unmatched component uses `reviewMode` below. Reviews run serially in source order, continuing after asks or ordinary failures to discover a later denial. A reviewer revision blocks; cancellation stops immediately. Whole-command ask still requires confirmation. If no denial occurs, accumulated asks and failures produce one confirmation showing the full original command. No components are executed by the gate.
+4. **Supported Bash**: preflight all component rules. Any deny blocks. Component allows pass; asks are collected. Each unmatched component uses `reviewMode` below, except read-only components, which pass without review in either mode. Reviews run serially in source order, continuing after asks or ordinary failures to discover a later denial. A reviewer revision offers one-shot confirmation of the original action; cancellation stops immediately. Whole-command ask still requires confirmation. If no denial occurs, accumulated asks and failures produce one confirmation showing the full original command. No components are executed by the gate.
 5. **Unsupported Bash**: after deny-only fallback scanning, require confirmation. No automatic review or allow bypass.
-6. **Other tools**: ask requires confirmation without review; allow runs without review. For unmatched calls, and unmatched supported Bash components, `reviewMode` decides.
+6. **Other tools**: ask requires confirmation without review; allow runs without review. For unmatched calls, and unmatched supported Bash components that are not read-only, `reviewMode` decides.
    - `manual`: confirmation required. No reviewer call.
-   - `auto`: the reviewer decides. Approve runs the call. Revise blocks it and returns the requested revision. Ask-user requires confirmation. Reviewer errors and timeouts fall back to confirmation.
+   - `auto`: the reviewer decides. Approve runs the call. Revise asks once to confirm the original action and shows the requested revision. Ask-user requires confirmation. Reviewer errors and timeouts fall back to confirmation.
 
 Already-cancelled calls and malformed Bash input fail closed before the protection-off checks. Any confirmation blocks when no UI is available. Confirmations for unmatched calls read `Unmatched Bash command` or `Unmatched <tool> call`.
 
 For supported Bash, the reviewer sees the current component, full original command, index/count, source span, and enclosing list, conditional, pipeline and background context. The cwd is initial context only. Preceding commands have not executed and may change shell state; the gate neither executes them nor simulates their effects. For other tools it sees the tool name and its full arguments, which are untrusted content. Confirmation dialogs for other tools show the tool name and a truncated argument excerpt. The full arguments still go to the reviewer.
 
-**Cost:** every unmatched supported Bash component is reviewed in auto mode. A compound call can cost multiple reviews. Other unmatched calls, including reads, searches, and listings, each cost one review. Add `allow` rules for frequent safe calls, or use manual mode.
+**Cost:** every unmatched supported Bash component that is not read-only is reviewed in auto mode. A compound call can cost multiple reviews. Other unmatched calls, including reads, searches, and listings, each cost one review. Add `allow` rules for frequent safe calls, or use manual mode.
 
 Use `/permissions` in the interactive TUI (not RPC, print or JSON mode). Four current-value rows stay open: **Permission**, **Review mode**, **Reviewer model**, **Debug**. Up/Down navigates; Enter toggles or opens the reviewer picker. Picker selection or cancellation returns to the same row. Changes are session-local until **Ctrl+G — Save globally** atomically saves all four values. **Ctrl+R — Reset session changes** clears all overrides and reloads configuration without writing; project rules and validation still apply. Save and reset preserve row selection. Escape/Ctrl+C exits without saving or undoing changes. All session starts (`startup`, `reload`, `new`, `resume`, `fork`) discard unsaved overrides. Save writes only global configuration, preserves unrelated fields, and refuses invalid or concurrently changed targets. A failed save retains session choices and previous saved bytes. External edits to config files take effect on the next tool call. A protection or review-mode change cancels and blocks pending attempts. Explicit session-level protection off bypasses config validation and this extension's gating. Turning it back on restores validation.
 

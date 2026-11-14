@@ -1,8 +1,8 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createReadTool } from "@earendil-works/pi-coding-agent";
 import { matchPermission, matchPermissionExact, parsePermissionRule, ruleMatches } from "../src/rules.ts";
@@ -59,6 +59,61 @@ describe("permission grammar", () => {
         : (parsePermissionRule("", "allow", "x", "global", "where") as { error: string }).error,
       /where/,
     );
+  });
+});
+
+describe("starter Read globs", () => {
+  test("Read(./**) matches files under cwd and not sibling or outside paths", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "permissions-glob-"));
+    try {
+      const allow = parse("Read(./**)");
+      assert.equal(ruleMatches(allow, call("read", { path: "CONTEXT.md" }), cwd), true);
+      assert.equal(ruleMatches(allow, call("read", { path: "cmd/x/main.go" }), cwd), true);
+      assert.equal(ruleMatches(allow, call("read", { path: `../${basename(cwd)}-other/x` }), cwd), false);
+      assert.equal(ruleMatches(allow, call("read", { path: "/other/repo/README.md" }), cwd), false);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("nested secret-file deny globs match and beat the broad allow", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "permissions-secrets-"));
+    try {
+      const allow = parse("Read(./**)");
+      const cases = [
+        ["Read(./**/.env)", "config/.env"],
+        ["Read(./**/.env.*)", "a/b/.env.local"],
+        ["Read(./**/*.key)", "certs/server.key"],
+        ["Read(./**/*.pem)", "x/y.pem"],
+      ] as const;
+      for (const [pattern, path] of cases) {
+        const deny = parse(pattern, "deny");
+        assert.equal(ruleMatches(deny, call("read", { path }), cwd), true, pattern);
+        assert.equal(matchPermission(call("read", { path }), cwd, [allow, deny], true), deny, pattern);
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("Read(~/.ssh/**) matches home SSH keys", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "permissions-ssh-"));
+    try {
+      assert.equal(ruleMatches(parse("Read(~/.ssh/**)", "deny"), call("read", { path: join(homedir(), ".ssh", "id_rsa") }), cwd), true);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("untrusted project Read(./**) allow is ignored; trusted project allow applies", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "permissions-trust-"));
+    try {
+      const projectAllow = parse("Read(./**)", "allow", "project");
+      assert.equal(matchPermission(call("read", { path: "CONTEXT.md" }), cwd, [projectAllow], false), undefined);
+      assert.equal(matchPermission(call("read", { path: "CONTEXT.md" }), cwd, [projectAllow], true), projectAllow);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
 

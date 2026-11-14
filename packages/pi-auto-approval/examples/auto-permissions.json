@@ -7,7 +7,9 @@
       "Bash(git diff)",
       "Bash(git diff --stat)",
       "Bash(git diff --check)",
-      "Bash(git log -5 --oneline)"
+      "Bash(git log -5 --oneline)",
+      "Read(./**)",
+      "Read(~/.pi/agent/git/**/SKILL.md)"
     ],
     "ask": [
       "Bash(git push)",
@@ -27,7 +29,13 @@
       "Read(./secrets/**)",
       "Edit(./.env)",
       "Edit(./.env.*)",
-      "Edit(./secrets/**)"
+      "Edit(./secrets/**)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Read(~/.ssh/**)",
+      "Read(~/.aws/**)"
     ]
   }
 }
