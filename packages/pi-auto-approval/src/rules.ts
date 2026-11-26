@@ -95,6 +95,68 @@ function globRegex(pattern: string, slashStar: boolean, wildcard = "*"): RegExp 
   }
   return new RegExp(`^(?:${source})(?![\\s\\S])`);
 }
+export function tokenizeAllowRule(specifier: string): { ok: true; words: readonly string[] } | { ok: false } {
+  const words: string[] = [];
+  let quote: string | undefined;
+  let word: string | undefined;
+  for (const char of specifier) {
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else word = (word ?? "") + char;
+    } else if (char === "'" || char === '"') {
+      quote = char;
+      word ??= "";
+    } else if (/\s/.test(char)) {
+      if (word !== undefined) words.push(word);
+      word = undefined;
+    } else {
+      word = (word ?? "") + char;
+    }
+  }
+  if (word !== undefined) words.push(word);
+  return quote === undefined && words.length > 0 ? { ok: true, words } : { ok: false };
+}
+
+export function allowWordsMatch(ruleWords: readonly string[], commandWords: readonly string[]): boolean {
+  const patterns = ruleWords.map((word) => (word === "*" ? undefined : globRegex(word, true)));
+  for (const word of ruleWords) {
+    const key = /^[^*/=]+=/u.exec(word)?.[0];
+    if (key !== undefined && commandWords.filter((arg) => arg.startsWith(key)).length > 1) return false;
+  }
+
+  let rule = 0;
+  let command = 0;
+  let star = -1;
+  let starEnd = 0;
+  while (true) {
+    const arg = commandWords[command];
+    if (arg === undefined) break;
+    if (ruleWords[rule] === "*") {
+      star = rule++;
+      starEnd = command;
+    } else if (
+      patterns[rule]?.test(arg) &&
+      !(
+        ruleWords[rule]?.includes("/") &&
+        arg
+          .replace(/^[^/=]+=/u, "")
+          .split("/")
+          .includes("..")
+      )
+    ) {
+      rule++;
+      command++;
+    } else if (star !== -1) {
+      // Retry after the last whole-word star, letting it consume one more word.
+      rule = star + 1;
+      command = ++starEnd;
+    } else {
+      return false;
+    }
+  }
+  return ruleWords.slice(rule).every((word) => word === "*");
+}
+
 function matchesText(pattern: string, text: string, slashStar: boolean): boolean {
   return globRegex(pattern, slashStar).test(text);
 }
