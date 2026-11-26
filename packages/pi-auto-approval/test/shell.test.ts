@@ -30,6 +30,59 @@ for (const source of [
   "echo *.ts", "echo ~", "echo {a,b}", 'echo $"abc"', "a |& b", "coproc pwd", "", "#only comment",
 ]) test(`fails closed: ${JSON.stringify(source)}`, () => assert.equal(analyzeShell(source).supported, false));
 
+for (const [name, source] of [
+  ["unbraced", 'echo "$\\\nHOME"'],
+  ["braced", 'echo "$\\\n{HOME}"'],
+] as const)
+  test(`requires whole-command review for a double-quoted ${name} parameter with a continuation`, () => {
+    assert.deepEqual(analyzeShell(source), {
+      supported: false,
+      reviewable: true,
+      reason: "Shell syntax requires whole-command review",
+    });
+  });
+
+for (const [name, source, words] of [
+  ["unquoted words", "echo first second", [["echo", "first", "second"]]],
+  ["single-quoted words", "echo 'draft \\note' ''", [["echo", "draft \\note", ""]]],
+  ["double-quoted spaces and escapes", 'echo "a b \\" \\\\ \\$ \\` \\q"', [["echo", 'a b " \\ $ ` \\q']]],
+  ["unquoted escapes", String.raw`echo draft\ note a\*b`, [["echo", "draft note", "a*b"]]],
+  ["plain ANSI-C escapes", String.raw`printf $'l1\nl2' $'a\'b' $'\t\\\"'`, [["printf", "l1\nl2", "a'b", '\t\\"']]],
+  ["line continuations", 'echo a\\\nb "c\\\nd" \\\n e', [["echo", "ab", "cd", "e"]]],
+  ["double-quoted escaped dollar before a name", 'echo "\\$HOME"', [["echo", "$HOME"]]],
+  ["double-quoted literal continuation", 'echo "a\\\nb"', [["echo", "ab"]]],
+  ["mixed quote concatenation", 'preview path="1. Inbox/Work/"a.md', [["preview", "path=1. Inbox/Work/a.md"]]],
+  [
+    "Obsidian arguments in source order",
+    String.raw`obsidian vault=X create path="1. Inbox/Work/a.md" content=$'l1\nl2'`,
+    [["obsidian", "vault=X", "create", "path=1. Inbox/Work/a.md", "content=l1\nl2"]],
+  ],
+  [
+    "words separated by component",
+    'a x && b "y z"',
+    [
+      ["a", "x"],
+      ["b", "y z"],
+    ],
+  ],
+] as const)
+  test(`unquotes ${name}`, () => {
+    const result = analyzeShell(source);
+    assert.equal(result.supported, true);
+    assert.deepEqual(
+      result.components.map((c) => c.words),
+      words,
+    );
+  });
+
+test("leading shell assignments retain the unsupported shape", () => {
+  assert.deepEqual(analyzeShell("NAME=value echo first"), {
+    supported: false,
+    reviewable: true,
+    reason: "Shell syntax requires whole-command review",
+  });
+});
+
 test("ANSI-C quotes with plain escapes preserve exact source", () => {
   const source = String.raw`printf $'é/\n\t\\x\'\"'`;
   const result = analyzeShell(source);

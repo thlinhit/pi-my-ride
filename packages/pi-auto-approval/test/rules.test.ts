@@ -5,7 +5,14 @@ import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createReadTool } from "@earendil-works/pi-coding-agent";
-import { matchPermission, matchPermissionExact, parsePermissionRule, ruleMatches } from "../src/rules.ts";
+import {
+  allowWordsMatch,
+  matchPermission,
+  matchPermissionExact,
+  parsePermissionRule,
+  ruleMatches,
+  tokenizeAllowRule,
+} from "../src/rules.ts";
 import type { PermissionRule } from "../src/rules.ts";
 
 function parse(
@@ -28,6 +35,57 @@ test("exact Bash matching does not split quoted delimiters and retains precedenc
   assert.equal(matchPermissionExact(call("bash", { command: "rm file" }), "/tmp", [allow, deny], true), deny);
   assert.equal(matchPermissionExact(quoted, "/tmp", [parse("Bash(*)", "allow", "project")], false), undefined);
   assert.equal(matchPermissionExact(quoted, "/tmp", [parse("Bash(*)", "ask", "project"), ask], true), ask);
+});
+
+describe("word-based allow rules", () => {
+  function matches(specifier: string, command: readonly string[]): boolean {
+    const rule = tokenizeAllowRule(specifier);
+    assert.ok(rule.ok);
+    return allowWordsMatch(rule.words, command);
+  }
+
+  const obsidian = 'obsidian vault=X create path="1. Inbox/Work/*" *';
+  const path = "path=1. Inbox/Work/a.md";
+  const scenarios = [
+    ["allows multiline content", [path, "content=l1\nl2"], true],
+    ["rejects a nested path", ["path=1. Inbox/Work/sub/a.md"], false],
+    ["rejects another directory", ["path=1. Inbox/Personal/a.md"], false],
+    ["rejects a repeated path", [path, "path=Secrets/x.md"], false],
+    ["rejects a traversal path", ["path=1. Inbox/Work/../../Private/x.md"], false],
+    ["allows slash content after the path", [path, "content=see a/b/c"], true],
+  ] as const;
+  for (const [name, args, expected] of scenarios) {
+    test(name, () => assert.equal(matches(obsidian, ["obsidian", "vault=X", "create", ...args]), expected));
+  }
+
+  test("distinguishes single and double stars inside a word", () => {
+    assert.equal(matches('content="*"', ["content=a/b"]), false);
+    assert.equal(matches("content='**'", ["content=a/b"]), true);
+    assert.equal(matches("cat src/**", ["cat", "src/a/b.ts"]), true);
+    assert.equal(matches("cat src/**", ["cat", "src/a/../b.ts"]), false);
+  });
+
+  test("rejects duplicate double-dash keys", () => {
+    assert.equal(matches("cmd --path=a *", ["cmd", "--path=a"]), true);
+    assert.equal(matches("cmd --path=a *", ["cmd", "--path=a", "--path=b"]), false);
+  });
+
+  test("preserves exact matches and distinguishes whole-word stars", () => {
+    assert.equal(matches("cat src/*", ["cat", "src/a/b.ts"]), false);
+    assert.equal(matches("git diff*", ["git", "diff", "--stat"]), false);
+    assert.equal(matches("git status", ["git", "status"]), true);
+    assert.equal(matches("git status", ["git", "status", "--short"]), false);
+    assert.equal(matches("git diff *", ["git", "diff", "--stat"]), true);
+    assert.equal(matches("git diff *", ["git", "diff"]), true);
+    assert.equal(matches("cmd * a * b", ["cmd", "x", "a", "y", "b"]), true);
+  });
+
+  test("removes both quote styles and rejects unterminated and blank specifiers", () => {
+    assert.deepEqual(tokenizeAllowRule(` cmd\tpre' x'" y" '' `), { ok: true, words: ["cmd", "pre x y", ""] });
+    assert.deepEqual(tokenizeAllowRule('cmd "unterminated'), { ok: false });
+    assert.deepEqual(tokenizeAllowRule("cmd 'unterminated"), { ok: false });
+    assert.deepEqual(tokenizeAllowRule(" \t"), { ok: false });
+  });
 });
 
 describe("permission grammar", () => {
@@ -236,6 +294,36 @@ describe("permission matching", () => {
     assert.equal(ruleMatches(parse("Bash(git  status)"), call("bash", { command: "git status" }), "/tmp"), false);
     assert.equal(ruleMatches(parse("Bash(*)"), call("bash", { command: "ends\n" }), "/tmp"), true);
     assert.equal(ruleMatches(exact, call("bash", { command: 1 }), "/tmp"), false);
+  });
+
+  test("raw deny and ask normalize wrappers in scanned segments without unwrapping shell evaluation", () => {
+    for (const level of ["deny", "ask"] as const) {
+      const rule = parse("Bash(preview *)", level);
+      for (const command of [
+        'before >out; env FOO=1 BAR="value with spaces" preview draft',
+        "env FOO=1 preview",
+        "command preview",
+        "exec preview",
+      ]) {
+        assert.equal(ruleMatches(rule, call("bash", { command }), "/tmp"), true, command);
+      }
+      for (const command of ["bash -c 'preview draft'", "eval preview draft", "echo env preview draft"]) {
+        assert.equal(ruleMatches(rule, call("bash", { command }), "/tmp"), false, command);
+      }
+    }
+  });
+
+  test("raw env stripping preserves the remainder and stops at unterminated values", () => {
+    const rawRemainder = `preview 'draft note' > out`;
+    const malformed = `env FOO=$'unfinished preview draft`;
+    for (const level of ["deny", "ask"] as const) {
+      const rule = parse(`Bash(${rawRemainder})`, level);
+      const command = String.raw`env FOO=before"a\" b"' c' ${rawRemainder}`;
+      assert.equal(ruleMatches(rule, call("bash", { command }), "/tmp"), true);
+      const input = call("bash", { command: malformed });
+      assert.equal(ruleMatches(parse("Bash(preview *)", level), input, "/tmp"), false);
+      assert.equal(ruleMatches(parse(`Bash(${malformed})`, level), input, "/tmp"), true);
+    }
   });
 
   test("applies deny, ask, allow precedence, global-before-project, and project trust", () => {

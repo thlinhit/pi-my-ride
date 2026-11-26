@@ -46,6 +46,7 @@ export interface GateDeps {
 export type GateStatus = ReviewState;
 export type GateDecision = { block: true; reason: string } | undefined;
 const CONFIRMATION_FAILED = "auto-approval: confirmation failed";
+const MAX_BASH_APPROVAL_BYTES = 65_536;
 const block = (reason: string): { block: true; reason: string } => ({ block: true, reason });
 type GateOutcome = { kind: "not-gated" } | { kind: "decided"; decision: GateDecision; log: boolean };
 const NOT_GATED: GateOutcome = { kind: "not-gated" };
@@ -189,6 +190,7 @@ async function decideToolCall(
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   if (!settings.enabled) return undefined;
   const mode = settings.reviewMode;
+  const overBashApprovalLimit = bash && command !== undefined && Buffer.byteLength(command) > MAX_BASH_APPROVAL_BYTES;
   const analysis = bash && command !== undefined ? analyzeShell(command) : undefined;
   const scanMatcher = deps.matcher ?? matchPermission;
   const exactMatcher = deps.matcher ?? matchPermissionExact;
@@ -204,7 +206,7 @@ async function decideToolCall(
       denied = wholeMatcher(event, ctx.cwd, denyRules, projectTrusted);
       for (const component of components) {
         if (denied) break;
-        denied = exactMatcher(componentCall(component.command), ctx.cwd, denyRules, projectTrusted);
+        denied = exactMatcher(componentCall(component.command), ctx.cwd, denyRules, projectTrusted, component.words);
       }
     }
   } catch { return block("auto-approval: matcher error"); }
@@ -220,14 +222,18 @@ async function decideToolCall(
         : protectedFileReason(event, ctx.cwd, globalDir);
     componentReasons = components.map((component) => protectedBashReason(component.command));
     if (!protectedReason) {
-      const remainingRules = config.rules.filter((rule) => rule.level !== "deny");
+      const remainingRules = config.rules.filter(
+        (rule) => rule.level === "ask" || (rule.level === "allow" && !overBashApprovalLimit),
+      );
       try {
-        rule = wholeMatcher(event, ctx.cwd, remainingRules, projectTrusted);
+        const wholeRules = analysis?.supported ? remainingRules.filter((rule) => rule.level === "ask") : remainingRules;
+        rule = wholeMatcher(event, ctx.cwd, wholeRules, projectTrusted);
         componentRules = components.map((component, index) =>
           componentReasons[index]
             ? undefined
-            : exactMatcher(componentCall(component.command), ctx.cwd, remainingRules, projectTrusted),
+            : exactMatcher(componentCall(component.command), ctx.cwd, remainingRules, projectTrusted, component.words),
         );
+        if (!rule && components.length === 1 && componentRules[0]?.level === "allow") rule = componentRules[0];
       } catch {
         return block("auto-approval: matcher error");
       }
@@ -287,7 +293,7 @@ async function decideToolCall(
         continue;
       }
       if (componentRule?.level === "ask") { reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`); continue; }
-      if (isReadOnlyComponent(component.command)) {
+      if (!overBashApprovalLimit && isReadOnlyComponent(component.command)) {
         if (settings.debug) safeNotify(ctx, "Allowed as read-only command");
         continue;
       }

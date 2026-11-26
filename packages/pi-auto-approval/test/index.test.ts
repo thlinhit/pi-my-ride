@@ -30,7 +30,13 @@ import type {
 type ToolCallHandler = ExtensionHandler<ToolCallEvent, ToolCallEventResult>;
 
 const rule = (level: "deny" | "ask" | "allow" = "ask", scope: "global" | "project" = "global"): PermissionRule => {
-  const parsed = parsePermissionRule("Bash(danger*)", level, `${scope}.json`, scope, "test rule");
+  const parsed = parsePermissionRule(
+    level === "allow" ? "Bash(danger* *)" : "Bash(danger*)",
+    level,
+    `${scope}.json`,
+    scope,
+    "test rule",
+  );
   if (!parsed.ok) throw new Error(parsed.error);
   return { ...parsed.value, label: "danger command" };
 };
@@ -211,6 +217,163 @@ for (const level of ["allow", "deny"] as const) {
     assert.equal(calls.length, 0);
   });
 }
+
+async function runBashRules(command: string, rules: PermissionRule[]) {
+  const { ctx, calls } = context();
+  const reviews: string[] = [];
+  const notices: string[] = [];
+  ctx.ui.notify = (message) => notices.push(message);
+  const result = await handleToolCall(event(command), ctx, () => config(rules, "auto"), {
+    review: async (input) => {
+      reviews.push(input.command!);
+      return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+    },
+  });
+  return { result, reviews, notices, calls };
+}
+
+test("Obsidian word allows enforce path boundaries, duplicate keys, and wildcard scope", async (t) => {
+  const base = 'Bash(obsidian vault=X create path="1. Inbox/Work/*"';
+  const cases = [
+    ["ANSI-C content", `path="1. Inbox/Work/a.md" content=$'l1\\nl2'`, "*", true],
+    ["nested path", 'path="1. Inbox/Work/sub/a.md"', "*", false],
+    ["sibling path", 'path="1. Inbox/Personal/a.md"', "*", false],
+    ["duplicate path", 'path="1. Inbox/Work/a.md" path="Secrets/x.md"', "*", false],
+    ["parent traversal", 'path="1. Inbox/Work/../../Private/x.md"', "*", false],
+    ["trailing star swallows content with slashes", `path="1. Inbox/Work/a.md" content=$'see a/b/c'`, "*", true],
+    ["single star inside content", 'path="1. Inbox/Work/a.md" content="a/b"', "content=*", false],
+    ["double star inside content", 'path="1. Inbox/Work/a.md" content="a/b"', "content=**", true],
+  ] as const;
+  for (const [name, args, wildcard, allowed] of cases) {
+    await t.test(name, async () => {
+      const command = `obsidian vault=X create ${args}`;
+      const { result, reviews, calls } = await runBashRules(command, [parsedRule(`${base} ${wildcard})`, "allow")]);
+      assert.equal(result, undefined);
+      assert.deepEqual(reviews, allowed ? [] : [command]);
+      assert.equal(calls.length, 0);
+    });
+  }
+});
+
+test("Obsidian recursive path allows accept subdirectories but reject dot-dot segments", async () => {
+  const rules = [parsedRule('Bash(obsidian vault=X create path="1. Inbox/Work/**" *)', "allow")];
+  const nested = 'obsidian vault=X create path="1. Inbox/Work/sub/a.md"';
+  const traversal = 'obsidian vault=X create path="1. Inbox/Work/../../Private/x.md"';
+  assert.deepEqual((await runBashRules(nested, rules)).reviews, []);
+  assert.deepEqual((await runBashRules(traversal, rules)).reviews, [traversal]);
+});
+
+test("Bash word allows retain exact and whole-word matches but reject old prefix matches", async () => {
+  const cases = [
+    ["git status", "Bash(git status)", true],
+    ["git diff --stat", "Bash(git diff *)", true],
+    ["git diff --stat", "Bash(git diff*)", false],
+    [String.raw`cat src/a/b\.ts`, "Bash(cat src/*)", false],
+    ["preview --path=a --path=b", "Bash(preview --path=* *)", false],
+    ["preview '\"draft'", 'Bash(preview *"draft*)', false],
+  ] as const;
+  for (const [command, pattern, allowed] of cases) {
+    const { reviews, calls } = await runBashRules(command, [parsedRule(pattern, "allow")]);
+    assert.deepEqual(reviews, allowed ? [] : [command], pattern);
+    assert.equal(calls.length, 0);
+  }
+  // The plain spelling still skips review, but only through the independent read-only check.
+  const { reviews, notices } = await runBashRules("cat src/a/b.ts", [parsedRule("Bash(cat src/*)", "allow")]);
+  assert.deepEqual(reviews, []);
+  assert.deepEqual(notices, ["Allowed as read-only command"]);
+});
+
+test("Bash restrictions match raw text, wrappers, bare commands, and canonical words before allows", async (t) => {
+  const cases = [
+    [
+      "raw quoted redirection",
+      'obsidian create content="> my-second-brain"',
+      "Bash(*>*my-second-brain*)",
+      "Bash(obsidian *)",
+    ],
+    ["env wrapper", "env FOO=1 rm -rf x", "Bash(rm *)", "Bash(env *)"],
+    ["command wrapper", "command rm x", "Bash(rm *)", "Bash(command *)"],
+    ["exec wrapper on a component", "pwd;exec rm x", "Bash(rm *)", "Bash(exec *)"],
+    ["bare command", "git push", "Bash(git push *)", "Bash(git *)"],
+    ["quoted path", "rm -rf '/tmp/x'", "Bash(rm -rf /tmp/x)", "Bash(rm -rf /tmp/*)"],
+    ["single-quoted command", "preview 'draft note'", 'Bash(preview "draft note")', "Bash(preview *)"],
+    ["escaped command", String.raw`preview draft\ note`, 'Bash(preview "draft note")', "Bash(preview *)"],
+    ["escaped rule", 'preview "draft note"', String.raw`Bash(preview draft\ note)`, "Bash(preview *)"],
+    [
+      "line continuation in rule and command",
+      "preview dr\\\naft 'note'",
+      "Bash(pre\\\nview draft note)",
+      "Bash(preview *)",
+    ],
+    [
+      "canonical wildcard crosses slashes and spaces",
+      "preview '/tmp/a/b note'",
+      'Bash(preview "/tmp/* note")',
+      "Bash(preview *)",
+    ],
+  ] as const;
+  for (const [name, command, pattern, allow] of cases) {
+    await t.test(name, async () => {
+      for (const level of ["deny", "ask"] as const) {
+        const { result, reviews, calls } = await runBashRules(command, [
+          parsedRule(pattern, level),
+          parsedRule(allow, "allow"),
+        ]);
+        if (level === "deny") assert.match(result?.reason ?? "", /Blocked by auto-approval/);
+        else assert.equal(result, undefined);
+        assert.deepEqual(reviews, []);
+        assert.equal(calls.length, level === "ask" ? 1 : 0);
+      }
+    });
+  }
+});
+
+test("raw env assignments preserve deny and ask rules on unsupported calls", async (t) => {
+  for (const command of [
+    "env FOO=$'a b' preview draft > out",
+    String.raw`env FOO=$'a\' b' preview draft > out`,
+    `env FOO="a b" BAR='c d' preview draft > out`,
+    String.raw`env FOO=a\ b preview draft > out`,
+  ]) {
+    for (const level of ["deny", "ask"] as const) {
+      await t.test(`${level}: ${command}`, async () => {
+        const { result, reviews, calls } = await runBashRules(command, [parsedRule("Bash(preview *)", level)]);
+        if (level === "deny") assert.match(result?.reason ?? "", /Blocked by auto-approval/);
+        else assert.equal(calls.length, 1);
+        assert.deepEqual(reviews, []);
+      });
+    }
+  }
+});
+
+test("Bash approval cap counts UTF-8 bytes once across the original command", async (t) => {
+  const atLimit = `preview ${"x".repeat(65_536 - "preview ".length)}`;
+  const overLimit = `${atLimit}x`;
+  const multibyte = `${atLimit.slice(0, -1)}é`;
+  const short = `preview ${"x".repeat(32_764)}`;
+  const compound = `${short};${short};pwd`;
+  const allow = parsedRule("Bash(preview *)", "allow");
+  for (const [name, command, expected] of [
+    ["exactly 65,536 bytes", atLimit, []],
+    ["65,537 bytes", overLimit, [overLimit]],
+    ["multibyte text at 65,536 characters", multibyte, [multibyte]],
+    ["compound disables both rule and read-only approval", compound, [short, short, "pwd"]],
+  ] as const) {
+    await t.test(name, async () => {
+      const { reviews, calls } = await runBashRules(command, [allow]);
+      assert.equal(reviews.length, expected.length);
+      assert.ok(reviews.every((review, index) => review === expected[index]));
+      assert.equal(calls.length, 0);
+    });
+  }
+  for (const level of ["deny", "ask"] as const) {
+    const { result, reviews, calls } = await runBashRules(overLimit, [allow, parsedRule("Bash(preview *)", level)]);
+    if (level === "deny") assert.match(result?.reason ?? "", /Blocked by auto-approval/);
+    else assert.equal(result, undefined);
+    assert.deepEqual(reviews, []);
+    assert.equal(calls.length, level === "ask" ? 1 : 0);
+  }
+});
 
 test("component reviews retain source context and unchanged frozen input with one final outcome", async () => {
   const command = "noop-cmd dir && printf middle | tee out;noop-cmd '😀' & printf end";
@@ -1077,7 +1240,7 @@ test("home gate sees seed rules once and honors untrusted home local deny", asyn
   assert.equal(
     await handleToolCall(call, ctx, load, {
       matcher: (candidate, _cwd, rules) => {
-        if (candidate.input === call.input) seen.push(...rules);
+        if ((candidate.input as { command: string }).command === "echo ok") seen.push(...rules);
         return undefined;
       },
     }),
