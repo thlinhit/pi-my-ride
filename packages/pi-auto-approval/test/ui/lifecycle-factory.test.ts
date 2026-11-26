@@ -4,7 +4,7 @@ import test, { mock } from "node:test";
 import { createHarness, plain, reviewerReply, rowState, transitions } from "./factory-harness.ts";
 
 const CANCELLED = { block: true, reason: "auto-approval: confirmation failed" };
-const COMMAND = "danger; echo harmless";
+const COMMAND = "danger; noop-cmd harmless";
 const flush = async () => { await new Promise<void>((resolve) => setImmediate(resolve)); await new Promise<void>((resolve) => setImmediate(resolve)); };
 
 function widgetState(item: unknown[]): string | undefined {

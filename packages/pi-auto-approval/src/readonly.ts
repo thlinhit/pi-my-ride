@@ -1,4 +1,4 @@
-const READ_ONLY = new Set(["cd", "pwd", "ls", "cat", "nl", "head", "tail", "wc", "grep"]);
+const READ_ONLY = new Set(["cd", "pwd", "ls", "cat", "nl", "head", "tail", "wc", "grep", "echo"]);
 const FIND_WRITES = new Set(["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"]);
 
 export function isReadOnlyComponent(command: string): boolean {
@@ -26,6 +26,7 @@ export function isReadOnlyComponent(command: string): boolean {
   if (started) words.push(word);
   const [name, ...args] = words;
   if (READ_ONLY.has(name ?? "")) return true;
+  if (name === "date") return args.length === 0 || (args.length === 1 && args[0]?.startsWith("+") === true);
   if (name === "rg") return !args.some(arg => arg === "--pre" || arg.startsWith("--pre=") || arg.startsWith("--pre-glob"));
   if (name === "find") return !args.some(arg => FIND_WRITES.has(arg));
   if (name !== "sed" || !args.includes("-n")) return false;

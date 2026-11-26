@@ -66,7 +66,17 @@ export function analyzeShell(source: string): ShellAnalysis {
     };
     const literal = (node: Node, quoted = false): void => {
       const type = syntax.NodeType(node);
-      if (type === "SglQuoted" && !node.Dollar) return;
+      if (type === "SglQuoted") {
+        if (node.Dollar) {
+          const { start, end } = span(node);
+          const body = source.slice(start + 2, end - 1);
+          for (let i = 0; i < body.length; i++) {
+            if (body[i] === "\\" && !["n", "t", "\\", "'", '"'].includes(body.charAt(++i)))
+              throw new Error("unsupported ANSI-C escape");
+          }
+        }
+        return;
+      }
       if (type === "DblQuoted" && !node.Dollar) {
         for (const part of node.Parts) literal(part, true);
         return;
