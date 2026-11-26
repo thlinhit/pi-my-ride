@@ -81,11 +81,24 @@ export function analyzeShell(source: string): ShellAnalysis {
           if (syntax.NodeType(part) !== "Lit") throw new Error("unsupported word");
           span(part);
         }
-        // mvdan-sh may split double-quoted parts at a continuation, leaving the backslash in one span and the newline outside it.
+        // A continuation can hide an expansion from mvdan-sh, so validate the raw body.
         const { start, end } = span(node);
-        return source
-          .slice(start + 1, end - 1)
-          .replace(/\\(["\\$`\n])/g, (_, escaped: string) => (escaped === "\n" ? "" : escaped));
+        const body = source.slice(start + 1, end - 1);
+        let value = "";
+        for (let i = 0; i < body.length; i++) {
+          const char = body.charAt(i);
+          if (char === "$" || char === "`") throw new Error("unsupported literal expansion");
+          if (char === "\\") {
+            const escaped = body.charAt(i + 1);
+            if (escaped && '"\\$`\n'.includes(escaped)) {
+              if (escaped !== "\n") value += escaped;
+              i++;
+              continue;
+            }
+          }
+          value += char;
+        }
+        return value;
       }
       if (type !== "Lit") throw new Error("unsupported word");
       const { start, end } = span(node);

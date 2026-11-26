@@ -30,6 +30,18 @@ for (const source of [
   "echo *.ts", "echo ~", "echo {a,b}", 'echo $"abc"', "a |& b", "coproc pwd", "", "#only comment",
 ]) test(`fails closed: ${JSON.stringify(source)}`, () => assert.equal(analyzeShell(source).supported, false));
 
+for (const [name, source] of [
+  ["unbraced", 'echo "$\\\nHOME"'],
+  ["braced", 'echo "$\\\n{HOME}"'],
+] as const)
+  test(`requires whole-command review for a double-quoted ${name} parameter with a continuation`, () => {
+    assert.deepEqual(analyzeShell(source), {
+      supported: false,
+      reviewable: true,
+      reason: "Shell syntax requires whole-command review",
+    });
+  });
+
 for (const [name, source, words] of [
   ["unquoted words", "echo first second", [["echo", "first", "second"]]],
   ["single-quoted words", "echo 'draft \\note' ''", [["echo", "draft \\note", ""]]],
@@ -37,6 +49,8 @@ for (const [name, source, words] of [
   ["unquoted escapes", String.raw`echo draft\ note a\*b`, [["echo", "draft note", "a*b"]]],
   ["plain ANSI-C escapes", String.raw`printf $'l1\nl2' $'a\'b' $'\t\\\"'`, [["printf", "l1\nl2", "a'b", '\t\\"']]],
   ["line continuations", 'echo a\\\nb "c\\\nd" \\\n e', [["echo", "ab", "cd", "e"]]],
+  ["double-quoted escaped dollar before a name", 'echo "\\$HOME"', [["echo", "$HOME"]]],
+  ["double-quoted literal continuation", 'echo "a\\\nb"', [["echo", "ab"]]],
   ["mixed quote concatenation", 'preview path="1. Inbox/Work/"a.md', [["preview", "path=1. Inbox/Work/a.md"]]],
   [
     "Obsidian arguments in source order",
