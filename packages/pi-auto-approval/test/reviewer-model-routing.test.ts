@@ -17,7 +17,14 @@ type Pair = { readonly provider: string; readonly id: string };
 type Decision = "approve" | "revise" | "ask_user";
 type Select = { readonly title: string; readonly options: string[]; readonly resolve: (value: string | undefined) => void };
 type Confirm = { readonly title: string; readonly message: string; readonly signal?: AbortSignal; readonly resolve: (approved: boolean) => void };
-type Call = { readonly provider: string; readonly id: string; readonly model: object; readonly context: Context; readonly signal?: AbortSignal; readonly release?: (decision: Decision) => void };
+type Call = {
+  readonly provider: string;
+  readonly id: string;
+  readonly model: object;
+  readonly context: Context;
+  readonly signal?: AbortSignal;
+  readonly release?: (decision: Decision, tier?: "none") => void;
+};
 type Block = { readonly block: true; readonly reason: string } | undefined;
 
 const EXTENSION_PATH = fileURLToPath(new URL("../src/index.ts", import.meta.url));
@@ -89,9 +96,19 @@ async function createHost(startup: GlobalStartup = "written") {
       model: { ...model },
       context,
       signal: options?.signal,
-      release: (decision) => settle({
+      release: (decision, tier) => settle({
         role: "assistant",
-        content: [{ type: "text", text: JSON.stringify({ decision, reason: `${decision} for ${model.provider}/${model.id}`, ...(decision === "revise" ? { constraint: "target", source: "user" } : {}) }) }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              decision,
+              tier,
+              reason: `${decision} for ${model.provider}/${model.id}`,
+              ...(decision === "revise" ? { constraint: "target", source: "user" } : {}),
+            }),
+          },
+        ],
         stopReason: "stop",
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       } as unknown as AssistantMessage),
@@ -563,7 +580,7 @@ test("command-only review reaches the provider without routing metadata", async 
     const text = userText(call);
     assert.equal(cardOf(text), JSON.stringify({ tool: "bash", command, cwd: host.cwd }, null, 2));
     assert.equal(text.includes("undefined"), false);
-    call.release?.("approve");
+    call.release?.("approve", "none");
     await decision;
   } finally { await host.close(); }
 });
