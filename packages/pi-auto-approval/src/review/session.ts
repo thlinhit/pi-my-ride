@@ -3,7 +3,20 @@ import type { Api } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
 import type { ReviewEvidenceConfig, ReviewerConfig } from "../config.ts";
 import { loadProjectInstructions } from "../config.ts";
-import { BUDGET_EXCEEDED_ERROR, buildReviewPrompt, buildSystemPrompt, collectEvidence, contextBudget, estimateTokens, evidencePrefixMatches, parseVerdict, promptTokens, reviewerFingerprint } from "./protocol.ts";
+import {
+  BUDGET_EXCEEDED_ERROR,
+  DEFAULT_REVIEWER_POLICY,
+  DEFAULT_TRUSTED_ENVIRONMENT,
+  buildReviewPrompt,
+  buildSystemPrompt,
+  collectEvidence,
+  contextBudget,
+  estimateTokens,
+  evidencePrefixMatches,
+  parseVerdict,
+  promptTokens,
+  reviewerFingerprint,
+} from "./protocol.ts";
 import type { ComponentReview, EvidenceRecord, ReviewRequest, Verdict } from "./protocol.ts";
 
 export type ReviewResult =
@@ -89,8 +102,12 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     if (signal.aborted) throw new Error("review timed out or was cancelled");
     const mainSessionId = ctx.sessionManager.getSessionId();
     const projectTrusted = ctx.isProjectTrusted();
-    const projectInstructions = input.reviewEvidence.projectInstructions && projectTrusted ? loadProjectInstructions(ctx.cwd) : undefined;
-    const systemPrompt = buildSystemPrompt(input.reviewer.extraInstructions, projectInstructions);
+    const projectInstructions =
+      input.reviewEvidence.projectInstructions && projectTrusted ? loadProjectInstructions(ctx.cwd) : undefined;
+    const policy = projectTrusted
+      ? { ...DEFAULT_REVIEWER_POLICY, environment: DEFAULT_TRUSTED_ENVIRONMENT }
+      : DEFAULT_REVIEWER_POLICY;
+    const systemPrompt = buildSystemPrompt(policy, input.reviewer.extraInstructions, projectInstructions);
     const fingerprint = reviewerFingerprint({ mainSessionId, model: { provider: model.provider, id: model.id, api: model.api, baseUrl: model.baseUrl }, reasoningEffort: input.reviewer.reasoningEffort, systemPrompt, projectTrusted });
     const records = collectEvidence(adaptProjection(ctx));
     const budget = contextBudget(model.contextWindow);

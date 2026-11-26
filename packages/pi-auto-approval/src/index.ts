@@ -11,10 +11,25 @@ import { recordHistory, type HistoryEntry, type HistoryResult } from "./history.
 import { createReviewDisplay } from "./ui/display.ts";
 import type { ConfigUi } from "./config.ts";
 import type { ReviewState } from "./ui/status.ts";
-import type { ReviewContext, ReviewResult, Reviewer } from "./review/session.ts";
+import type { ReviewContext, ReviewInput, ReviewResult as ProtocolReviewResult } from "./review/session.ts";
 import { createPiReviewer, createReviewerState } from "./review/session.ts";
 
-export type { ReviewContext, ReviewInput, ReviewResult, Reviewer, ReviewerState } from "./review/session.ts";
+export type { ReviewContext, ReviewInput, Reviewer, ReviewerState } from "./review/session.ts";
+
+// T4.4 migrates the gate and its injected reviewer fixtures to tiered verdicts.
+export type ReviewResult =
+  | ProtocolReviewResult
+  | {
+      readonly ok: true;
+      readonly verdict:
+        | { readonly decision: "approve" | "ask_user"; readonly reason: string }
+        | {
+            readonly decision: "revise";
+            readonly reason: string;
+            readonly constraint: string;
+            readonly source: string;
+          };
+    };
 export { createPiReviewer, createReviewerState } from "./review/session.ts";
 export interface GateContext {
   readonly cwd: string;
@@ -37,7 +52,7 @@ export interface GateDeps {
   readonly matcher?: (call: { toolName: string; input: unknown }, cwd: string, rules: readonly PermissionRule[], projectTrusted: boolean) => PermissionRule | undefined;
   readonly status?: StatusReporter;
   readonly reviewer?: string;
-  readonly review?: Reviewer;
+  readonly review?: (input: ReviewInput) => Promise<ReviewResult>;
   readonly history?: (entry: HistoryEntry) => HistoryResult;
 }
 export type GateStatus = ReviewState;
@@ -174,7 +189,12 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
         reasons.push(`Reviewer requested a revision: ${result.verdict.reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`);
         continue;
       }
-      if (result.verdict.decision === "ask_user") reasons.push(`Reviewer needs user approval: ${result.verdict.reason}`);
+      if (result.verdict.decision === "block") {
+        report("blocked");
+        return block(result.verdict.reason);
+      }
+      if (result.verdict.decision === "ask_user")
+        reasons.push(`Reviewer needs user approval: ${result.verdict.reason}`);
     }
     if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
     if (reasons.length) return confirm([...new Set(reasons)].join("\n"));
@@ -203,6 +223,10 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
   if (decision === "revise") {
     report("revision-requested");
     return confirm(`Reviewer requested a revision: ${reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`);
+  }
+  if (decision === "block") {
+    report("blocked");
+    return block(reason);
   }
   if (decision === "ask_user") return confirm(`Reviewer needs user approval: ${reason}`);
   report("approved");
