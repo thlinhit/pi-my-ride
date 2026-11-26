@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { isReadOnlyComponent } from "../src/readonly.ts";
+import { analyzeShell } from "../src/shell.ts";
+
+for (const command of ["date", "date +%y%m%d", "echo hi"]) {
+  test(`read-only: ${command}`, () => assert.equal(isReadOnlyComponent(command), true));
+}
+
+for (const command of ["date 0101000026", "date -s x", "date +%y%m%d extra"]) {
+  test(`not read-only: ${command}`, () => assert.equal(isReadOnlyComponent(command), false));
+}
+
+test("redirected echo is unsupported", () => {
+  assert.equal(analyzeShell("echo hi > f").supported, false);
+  assert.equal(isReadOnlyComponent("echo hi > f"), false);
+});
 
 for (const command of [
   "cd DIR", "pwd", "ls -la", "cat x", "nl -ba SKILL.md", "head -20 x", "tail x", "wc -l x",

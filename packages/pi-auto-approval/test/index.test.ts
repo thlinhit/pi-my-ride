@@ -207,7 +207,7 @@ for (const level of ["allow", "deny"] as const) {
 }
 
 test("component reviews retain source context and unchanged frozen input with one final outcome", async () => {
-  const command = "echo dir && printf middle | tee out;echo '😀' & printf end";
+  const command = "noop-cmd dir && printf middle | tee out;noop-cmd '😀' & printf end";
   const input = Object.freeze({ command, timeout: 30 });
   const original = Object.freeze({ toolName: "bash", input });
   const { ctx, calls } = context();
@@ -218,7 +218,7 @@ test("component reviews retain source context and unchanged frozen input with on
     review: async input => { seen.push(input); return { ok: true, verdict: { decision: "approve", reason: "ok" } }; },
     history: entry => { outcomes.push(entry); return { ok: true }; }, status: r => states.push(r.state),
   }), undefined);
-  assert.deepEqual(seen.map(i => i.command), ["echo dir", "printf middle", "tee out", "echo '😀'", "printf end"]);
+  assert.deepEqual(seen.map(i => i.command), ["noop-cmd dir", "printf middle", "tee out", "noop-cmd '😀'", "printf end"]);
   seen.forEach((i, n) => {
     assert.equal(i.component?.originalCommand, command);
     assert.equal(i.component?.index, n + 1);
@@ -360,7 +360,7 @@ test("non-bash loads config and confirms an unmatched call in manual mode", asyn
   );
   assert.equal(
     await handleToolCall(
-      event("echo ok"),
+      event("noop-cmd ok"),
       ctx,
       () => {
         loads++;
@@ -494,8 +494,8 @@ test("deny rule blocks with attribution", async () => {
 
 test("guarded command confirms exact raw command and label", async () => {
   const { ctx, calls } = context();
-  assert.equal(await handleToolCall(event("danger; echo hi"), ctx, loadConfig), undefined);
-  assert.deepEqual(calls[0]?.slice(0, 2), ["Approve command? [danger command]", "Requires confirmation (danger command, global.json)\ndanger command requires confirmation\n\ndanger; echo hi"]);
+  assert.equal(await handleToolCall(event("danger; noop-cmd hi"), ctx, loadConfig), undefined);
+  assert.deepEqual(calls[0]?.slice(0, 2), ["Approve command? [danger command]", "Requires confirmation (danger command, global.json)\ndanger command requires confirmation\n\ndanger; noop-cmd hi"]);
 });
 
 test("guardian abort during synchronous running report skips reviewer", async () => {
@@ -1182,7 +1182,7 @@ test("guardian bypasses reviewer for trusted, convention, and unmatched routes",
     (await handleToolCall(event(), ctx, () => config([rule("deny")], "auto"), deps))?.reason,
     "Blocked by auto-approval (danger command, global.json)",
   );
-  assert.equal(await handleToolCall(event("echo safe"), ctx, () => config([], "auto"), deps), undefined);
+  assert.equal(await handleToolCall(event("noop-cmd safe"), ctx, () => config([], "auto"), deps), undefined);
   assert.equal(reviews, 1, "unmatched auto command must be reviewed");
   assert.equal(calls.length, 0);
 });
@@ -2284,15 +2284,15 @@ test("terminal history records allow, deny, and confirmation outcomes once with 
 
 test("terminal history covers AI approve, revise, no-UI blocks, and failed confirmation", async () => {
   const approved = historyLog();
-  assert.equal(await handleToolCall(event("echo first"), context().ctx, () => config([], "auto"), { review: approveReview(), history: approved.history }), undefined);
+  assert.equal(await handleToolCall(event("noop-cmd first"), context().ctx, () => config([], "auto"), { review: approveReview(), history: approved.history }), undefined);
   const revised = historyLog();
-  assert.equal((await handleToolCall(event("echo first"), context({ hasUI: false }).ctx, () => config([], "auto"), { review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Narrow it.", constraint: "target", source: "user" } }) as never, history: revised.history }))?.block, true);
+  assert.equal((await handleToolCall(event("noop-cmd first"), context({ hasUI: false }).ctx, () => config([], "auto"), { review: async () => ({ ok: true, verdict: { decision: "revise", reason: "Narrow it.", constraint: "target", source: "user" } }) as never, history: revised.history }))?.block, true);
   const noUi = historyLog();
   assert.equal((await handleToolCall(event("danger now"), context({ hasUI: false }).ctx, () => config(ruleSet("ask")), { history: noUi.history }))?.block, true);
   const failed = historyLog();
   assert.equal((await handleToolCall(event("danger now"), context({ ui: { confirm: async () => { throw new Error("dialog broke"); }, notify: () => {} } }).ctx, () => config(ruleSet("ask")), { history: failed.history }))?.block, true);
-  assert.deepEqual(approved.entries, [{ tool: "bash", command: "echo first", decision: "approved" }]);
-  assert.deepEqual(revised.entries, [{ tool: "bash", command: "echo first", decision: "blocked" }]);
+  assert.deepEqual(approved.entries, [{ tool: "bash", command: "noop-cmd first", decision: "approved" }]);
+  assert.deepEqual(revised.entries, [{ tool: "bash", command: "noop-cmd first", decision: "blocked" }]);
   assert.deepEqual(noUi.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
   assert.deepEqual(failed.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
 });

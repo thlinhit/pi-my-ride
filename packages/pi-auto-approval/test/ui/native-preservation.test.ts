@@ -15,8 +15,8 @@ const EXPECTED: Record<State, string[]> = {
   "blocked-cancelled": ["✗ blocked · Unmatched Bash command", "Cancelled"],
 };
 
-const COMMAND = "echo";
-const FINAL_COMMAND = "echo partial output";
+const COMMAND = "noop-cmd";
+const FINAL_COMMAND = "noop-cmd partial output";
 
 interface Run {
   readonly row: ToolExecutionComponent;
@@ -76,7 +76,7 @@ function deferredSignal() {
 
 function stagesFor(error: boolean) {
   const success = [
-    ["partial arguments", (c: ToolExecutionComponent) => c.updateArgs({ command: "echo" })],
+    ["partial arguments", (c: ToolExecutionComponent) => c.updateArgs({ command: "noop-cmd" })],
     ["complete arguments", (c: ToolExecutionComponent) => { c.updateArgs({ command: FINAL_COMMAND }); c.setArgsComplete(); }],
     ["streaming result", (c: ToolExecutionComponent) => { c.markExecutionStarted(); c.updateResult({ content: [{ type: "text", text: "streaming line\n" }], isError: false }, true); }],
     ["final result", (c: ToolExecutionComponent) => c.updateResult({ content: [{ type: "text", text: "short output" }], isError: false, durationMs: 1234 })],
@@ -84,7 +84,7 @@ function stagesFor(error: boolean) {
     ["expanded", (c: ToolExecutionComponent) => c.setExpanded(true)],
   ] as const;
   const failing = [
-    ["partial arguments", (c: ToolExecutionComponent) => c.updateArgs({ command: "echo" })],
+    ["partial arguments", (c: ToolExecutionComponent) => c.updateArgs({ command: "noop-cmd" })],
     ["complete arguments", (c: ToolExecutionComponent) => { c.updateArgs({ command: FINAL_COMMAND }); c.setArgsComplete(); }],
     ["collapsed error", (c: ToolExecutionComponent) => c.setExpanded(false)],
     ["streaming error", (c: ToolExecutionComponent) => { c.markExecutionStarted(); c.updateResult({ content: [{ type: "text", text: "error output\n".repeat(8) }], isError: true }, true); }],
@@ -119,9 +119,9 @@ for (const state of Object.keys(EXPECTED) as State[]) {
 
 test("the factory-connected row keeps the native result renderer and shows only the approved status line", async (t: TestContext) => {
   const harness = await createHarness(t, { reviewMode: "manual", confirm: async () => true });
-  const { row, renderers } = harness.row("echo renderer", "identity");
+  const { row, renderers } = harness.row("noop-cmd renderer", "identity");
   assert.notEqual(renderers.renderCall, nativeBash.renderCall, "the call slot is decorated");
   assert.equal(renderers.renderResult, nativeBash.renderResult, "the result slot is the untouched native renderer");
-  assert.equal(await harness.call("echo renderer", "identity"), undefined);
-  assert.deepEqual(withoutInsertedStatus(row.render(100), EXPECTED.approved), harness.nativeRow("echo renderer", "identity-native").render(100));
+  assert.equal(await harness.call("noop-cmd renderer", "identity"), undefined);
+  assert.deepEqual(withoutInsertedStatus(row.render(100), EXPECTED.approved), harness.nativeRow("noop-cmd renderer", "identity-native").render(100));
 });
