@@ -161,7 +161,26 @@ export function allowWordsMatch(ruleWords: readonly string[], commandWords: read
 
 const WRAPPER = /^(?:env|command|exec)[ \t]+/;
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
-const RAW_ENV_WORD = /^[A-Za-z_][A-Za-z0-9_]*=(?:[^\s'"\\;&|`()<>]|'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\\[\s\S])*[ \t]+/;
+function rawEnvValueEnd(text: string, start: number): number | undefined {
+  let quote: "" | "'" | '"' | "$'" = "";
+  for (let i = start; i < text.length; i++) {
+    const char = text.charAt(i);
+    if (char === "\\" && quote !== "'") {
+      i++;
+    } else if (quote) {
+      if (char === quote.at(-1)) quote = "";
+    } else if (char === "'" || char === '"') {
+      quote = char;
+    } else if (char === "$" && text[i + 1] === "'") {
+      quote = "$'";
+      i++;
+    } else if (char === " " || char === "\t") {
+      return i;
+    } else if (/\s/.test(char) || SHELL_SEGMENT_DELIMITER.test(char)) {
+      return;
+    }
+  }
+}
 
 function stripRawWrapper(command: string): string | undefined {
   const text = command.trimStart();
@@ -169,8 +188,10 @@ function stripRawWrapper(command: string): string | undefined {
   if (prefix === undefined) return;
   let rest = text.slice(prefix.length);
   if (prefix.startsWith("env")) {
-    for (let word = RAW_ENV_WORD.exec(rest); word; word = RAW_ENV_WORD.exec(rest)) {
-      rest = rest.slice(word[0].length);
+    for (let name = ENV_ASSIGNMENT.exec(rest); name; name = ENV_ASSIGNMENT.exec(rest)) {
+      const end = rawEnvValueEnd(rest, name[0].length);
+      if (end === undefined) break;
+      rest = rest.slice(end).replace(/^[ \t]+/, "");
     }
   }
   return rest;

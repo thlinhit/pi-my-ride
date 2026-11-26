@@ -313,6 +313,19 @@ describe("permission matching", () => {
     }
   });
 
+  test("raw env stripping preserves the remainder and stops at unterminated values", () => {
+    const rawRemainder = `preview 'draft note' > out`;
+    const malformed = `env FOO=$'unfinished preview draft`;
+    for (const level of ["deny", "ask"] as const) {
+      const rule = parse(`Bash(${rawRemainder})`, level);
+      const command = String.raw`env FOO=before"a\" b"' c' ${rawRemainder}`;
+      assert.equal(ruleMatches(rule, call("bash", { command }), "/tmp"), true);
+      const input = call("bash", { command: malformed });
+      assert.equal(ruleMatches(parse("Bash(preview *)", level), input, "/tmp"), false);
+      assert.equal(ruleMatches(parse(`Bash(${malformed})`, level), input, "/tmp"), true);
+    }
+  });
+
   test("applies deny, ask, allow precedence, global-before-project, and project trust", () => {
     const globalAllow = parse("Bash(*)", "allow");
     const projectAllow = parse("Bash(*)", "allow", "project");

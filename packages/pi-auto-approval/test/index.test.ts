@@ -255,6 +255,14 @@ test("Obsidian word allows enforce path boundaries, duplicate keys, and wildcard
   }
 });
 
+test("Obsidian recursive path allows accept subdirectories but reject dot-dot segments", async () => {
+  const rules = [parsedRule('Bash(obsidian vault=X create path="1. Inbox/Work/**" *)', "allow")];
+  const nested = 'obsidian vault=X create path="1. Inbox/Work/sub/a.md"';
+  const traversal = 'obsidian vault=X create path="1. Inbox/Work/../../Private/x.md"';
+  assert.deepEqual((await runBashRules(nested, rules)).reviews, []);
+  assert.deepEqual((await runBashRules(traversal, rules)).reviews, [traversal]);
+});
+
 test("Bash word allows retain exact and whole-word matches but reject old prefix matches", async () => {
   const cases = [
     ["git status", "Bash(git status)", true],
@@ -317,6 +325,24 @@ test("Bash restrictions match raw text, wrappers, bare commands, and canonical w
         assert.equal(calls.length, level === "ask" ? 1 : 0);
       }
     });
+  }
+});
+
+test("raw env assignments preserve deny and ask rules on unsupported calls", async (t) => {
+  for (const command of [
+    "env FOO=$'a b' preview draft > out",
+    String.raw`env FOO=$'a\' b' preview draft > out`,
+    `env FOO="a b" BAR='c d' preview draft > out`,
+    String.raw`env FOO=a\ b preview draft > out`,
+  ]) {
+    for (const level of ["deny", "ask"] as const) {
+      await t.test(`${level}: ${command}`, async () => {
+        const { result, reviews, calls } = await runBashRules(command, [parsedRule("Bash(preview *)", level)]);
+        if (level === "deny") assert.match(result?.reason ?? "", /Blocked by auto-approval/);
+        else assert.equal(calls.length, 1);
+        assert.deepEqual(reviews, []);
+      });
+    }
   }
 });
 
