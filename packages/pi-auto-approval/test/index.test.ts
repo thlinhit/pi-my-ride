@@ -115,6 +115,16 @@ for (const call of [
         assert.equal(result?.block, runs ? undefined : true, verdict.tier);
         if (prompts) assert.ok(String(calls[0]?.[1]).includes(verdict.reason));
         if (verdict.tier === "hard_deny") assert.equal(result?.reason, blockReason("reviewer", verdict.reason));
+        if (!hasUI && verdict.tier === "soft_deny")
+          assert.equal(result?.reason, blockReason("no UI", `Reviewer needs user approval: ${verdict.reason}`));
+        if (!hasUI && verdict.decision === "revise")
+          assert.equal(
+            result?.reason,
+            blockReason(
+              "no UI",
+              `Reviewer requested a revision: ${verdict.reason}\nConstraint: ${verdict.constraint}\nSource: ${verdict.source}\nApprove the original action once?`,
+            ),
+          );
       }
     });
   }
@@ -804,16 +814,16 @@ test("every exposed tool is matched by the same permission rules", async () => {
   const { ctx, calls } = context();
   const denied = async (toolName: string, input: unknown) =>
     (await handleToolCall({ toolName, input }, ctx, () => config(rules), {}))?.reason;
-  assert.equal(await denied("read", { path: ".env" }), blockReason("deny rule", "(Read(./.env), global.json)"));
+  assert.equal(await denied("read", { path: ".env" }), blockReason("deny rule", "Read(./.env), global.json"));
   assert.equal(
     await denied("write", { path: "secrets/key.pem", content: "x" }),
-    blockReason("deny rule", "(Edit(./secrets/**), global.json)"),
+    blockReason("deny rule", "Edit(./secrets/**), global.json"),
   );
   assert.equal(
     await denied("edit", { path: "secrets/key.pem", edits: [] }),
-    blockReason("deny rule", "(Edit(./secrets/**), global.json)"),
+    blockReason("deny rule", "Edit(./secrets/**), global.json"),
   );
-  assert.equal(await denied("CronCreate", {}), blockReason("deny rule", "(CronCreate, global.json)"));
+  assert.equal(await denied("CronCreate", {}), blockReason("deny rule", "CronCreate, global.json"));
   assert.equal(calls.length, 0);
 });
 
@@ -884,7 +894,7 @@ test("unmatched non-bash review outcomes route to confirmation or block; no UI b
       name: "cancelled",
       result: { ok: false, cancelled: true, error: "cancelled" },
       prompts: 0,
-      reason: "Review cancelled",
+      reason: blockReason("cancelled", "Review cancelled"),
     },
   ];
   for (const outcome of outcomes) {
@@ -901,6 +911,48 @@ test("unmatched non-bash review outcomes route to confirmation or block; no UI b
   });
   assert.equal(blocked?.reason, blockReason("no UI", "Reviewer needs user approval: Check."));
   assert.equal(noUi.calls.length, 0);
+});
+
+test("D16 config, error and cancelled sources use the exact two-line text", async () => {
+  const invalid = await handleToolCall(event(), context().ctx, () => ({ ok: false, error: "bad file" }));
+  assert.equal(
+    invalid?.reason,
+    blockReason("config", "auto-approval: invalid config - bad file. Fix it to run tools."),
+  );
+  const matcherThrows = await handleToolCall(event(), context().ctx, loadConfig, {
+    matcher: () => {
+      throw Error();
+    },
+  });
+  assert.equal(matcherThrows?.reason, blockReason("error", "auto-approval: matcher error"));
+  const confirmThrows = context({
+    ui: {
+      confirm: async () => {
+        throw Error();
+      },
+      notify: () => {},
+    },
+  });
+  assert.equal(
+    (await handleToolCall(event("unmatched-command"), confirmThrows.ctx, () => config([])))?.reason,
+    blockReason("error", "Unmatched Bash command requires confirmation (confirmation failed)"),
+  );
+  const controller = new AbortController();
+  controller.abort();
+  const aborted = context({ signal: controller.signal });
+  assert.equal(
+    (await handleToolCall(event(), aborted.ctx, loadConfig))?.reason,
+    blockReason("cancelled", "auto-approval: confirmation failed"),
+  );
+});
+
+test("injected ask_user verdict is invalid and blocks with zero dialogs", async () => {
+  const { ctx, calls } = context();
+  const result = await handleToolCall(event("unmatched-command"), ctx, () => config([], "auto"), {
+    review: async () => ({ ok: true, verdict: { decision: "ask_user", tier: "none", reason: "ask" } }) as never,
+  });
+  assert.equal(result?.reason, blockReason("reviewer", "Invalid verdict"));
+  assert.equal(calls.length, 0);
 });
 
 test("non-bash prompt names the tool and shows its JSON input truncated at 2000 characters", async () => {
@@ -921,7 +973,10 @@ test("invalid config blocks a non-bash tool before review or confirmation", asyn
     () => ({ ok: false, error: "bad file" }),
     { review: approving(review) },
   );
-  assert.equal(decision?.reason, "auto-approval: invalid config - bad file. Fix it to run tools.");
+  assert.equal(
+    decision?.reason,
+    blockReason("config", "auto-approval: invalid config - bad file. Fix it to run tools."),
+  );
   assert.equal(review.count, 0);
   assert.equal(calls.length, 0);
 });
@@ -937,7 +992,10 @@ test("bash-only input and compound checks do not apply to other tools", async ()
 
 test("invalid bash input and config failures block", async () => {
   const { ctx, calls } = context();
-  assert.equal((await handleToolCall(event(null), ctx, loadConfig))?.reason, "auto-approval: invalid bash input");
+  assert.equal(
+    (await handleToolCall(event(null), ctx, loadConfig))?.reason,
+    blockReason("error", "auto-approval: invalid bash input"),
+  );
   assert.match(
     (await handleToolCall(event(), ctx, () => ({ ok: false, error: "bad file" })))!.reason,
     /invalid config - bad file/,
@@ -948,7 +1006,7 @@ test("invalid bash input and config failures block", async () => {
         throw Error();
       })
     )?.reason,
-    "auto-approval: config load failed",
+    blockReason("config", "auto-approval: config load failed"),
   );
   assert.equal(calls.length, 0);
 });
@@ -957,7 +1015,7 @@ test("deny rule blocks with attribution", async () => {
   const { ctx, calls } = context();
   assert.equal(
     (await handleToolCall(event(), ctx, () => config([rule("deny")])))?.reason,
-    blockReason("deny rule", "(danger command, global.json)"),
+    blockReason("deny rule", "danger command, global.json"),
   );
   assert.equal(calls.length, 0);
 });
@@ -1145,7 +1203,7 @@ test("untrusted project allow confirms; deny cannot bypass", async () => {
   const blocked = await handleToolCall(event(), ctx, () => config([rule("deny")]), {
     status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
-  assert.equal(blocked?.reason, blockReason("deny rule", "(danger command, global.json)"));
+  assert.equal(blocked?.reason, blockReason("deny rule", "danger command, global.json"));
   assert.deepEqual(statuses, ["approval-required", "approved", "blocked"]);
 });
 
@@ -1375,7 +1433,7 @@ test("whole and component Bash denies win over protected paths without prompting
   for (const denied of [command, "obsidian create path=x", protectedComponent]) {
     const deny = parsedRule(`Bash(${denied})`);
     const decision = await handleToolCall(event(command), ctx, () => config([deny], "auto"), { review });
-    assert.deepEqual(decision, { block: true, reason: blockReason("deny rule", `(${deny.label}, ${deny.source})`) });
+    assert.deepEqual(decision, { block: true, reason: blockReason("deny rule", `${deny.label}, ${deny.source}`) });
   }
   assert.equal(calls.length, 0);
   assert.equal(review.mock.callCount(), 0);
@@ -1559,13 +1617,13 @@ test("untrusted shared and local deny and ask rules apply without a D25 notice",
     ["local", "auto-permissions.local.json"],
   ] as const) {
     for (const [level, reason] of [
-      ["deny", "Blocked by auto-approval (deny rule): ("],
+      ["deny", "Blocked by auto-approval (deny rule): "],
       ["ask", "Blocked by auto-approval (no UI): Requires confirmation ("],
     ] as const) {
       const decision = await handleToolCall(event(`echo ${source}-${level}`), ctx, load);
       assert.ok(decision);
       assert.ok(decision.reason.startsWith(reason));
-      assert.ok(decision.reason.includes(`${file})`));
+      assert.ok(decision.reason.includes(file));
     }
   }
   assert.deepEqual(
@@ -1630,7 +1688,7 @@ test("status disabled hides reports without changing enforcement", async () => {
   const convention = await handleToolCall(event(), trusted.ctx, () => hiddenConfig([rule("deny")]), {
     status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
-  assert.equal(convention?.reason, blockReason("deny rule", "(danger command, global.json)"));
+  assert.equal(convention?.reason, blockReason("deny rule", "danger command, global.json"));
   assert.equal(statuses.length, 0);
 });
 
@@ -1655,7 +1713,7 @@ test("status reporter failures do not change allow or block decisions", async ()
   assert.match((await handleToolCall(event(), denied.ctx, loadConfig, { status: throwing }))!.reason, /user declined/);
   assert.equal(
     (await handleToolCall(event(), context().ctx, () => config([rule("deny")]), { status: throwing }))?.reason,
-    blockReason("deny rule", "(danger command, global.json)"),
+    blockReason("deny rule", "danger command, global.json"),
   );
 });
 
@@ -1701,7 +1759,7 @@ test("already-aborted signal blocks without prompting", async () => {
         status: (report) => statuses.push(typeof report === "string" ? report : report.state),
       })
     )?.reason,
-    "auto-approval: confirmation failed",
+    blockReason("cancelled", "auto-approval: confirmation failed"),
   );
   assert.equal(aborted.calls.length, 0);
   assert.equal(statuses.length, 0);
@@ -1716,7 +1774,7 @@ test("matcher errors block", async () => {
         },
       })
     )?.reason,
-    "auto-approval: matcher error",
+    blockReason("error", "auto-approval: matcher error"),
   );
 });
 
@@ -2086,7 +2144,7 @@ test("factory gates a non-bash call under the same single confirmation lock", as
   assert.equal(prompts.length, 1);
   assert.deepEqual(await h.invokeTool("write", { path: "x.md", content: "" }, "write-2"), {
     block: true,
-    reason: "Unmatched write call requires confirmation (confirmation failed)",
+    reason: blockReason("error", "Unmatched write call requires confirmation (confirmation failed)"),
   });
   release(true);
   assert.equal(await first, undefined);
@@ -2186,7 +2244,7 @@ test("guardian bypasses reviewer for trusted, convention, and unmatched routes",
   );
   assert.equal(
     (await handleToolCall(event(), ctx, () => config([rule("deny")], "auto"), deps))?.reason,
-    blockReason("deny rule", "(danger command, global.json)"),
+    blockReason("deny rule", "danger command, global.json"),
   );
   assert.equal(await handleToolCall(event("noop-cmd safe"), ctx, () => config([], "auto"), deps), undefined);
   assert.equal(reviews, 1, "unmatched auto command must be reviewed");

@@ -21,6 +21,7 @@ import type {
   ToolCallEvent,
 } from "@earendil-works/pi-coding-agent";
 import type { ConfigUi } from "../../src/config.ts";
+import { blockReason } from "./factory-harness.ts";
 import autoApproval from "../../src/index.ts";
 import { createReviewDisplay } from "../../src/ui/display.ts";
 import { createRowStore, VERIFIED_PI_VERSIONS, wrapNative } from "../../src/ui/rows.ts";
@@ -451,7 +452,7 @@ test("actual ready row stays cancelled across late confirmation and session rese
   await opened;
   assert.equal(confirms, 1);
   await menuAction(driver, async () => permissionCommand!("", ctx), "Protection off");
-  assert.deepEqual(await pending, { block: true, reason: "auto-approval: confirmation failed" });
+  assert.deepEqual(await pending, { block: true, reason: blockReason("cancelled", "auto-approval: confirmation failed") });
   const cancelled = render(row).filter((line) => line.includes("Cancelled"));
   assert.equal(cancelled.length, 1, "the ready row gets one attributed cancellation terminal");
   assert.equal(handlers.has("session_start"), true);
@@ -607,7 +608,7 @@ test("actual extension factory routes a ready native row through Pi's resolver c
   render(row);
   cancelOnRedraw = true;
   const outcome = await handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId, input: { command: "noop-cmd connected" } }, ctx);
-  assert.deepEqual(outcome, { block: true, reason: "auto-approval: confirmation failed" });
+  assert.deepEqual(outcome, { block: true, reason: blockReason("cancelled", "auto-approval: confirmation failed") });
   assert.equal(confirmations.length, 2);
   assert.equal(widgets.length, fallbackCount, "the ready call does not fall back to a widget");
   const visible = render(row).join("\n");

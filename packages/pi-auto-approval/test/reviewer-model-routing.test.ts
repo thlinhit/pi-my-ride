@@ -860,15 +860,15 @@ test("real loader blocks Read .env and Edit/Write secrets before any reviewer re
     const extension = await host.load();
     assert.match(
       (await tool(host, extension, "read", { path: ".env" }))!.reason,
-      /^Blocked by auto-approval \(deny rule\): \(Read\(\.\/\.env\), /,
+      /^Blocked by auto-approval \(deny rule\): Read\(\.\/\.env\), /,
     );
     assert.match(
       (await tool(host, extension, "edit", { path: "./.env", edits: [] }))!.reason,
-      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/\.env\), /,
+      /^Blocked by auto-approval \(deny rule\): Edit\(\.\/\.env\), /,
     );
     assert.match(
       (await tool(host, extension, "write", { path: "secrets/key.pem", content: "x" }))!.reason,
-      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/secrets\/\*\*\), /,
+      /^Blocked by auto-approval \(deny rule\): Edit\(\.\/secrets\/\*\*\), /,
     );
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 0);
@@ -914,7 +914,7 @@ test("real loader: invalid config blocks a non-Bash tool with the run-tools mess
     const extension = await host.load();
     assert.match(
       (await tool(host, extension, "read", { path: "notes.md" }))!.reason,
-      /^auto-approval: invalid config - .+\. Fix it to run tools\.$/,
+      /^Blocked by auto-approval \(config\): auto-approval: invalid config - .+\. Fix it to run tools\.\n/,
     );
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 0);
@@ -926,7 +926,8 @@ test("real loader: invalid config blocks a non-Bash tool with the run-tools mess
 const SEED_BYTES = JSON.stringify(SEED_CONFIG, null, 2) + "\n";
 const SEED_WARNING = "warning:Could not create default config ";
 const OLD_MTIME = new Date("2001-02-03T04:05:06Z");
-const INVALID_CONFIG = /^auto-approval: invalid config - .+\. Fix it to run tools\.$/;
+const INVALID_CONFIG =
+  /^Blocked by auto-approval \(config\): auto-approval: invalid config - .+\. Fix it to run tools\.\n/;
 
 test("real factory load writes nothing; session_start seeds before footer refresh; second startup keeps bytes and mtime", async () => {
   const host = await createHost("absent");
@@ -961,15 +962,15 @@ test("real factory load writes nothing; session_start seeds before footer refres
     );
     assert.match(
       (await tool(host, extension, "read", { path: ".env" }))!.reason,
-      /^Blocked by auto-approval \(deny rule\): \(Read\(\.\/\.env\), /,
+      /^Blocked by auto-approval \(deny rule\): Read\(\.\/\.env\), /,
     );
     assert.match(
       (await tool(host, extension, "edit", { path: "secrets/key.txt", edits: [] }))!.reason,
-      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/secrets\/\*\*\), /,
+      /^Blocked by auto-approval \(deny rule\): Edit\(\.\/secrets\/\*\*\), /,
     );
     assert.match(
       (await tool(host, extension, "write", { path: ".env", content: "x" }))!.reason,
-      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/\.env\), /,
+      /^Blocked by auto-approval \(deny rule\): Edit\(\.\/\.env\), /,
     );
     assert.equal(await bash(host, extension, "git status"), undefined);
     assert.equal(host.calls.length, 0);
@@ -1017,7 +1018,7 @@ test("readable missing global policy keeps the in-memory seed when the seed writ
     );
     assert.match(
       (await tool(host, extension, "edit", { path: "secrets/key.txt", edits: [] }))!.reason,
-      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/secrets\/\*\*\), /,
+      /^Blocked by auto-approval \(deny rule\): Edit\(\.\/secrets\/\*\*\), /,
     );
     assert.equal(await bash(host, extension, "git status"), undefined);
     assert.equal(host.calls.length, 0);
@@ -1145,7 +1146,7 @@ test("real history save failure keeps approve and deny outcomes and warns exactl
     assert.equal(await approved, undefined);
     assert.match(
       (await bash(host, extension, "rm file.txt"))!.reason,
-      /^Blocked by auto-approval \(deny rule\): \(Bash\(rm \*\), /,
+      /^Blocked by auto-approval \(deny rule\): Bash\(rm \*\), /,
     );
     const warnings = host.messages.filter(
       (message) => message.startsWith("warning:") && message.includes("auto-approval history"),
@@ -1445,9 +1446,8 @@ test("deterministic Write evidence sends its path but never content to the next 
     const review = await waitFor(host.calls, 0);
     review.release?.("approve");
     assert.equal(await pending, undefined);
-    const messages = JSON.stringify(review.context.messages);
-    assert.match(messages, /TOOL write path=scratch\/a\.md/);
-    assert.ok(!messages.includes(sentinel));
+    assert.match(JSON.stringify(review.context.messages), /TOOL write path=scratch\/a\.md/);
+    assert.ok(!JSON.stringify(review.context).includes(sentinel));
   } finally {
     await host.close();
   }
@@ -1531,8 +1531,10 @@ test("untrusted local allow-only file gets one D25 notice across two calls", asy
   }
 });
 
+const blockReason = (source: string, reason: string) =>
+  `Blocked by auto-approval (${source}): ${reason}\nThe tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script).`;
 const OFF_LATE_OUTCOMES = [
-  { hops: 1, reason: "auto-approval: confirmation failed" },
+  { hops: 1, reason: blockReason("cancelled", "auto-approval: confirmation failed") },
   { hops: 2, reason: undefined },
 ] as const;
 for (const { hops, reason } of OFF_LATE_OUTCOMES) {

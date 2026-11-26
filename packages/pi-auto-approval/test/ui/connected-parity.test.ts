@@ -18,6 +18,7 @@ import type {
   ToolRendererResolver,
   ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
+import { blockReason } from "./factory-harness.ts";
 import autoApproval from "../../src/index.ts";
 
 initTheme("dark", false);
@@ -746,12 +747,15 @@ test("connected abort cancels an in-flight fallback confirmation and retains its
       await entered;
       harness.cancel();
       const aborted = await first;
-      assert.deepEqual(aborted.result, { block: true, reason: "auto-approval: confirmation failed" });
+      assert.deepEqual(aborted.result, {
+        block: true,
+        reason: blockReason("cancelled", "auto-approval: confirmation failed"),
+      });
       const widgetKey = aborted.widgets[0]?.[0];
       const competing = await harness.call();
       assert.deepEqual(competing.result, {
         block: true,
-        reason: "Automatic review failed: reviewer returned no JSON object (confirmation failed)",
+        reason: blockReason("error", "Automatic review failed: reviewer returned no JSON object (confirmation failed)"),
       });
       assert.equal(
         promptCalls,
@@ -829,7 +833,10 @@ test("connected reviewer cancellation ignores a late approval and permits a fres
       await started;
       harness.cancel();
       const cancelled = await abandoned;
-      assert.deepEqual(cancelled.result, { block: true, reason: "auto-approval: confirmation failed" });
+      assert.deepEqual(cancelled.result, {
+        block: true,
+        reason: blockReason("cancelled", "auto-approval: confirmation failed"),
+      });
       assert.equal(harness.confirmations.length, 0);
       const widgetKey = cancelled.widgets[0]?.[0];
       finishReview({

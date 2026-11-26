@@ -69,6 +69,9 @@ const blockSources = {
   reviewer: "reviewer",
   noUI: "no UI",
   user: "user",
+  config: "config",
+  error: "error",
+  cancelled: "cancelled",
 } as const;
 type BlockSource = keyof typeof blockSources;
 function blocked(source: BlockSource, reason: string) {
@@ -213,13 +216,13 @@ async function decideToolCall(
   choices: SessionChoices,
   noticedFiles: Set<string>,
 ): Promise<GateDecision> {
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   const bash = event.toolName === "bash";
   const command = bashCommandOf(event.input);
-  if (bash && command === undefined) return block("auto-approval: invalid bash input");
+  if (bash && command === undefined) return blocked("error", "auto-approval: invalid bash input");
   if (choices.enabled === false) return undefined;
-  if (!config) return block("auto-approval: config load failed");
-  if (!config.ok) return block(`auto-approval: invalid config - ${config.error}. Fix it to run tools.`);
+  if (!config) return blocked("config", "auto-approval: config load failed");
+  if (!config.ok) return blocked("config", `auto-approval: invalid config - ${config.error}. Fix it to run tools.`);
   if (!projectTrusted) {
     const ignoredFiles = new Set<string>();
     for (const file of [config.project?.shared, config.project?.local]) {
@@ -235,7 +238,7 @@ async function decideToolCall(
       safeNotify(ctx, `Ignored project settings from ${file} because the project is untrusted.`);
     }
   }
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   if (!settings.enabled) return undefined;
   const mode = settings.reviewMode;
   const overBashApprovalLimit = bash && command !== undefined && Buffer.byteLength(command) > MAX_BASH_APPROVAL_BYTES;
@@ -258,7 +261,7 @@ async function decideToolCall(
       }
     }
   } catch {
-    return block("auto-approval: matcher error");
+    return blocked("error", "auto-approval: matcher error");
   }
 
   let protectedReason: string | undefined;
@@ -285,11 +288,11 @@ async function decideToolCall(
         );
         if (!rule && components.length === 1 && componentRules[0]?.level === "allow") rule = componentRules[0];
       } catch {
-        return block("auto-approval: matcher error");
+        return blocked("error", "auto-approval: matcher error");
       }
     }
   }
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   const label = rule?.label ?? (bash ? "Unmatched Bash command" : `Unmatched ${event.toolName} call`);
   const reviewerConfig =
     choices.reviewerModel === undefined
@@ -332,9 +335,9 @@ async function decideToolCall(
   const attribution = rule ? `(${rule.label}, ${rule.source})` : "";
   const confirm = async (reason: string, headlessSource: BlockSource = "noUI"): Promise<GateDecision> => {
     if (!ctx.hasUI) return blocked(headlessSource, reason);
-    if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+    if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
     report("approval-required");
-    if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+    if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
     try {
       const approved = await ctx.ui.confirm(
         `Approve command?${rule ? ` [${rule.label}]` : ""}`,
@@ -343,18 +346,20 @@ async function decideToolCall(
       );
       if (isAborted(ctx) || approved !== true) {
         report("blocked", isAborted(ctx) ? "Cancelled" : undefined);
-        return isAborted(ctx) ? block(`${reason} (review cancelled)`) : blocked("user", `${reason} (user declined)`);
+        return isAborted(ctx)
+          ? blocked("cancelled", `${reason} (review cancelled)`)
+          : blocked("user", `${reason} (user declined)`);
       }
       report("approved");
-      return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+      return isAborted(ctx) ? blocked("cancelled", CONFIRMATION_FAILED) : undefined;
     } catch {
       report("blocked");
-      return block(`${reason} (confirmation failed)`);
+      return blocked("error", `${reason} (confirmation failed)`);
     }
   };
   if (rule?.level === "deny") {
     report("blocked");
-    return blocked("denyRule", attribution);
+    return blocked("denyRule", `${rule.label}, ${rule.source}`);
   }
   if (protectedReason) return confirm(protectedReason, "protectedPath");
   if (analysis && !analysis.supported && !analysis.reviewable)
@@ -362,7 +367,7 @@ async function decideToolCall(
   if (bash && analysis?.supported) {
     const reasons: string[] = rule?.level === "ask" ? [`Requires confirmation ${attribution}`] : [];
     for (let index = 0; index < analysis.components.length; index++) {
-      if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+      if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
       const component = analysis.components[index]!;
       const reason = componentReasons[index];
       if (reason) {
@@ -387,7 +392,7 @@ async function decideToolCall(
         continue;
       }
       report("guardian-running");
-      if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+      if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
       const result = await review({
         command: component.command,
         component: {
@@ -401,12 +406,12 @@ async function decideToolCall(
       });
       if (isAborted(ctx)) {
         report("blocked", "Cancelled");
-        return block(CONFIRMATION_FAILED);
+        return blocked("cancelled", CONFIRMATION_FAILED);
       }
       if (!result.ok) {
         if (result.cancelled) {
           report("blocked", "Cancelled");
-          return block("Review cancelled");
+          return blocked("cancelled", "Review cancelled");
         }
         reasons.push(`Automatic review failed: ${result.error}`);
         continue;
@@ -446,31 +451,31 @@ async function decideToolCall(
           return invalidVerdict(decision);
       }
     }
-    if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+    if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
     if (reasons.length)
       return confirm([...new Set(reasons)].join("\n"), componentReasons.some(Boolean) ? "protectedPath" : "noUI");
     report("approved");
-    return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+    return isAborted(ctx) ? blocked("cancelled", CONFIRMATION_FAILED) : undefined;
   }
   if (rule?.level === "ask") return confirm(`Requires confirmation ${attribution}`);
   if (rule?.level === "allow" && !bash) {
     if (settings.debug) safeNotify(ctx, `Allowed by rule (${rule.label}, ${rule.source})`);
     report("approved");
-    return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+    return isAborted(ctx) ? blocked("cancelled", CONFIRMATION_FAILED) : undefined;
   }
   if (mode === "manual") return confirm(`${label} requires confirmation`);
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   report("guardian-running");
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   const result = await review(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input });
   if (isAborted(ctx)) {
     report("blocked", "Cancelled");
-    return block(CONFIRMATION_FAILED);
+    return blocked("cancelled", CONFIRMATION_FAILED);
   }
   if (!result.ok) {
     if (result.cancelled) {
       report("blocked", "Cancelled");
-      return block("Review cancelled");
+      return blocked("cancelled", "Review cancelled");
     }
     return confirm(`Automatic review failed: ${result.error}`);
   }
@@ -483,7 +488,7 @@ async function decideToolCall(
         case "user_intent":
         case "none":
           report("approved");
-          return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+          return isAborted(ctx) ? blocked("cancelled", CONFIRMATION_FAILED) : undefined;
         default:
           return invalidVerdict(tier);
       }
@@ -577,7 +582,11 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
             widgetKey,
             displayGeneration,
           );
-        resolve({ kind: "decided", decision: block(CONFIRMATION_FAILED), log: snapshot.settings.enabled });
+        resolve({
+          kind: "decided",
+          decision: blocked("cancelled", CONFIRMATION_FAILED),
+          log: snapshot.settings.enabled,
+        });
       };
       signal.addEventListener("abort", abortListener, { once: true });
       if (signal.aborted) abortListener();

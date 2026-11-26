@@ -267,3 +267,6 @@ export function rowState(frame: string): string | undefined {
   const state = ROW_STATES.find((candidate) => frame.includes(candidate));
   return state && frame.includes("Cancelled") ? `${state} + Cancelled` : state;
 }
+
+export const blockReason = (source: string, reason: string) =>
+  `Blocked by auto-approval (${source}): ${reason}\nThe tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script).`;
