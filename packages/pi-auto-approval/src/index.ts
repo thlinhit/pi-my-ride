@@ -3,7 +3,14 @@ import { dirname, join } from "node:path";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PermissionRule, SessionChoices } from "./config.ts";
-import { CONFIG_FILENAME, ensureGlobalConfig, globalConfigDir, loadConfig, projectConfigPath } from "./config.ts";
+import {
+  CONFIG_FILENAME,
+  ensureGlobalConfig,
+  globalConfigDir,
+  loadConfig,
+  projectConfigPath,
+  resolveReviewerPolicy,
+} from "./config.ts";
 import { analyzeShell } from "./shell.ts";
 import { isReadOnlyComponent } from "./readonly.ts";
 import { matchPermission, matchPermissionExact, resolveToolPath } from "./rules.ts";
@@ -14,7 +21,7 @@ import { recordHistory, type HistoryEntry, type HistoryResult } from "./history.
 import { createReviewDisplay } from "./ui/display.ts";
 import type { ConfigUi } from "./config.ts";
 import type { ReviewState } from "./ui/status.ts";
-import type { ReviewResult, Reviewer } from "./review/session.ts";
+import type { ReviewInput, ReviewResult, Reviewer } from "./review/session.ts";
 import { createPiReviewer, createReviewerState } from "./review/session.ts";
 
 export type { ReviewContext, ReviewInput, ReviewResult, Reviewer, ReviewerState } from "./review/session.ts";
@@ -24,7 +31,10 @@ export interface GateContext {
   readonly hasUI: boolean;
   readonly signal: AbortSignal | undefined;
   isProjectTrusted(): boolean;
-  readonly ui: { confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean>; notify(message: string, type?: "info" | "warning" | "error"): void };
+  readonly ui: {
+    confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean>;
+    notify(message: string, type?: "info" | "warning" | "error"): void;
+  };
 }
 export type ConfigLoader = (cwd: string) => PermissionConfig;
 export interface GateReport {
@@ -37,7 +47,12 @@ export interface GateReport {
 }
 export type StatusReporter = (report: GateReport) => void;
 export interface GateDeps {
-  readonly matcher?: (call: { toolName: string; input: unknown }, cwd: string, rules: readonly PermissionRule[], projectTrusted: boolean) => PermissionRule | undefined;
+  readonly matcher?: (
+    call: { toolName: string; input: unknown },
+    cwd: string,
+    rules: readonly PermissionRule[],
+    projectTrusted: boolean,
+  ) => PermissionRule | undefined;
   readonly status?: StatusReporter;
   readonly reviewer?: string;
   readonly review?: Reviewer;
@@ -48,11 +63,31 @@ export type GateDecision = { block: true; reason: string } | undefined;
 const CONFIRMATION_FAILED = "auto-approval: confirmation failed";
 const MAX_BASH_APPROVAL_BYTES = 65_536;
 const block = (reason: string): { block: true; reason: string } => ({ block: true, reason });
+const blockSources = {
+  denyRule: "deny rule",
+  protectedPath: "protected path",
+  reviewer: "reviewer",
+  noUI: "no UI",
+  user: "user",
+  config: "config",
+  error: "error",
+  cancelled: "cancelled",
+} as const;
+type BlockSource = keyof typeof blockSources;
+function blocked(source: BlockSource, reason: string) {
+  return block(
+    `Blocked by auto-approval (${blockSources[source]}): ${reason}\nThe tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script).`,
+  );
+}
+const invalidVerdict = (_: never) => blocked("reviewer", "Invalid verdict");
 type GateOutcome = { kind: "not-gated" } | { kind: "decided"; decision: GateDecision; log: boolean };
 const NOT_GATED: GateOutcome = { kind: "not-gated" };
 const PATH_TOOLS = new Set(["read", "edit", "write"]);
 function historyCommandOf(toolName: string, input: unknown): string {
-  const value = input !== null && typeof input === "object" ? (input as Record<string, unknown>)[PATH_TOOLS.has(toolName) ? "path" : "command"] : undefined;
+  const value =
+    input !== null && typeof input === "object"
+      ? (input as Record<string, unknown>)[PATH_TOOLS.has(toolName) ? "path" : "command"]
+      : undefined;
   return typeof value === "string" ? value : "";
 }
 function bashCommandOf(input: unknown): string | undefined {
@@ -65,8 +100,14 @@ function callExcerpt(toolName: string, input: unknown): string {
   const json = JSON.stringify(input) ?? String(input);
   return `${toolName} ${json.length > EXCERPT_LIMIT ? `${json.slice(0, EXCERPT_LIMIT)}...` : json}`;
 }
-function safeNotify(ctx: GateContext, message: string): void { try { ctx.ui.notify(message); } catch {} }
-function isAborted(ctx: GateContext): boolean { return ctx.signal?.aborted === true; }
+function safeNotify(ctx: GateContext, message: string): void {
+  try {
+    ctx.ui.notify(message);
+  } catch {}
+}
+function isAborted(ctx: GateContext): boolean {
+  return ctx.signal?.aborted === true;
+}
 function snapshotGate(ctx: GateContext, choices: SessionChoices, load?: ConfigLoader, globalDir = globalConfigDir()) {
   let config: PermissionConfig | undefined;
   try {
@@ -95,9 +136,19 @@ function recordGateOutcome(
   }
   if (!result.ok) warn(`Could not record auto-approval history: ${result.error}`);
 }
-function safeWarn(ctx: GateContext, message: string): void { try { ctx.ui.notify(message, "warning"); } catch {} }
+function safeWarn(ctx: GateContext, message: string): void {
+  try {
+    ctx.ui.notify(message, "warning");
+  } catch {}
+}
 
-export async function handleToolCall(event: { toolName: string; input: unknown; toolCallId?: string }, ctx: GateContext, load: ConfigLoader, deps: GateDeps = {}, choices: SessionChoices = {}): Promise<GateDecision> {
+export async function handleToolCall(
+  event: { toolName: string; input: unknown; toolCallId?: string },
+  ctx: GateContext,
+  load: ConfigLoader,
+  deps: GateDeps = {},
+  choices: SessionChoices = {},
+): Promise<GateDecision> {
   const snapshot = snapshotGate(ctx, choices, choices.enabled === false ? undefined : load);
   const outcome = await gateToolCall(event, ctx, snapshot, deps, choices, new Set());
   if (deps.history) recordGateOutcome(event, outcome, deps.history, (message) => safeWarn(ctx, message));
@@ -165,13 +216,13 @@ async function decideToolCall(
   choices: SessionChoices,
   noticedFiles: Set<string>,
 ): Promise<GateDecision> {
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   const bash = event.toolName === "bash";
   const command = bashCommandOf(event.input);
-  if (bash && command === undefined) return block("auto-approval: invalid bash input");
+  if (bash && command === undefined) return blocked("error", "auto-approval: invalid bash input");
   if (choices.enabled === false) return undefined;
-  if (!config) return block("auto-approval: config load failed");
-  if (!config.ok) return block(`auto-approval: invalid config - ${config.error}. Fix it to run tools.`);
+  if (!config) return blocked("config", "auto-approval: config load failed");
+  if (!config.ok) return blocked("config", `auto-approval: invalid config - ${config.error}. Fix it to run tools.`);
   if (!projectTrusted) {
     const ignoredFiles = new Set<string>();
     for (const file of [config.project?.shared, config.project?.local]) {
@@ -187,7 +238,7 @@ async function decideToolCall(
       safeNotify(ctx, `Ignored project settings from ${file} because the project is untrusted.`);
     }
   }
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   if (!settings.enabled) return undefined;
   const mode = settings.reviewMode;
   const overBashApprovalLimit = bash && command !== undefined && Buffer.byteLength(command) > MAX_BASH_APPROVAL_BYTES;
@@ -209,7 +260,9 @@ async function decideToolCall(
         denied = exactMatcher(componentCall(component.command), ctx.cwd, denyRules, projectTrusted, component.words);
       }
     }
-  } catch { return block("auto-approval: matcher error"); }
+  } catch {
+    return blocked("error", "auto-approval: matcher error");
+  }
 
   let protectedReason: string | undefined;
   let componentReasons: (string | undefined)[] = [];
@@ -235,24 +288,56 @@ async function decideToolCall(
         );
         if (!rule && components.length === 1 && componentRules[0]?.level === "allow") rule = componentRules[0];
       } catch {
-        return block("auto-approval: matcher error");
+        return blocked("error", "auto-approval: matcher error");
       }
     }
   }
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   const label = rule?.label ?? (bash ? "Unmatched Bash command" : `Unmatched ${event.toolName} call`);
-  const reviewerConfig = choices.reviewerModel === undefined ? config.reviewer : { ...config.reviewer, model: choices.reviewerModel ?? undefined };
+  const reviewerConfig =
+    choices.reviewerModel === undefined
+      ? config.reviewer
+      : { ...config.reviewer, model: choices.reviewerModel ?? undefined };
   const reviewer = reviewerConfig.model ? `${reviewerConfig.model.provider}/${reviewerConfig.model.id}` : deps.reviewer;
+  const policy = resolveReviewerPolicy(
+    { ...config, global: config.global ?? config, project: config.project ?? {} },
+    projectTrusted,
+  );
+  const review = async (
+    request: Pick<ReviewInput, "command" | "component" | "tool" | "arguments">,
+  ): Promise<ReviewResult> => {
+    try {
+      if (deps.review)
+        return await deps.review({
+          ...request,
+          reviewer: reviewerConfig,
+          reviewEvidence: config.reviewEvidence,
+          policy,
+          projectTrusted,
+          signal: ctx.signal,
+        });
+    } catch {}
+    return { ok: false, error: "reviewer unavailable" } as const;
+  };
   const report = (state: ReviewState, detail?: string) => {
     if (!ctx.hasUI || !settings.debug || !config.ui.status || !deps.status || isAborted(ctx)) return;
-    try { deps.status({ state, label, ...(rule?.source ? { source: rule.source } : {}), ...(state === "guardian-running" && reviewer ? { reviewer } : {}), ...(detail ? { detail } : {}), ui: config.ui }); } catch {}
+    try {
+      deps.status({
+        state,
+        label,
+        ...(rule?.source ? { source: rule.source } : {}),
+        ...(state === "guardian-running" && reviewer ? { reviewer } : {}),
+        ...(detail ? { detail } : {}),
+        ui: config.ui,
+      });
+    } catch {}
   };
   const attribution = rule ? `(${rule.label}, ${rule.source})` : "";
-  const confirm = async (reason: string): Promise<GateDecision> => {
-    if (!ctx.hasUI) return block(reason);
-    if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  const confirm = async (reason: string, headlessSource: BlockSource = "noUI"): Promise<GateDecision> => {
+    if (!ctx.hasUI) return blocked(headlessSource, reason);
+    if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
     report("approval-required");
-    if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+    if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
     try {
       const approved = await ctx.ui.confirm(
         `Approve command?${rule ? ` [${rule.label}]` : ""}`,
@@ -261,26 +346,28 @@ async function decideToolCall(
       );
       if (isAborted(ctx) || approved !== true) {
         report("blocked", isAborted(ctx) ? "Cancelled" : undefined);
-        return block(`${reason}${isAborted(ctx) ? " (review cancelled)" : " (user declined)"}`);
+        return isAborted(ctx)
+          ? blocked("cancelled", `${reason} (review cancelled)`)
+          : blocked("user", `${reason} (user declined)`);
       }
       report("approved");
-      return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+      return isAborted(ctx) ? blocked("cancelled", CONFIRMATION_FAILED) : undefined;
     } catch {
       report("blocked");
-      return block(`${reason} (confirmation failed)`);
+      return blocked("error", `${reason} (confirmation failed)`);
     }
   };
   if (rule?.level === "deny") {
     report("blocked");
-    return block(`Blocked by auto-approval ${attribution}`);
+    return blocked("denyRule", `${rule.label}, ${rule.source}`);
   }
-  if (protectedReason) return confirm(protectedReason);
+  if (protectedReason) return confirm(protectedReason, "protectedPath");
   if (analysis && !analysis.supported && !analysis.reviewable)
     return confirm(`${analysis.reason} requires confirmation`);
   if (bash && analysis?.supported) {
     const reasons: string[] = rule?.level === "ask" ? [`Requires confirmation ${attribution}`] : [];
     for (let index = 0; index < analysis.components.length; index++) {
-      if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+      if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
       const component = analysis.components[index]!;
       const reason = componentReasons[index];
       if (reason) {
@@ -292,74 +379,146 @@ async function decideToolCall(
         if (settings.debug) safeNotify(ctx, `Allowed by rule (${componentRule.label}, ${componentRule.source})`);
         continue;
       }
-      if (componentRule?.level === "ask") { reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`); continue; }
+      if (componentRule?.level === "ask") {
+        reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`);
+        continue;
+      }
       if (!overBashApprovalLimit && isReadOnlyComponent(component.command)) {
         if (settings.debug) safeNotify(ctx, "Allowed as read-only command");
         continue;
       }
-      if (mode === "manual") { reasons.push(`${label} requires confirmation`); continue; }
+      if (mode === "manual") {
+        reasons.push(`${label} requires confirmation`);
+        continue;
+      }
       report("guardian-running");
-      if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
-      let result: ReviewResult;
-      try {
-        result = deps.review ? await deps.review({ command: component.command, component: { originalCommand: command!, index: index + 1, count: analysis.components.length, start: component.start, end: component.end, context: component.context }, reviewer: reviewerConfig, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" };
-      } catch { result = { ok: false, error: "reviewer unavailable" }; }
-      if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
+      if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
+      const result = await review({
+        command: component.command,
+        component: {
+          originalCommand: command!,
+          index: index + 1,
+          count: analysis.components.length,
+          start: component.start,
+          end: component.end,
+          context: component.context,
+        },
+      });
+      if (isAborted(ctx)) {
+        report("blocked", "Cancelled");
+        return blocked("cancelled", CONFIRMATION_FAILED);
+      }
       if (!result.ok) {
         if (result.cancelled) {
           report("blocked", "Cancelled");
-          return block("Review cancelled");
+          return blocked("cancelled", "Review cancelled");
         }
         reasons.push(`Automatic review failed: ${result.error}`);
         continue;
       }
-      if (result.verdict.decision === "revise") {
-        report("revision-requested");
-        reasons.push(`Reviewer requested a revision: ${result.verdict.reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`);
-        continue;
+      const { verdict } = result;
+      const { decision, tier, reason: reviewReason } = verdict;
+      switch (decision) {
+        case "approve":
+          switch (tier) {
+            case "allow":
+            case "user_intent":
+            case "none":
+              continue;
+            default:
+              return invalidVerdict(tier);
+          }
+        case "block":
+          switch (tier) {
+            case "hard_deny":
+              report("blocked");
+              return blocked("reviewer", reviewReason);
+            case "soft_deny":
+              reasons.push(`Reviewer needs user approval: ${reviewReason}`);
+              break;
+            default:
+              return invalidVerdict(tier);
+          }
+          break;
+        case "revise":
+          if (tier !== "none") return invalidVerdict(tier);
+          report("revision-requested");
+          reasons.push(
+            `Reviewer requested a revision: ${reviewReason}\nConstraint: ${verdict.constraint}\nSource: ${verdict.source}\nApprove the original action once?`,
+          );
+          break;
+        default:
+          return invalidVerdict(decision);
       }
-      if (result.verdict.decision === "ask_user") reasons.push(`Reviewer needs user approval: ${result.verdict.reason}`);
     }
-    if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
-    if (reasons.length) return confirm([...new Set(reasons)].join("\n"));
+    if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
+    if (reasons.length)
+      return confirm([...new Set(reasons)].join("\n"), componentReasons.some(Boolean) ? "protectedPath" : "noUI");
     report("approved");
-    return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+    return isAborted(ctx) ? blocked("cancelled", CONFIRMATION_FAILED) : undefined;
   }
   if (rule?.level === "ask") return confirm(`Requires confirmation ${attribution}`);
   if (rule?.level === "allow" && !bash) {
     if (settings.debug) safeNotify(ctx, `Allowed by rule (${rule.label}, ${rule.source})`);
     report("approved");
-    return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+    return isAborted(ctx) ? blocked("cancelled", CONFIRMATION_FAILED) : undefined;
   }
   if (mode === "manual") return confirm(`${label} requires confirmation`);
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
   report("guardian-running");
-  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
-  let result: ReviewResult;
-  try { result = deps.review ? await deps.review({ ...(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input }), reviewer: reviewerConfig, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" }; }
-  catch { result = { ok: false, error: "reviewer unavailable" }; }
-  if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
+  if (isAborted(ctx)) return blocked("cancelled", CONFIRMATION_FAILED);
+  const result = await review(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input });
+  if (isAborted(ctx)) {
+    report("blocked", "Cancelled");
+    return blocked("cancelled", CONFIRMATION_FAILED);
+  }
   if (!result.ok) {
     if (result.cancelled) {
       report("blocked", "Cancelled");
-      return block("Review cancelled");
+      return blocked("cancelled", "Review cancelled");
     }
     return confirm(`Automatic review failed: ${result.error}`);
   }
-  const { decision, reason } = result.verdict;
-  if (decision === "revise") {
-    report("revision-requested");
-    return confirm(`Reviewer requested a revision: ${reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`);
+  const { verdict } = result;
+  const { decision, tier, reason } = verdict;
+  switch (decision) {
+    case "approve":
+      switch (tier) {
+        case "allow":
+        case "user_intent":
+        case "none":
+          report("approved");
+          return isAborted(ctx) ? blocked("cancelled", CONFIRMATION_FAILED) : undefined;
+        default:
+          return invalidVerdict(tier);
+      }
+    case "block":
+      switch (tier) {
+        case "hard_deny":
+          report("blocked");
+          return blocked("reviewer", reason);
+        case "soft_deny":
+          return confirm(`Reviewer needs user approval: ${reason}`);
+        default:
+          return invalidVerdict(tier);
+      }
+    case "revise":
+      if (tier !== "none") return invalidVerdict(tier);
+      report("revision-requested");
+      return confirm(
+        `Reviewer requested a revision: ${reason}\nConstraint: ${verdict.constraint}\nSource: ${verdict.source}\nApprove the original action once?`,
+      );
+    default:
+      return invalidVerdict(decision);
   }
-  if (decision === "ask_user") return confirm(`Reviewer needs user approval: ${reason}`);
-  report("approved");
-  return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
 }
 
 export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readonly string[]): void {
   const reviewerState = createReviewerState();
   const controllers = new Set<AbortController>();
-  const cancelPending = () => { for (const controller of controllers) controller.abort(); };
+  const cancelPending = () => {
+    for (const controller of controllers) controller.abort();
+  };
   const globalDir = globalConfigDir();
   const display = createReviewDisplay(pi, VERSION, verifiedVersions);
   const permissions = createPermissionsController(globalDir, cancelPending, (ctx) => display.reset(ctx));
@@ -367,7 +526,10 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
   let historyWarned = false;
   const noticedFiles = new Set<string>();
   let callId = 0;
-  pi.registerCommand("permissions", { description: "Configure tool protection and review mode", handler: (args, ctx) => permissions.menu(args, ctx) });
+  pi.registerCommand("permissions", {
+    description: "Configure tool protection and review mode",
+    handler: (args, ctx) => permissions.menu(args, ctx),
+  });
   pi.on("tool_call", async (event, ctx) => {
     const controller = new AbortController();
     controllers.add(controller);
@@ -375,14 +537,24 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
     const widgetKey = `auto-approval:${++callId}`;
     const callToolId = event.toolCallId ?? widgetKey;
     const displayGeneration = display.generation();
-    const adapted: GateContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, signal, isProjectTrusted: () => ctx.isProjectTrusted(), ui: {
-      confirm: async (title, message, opts) => {
-        if (approvalDialogOpened) throw new Error("confirmation already in progress");
-        approvalDialogOpened = true;
-        try { return await ctx.ui.confirm(title, message, opts); } finally { approvalDialogOpened = false; }
+    const adapted: GateContext = {
+      cwd: ctx.cwd,
+      hasUI: ctx.hasUI,
+      signal,
+      isProjectTrusted: () => ctx.isProjectTrusted(),
+      ui: {
+        confirm: async (title, message, opts) => {
+          if (approvalDialogOpened) throw new Error("confirmation already in progress");
+          approvalDialogOpened = true;
+          try {
+            return await ctx.ui.confirm(title, message, opts);
+          } finally {
+            approvalDialogOpened = false;
+          }
+        },
+        notify: (message, type) => ctx.ui.notify(message, type),
       },
-      notify: (message, type) => ctx.ui.notify(message, type),
-    } };
+    };
     const choices = permissions.snapshot();
     const snapshot = snapshotGate(adapted, choices, (cwd) => loadConfig(cwd, globalDir), globalDir);
     permissions.refreshFooter(ctx, snapshot);
@@ -402,8 +574,19 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
     let abortListener: (() => void) | undefined;
     const aborted = new Promise<GateOutcome>((resolve) => {
       abortListener = () => {
-        if (lastReport) display.show(ctx, lastReport.ui, { ...lastReport, state: "blocked", detail: "Cancelled", toolCallId: callToolId }, widgetKey, displayGeneration);
-        resolve({ kind: "decided", decision: block(CONFIRMATION_FAILED), log: snapshot.settings.enabled });
+        if (lastReport)
+          display.show(
+            ctx,
+            lastReport.ui,
+            { ...lastReport, state: "blocked", detail: "Cancelled", toolCallId: callToolId },
+            widgetKey,
+            displayGeneration,
+          );
+        resolve({
+          kind: "decided",
+          decision: blocked("cancelled", CONFIRMATION_FAILED),
+          log: snapshot.settings.enabled,
+        });
       };
       signal.addEventListener("abort", abortListener, { once: true });
       if (signal.aborted) abortListener();
@@ -414,13 +597,17 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
       snapshot,
       {
         reviewer: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-        review: createPiReviewer({
-          cwd: ctx.cwd,
-          get model() { return ctx.model; },
-          modelRegistry: ctx.modelRegistry,
-          sessionManager: ctx.sessionManager,
-          isProjectTrusted: () => snapshot.projectTrusted,
-        }, reviewerState),
+        review: createPiReviewer(
+          {
+            cwd: ctx.cwd,
+            get model() {
+              return ctx.model;
+            },
+            modelRegistry: ctx.modelRegistry,
+            sessionManager: ctx.sessionManager,
+          },
+          reviewerState,
+        ),
         status: (report) => {
           lastReport = report;
           display.show(ctx, report.ui, { ...report, toolCallId: callToolId }, widgetKey, displayGeneration);
@@ -433,17 +620,27 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
       const outcome = await Promise.race([pending, aborted]);
       finalize(outcome);
       return outcome.kind === "decided" ? outcome.decision : undefined;
+    } finally {
+      if (abortListener) signal.removeEventListener("abort", abortListener);
+      controllers.delete(controller);
+      void pending.catch(() => {});
     }
-    finally { if (abortListener) signal.removeEventListener("abort", abortListener); controllers.delete(controller); void pending.catch(() => {}); }
   });
-  pi.on("tool_execution_end", (event) => { if (event.toolName === "bash") display.dropInvalidator(event.toolCallId); });
+  pi.on("tool_execution_end", (event) => {
+    if (event.toolName === "bash") display.dropInvalidator(event.toolCallId);
+  });
   pi.on("session_start", (_event, ctx) => {
     cancelPending();
     noticedFiles.clear();
     const seeded = ensureGlobalConfig(globalDir);
-    if ("error" in seeded) ctx.ui.notify(`Could not create default config ${join(globalDir, CONFIG_FILENAME)}: ${seeded.error}`, "warning");
+    if ("error" in seeded)
+      ctx.ui.notify(`Could not create default config ${join(globalDir, CONFIG_FILENAME)}: ${seeded.error}`, "warning");
     permissions.reset(ctx);
     permissions.refreshFooter(ctx);
   });
-  pi.on("session_shutdown", (_event, ctx) => { permissions.close(); cancelPending(); display.shutdown(ctx); });
+  pi.on("session_shutdown", (_event, ctx) => {
+    permissions.close();
+    cancelPending();
+    display.shutdown(ctx);
+  });
 }

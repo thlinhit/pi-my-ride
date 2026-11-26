@@ -1,9 +1,20 @@
 import type { AssistantMessage, Context, Message, Model, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { Api } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
-import type { ReviewEvidenceConfig, ReviewerConfig } from "../config.ts";
+import type { ReviewEvidenceConfig, ReviewerConfig, ReviewerPolicy } from "../config.ts";
 import { loadProjectInstructions } from "../config.ts";
-import { BUDGET_EXCEEDED_ERROR, buildReviewPrompt, buildSystemPrompt, collectEvidence, contextBudget, estimateTokens, evidencePrefixMatches, parseVerdict, promptTokens, reviewerFingerprint } from "./protocol.ts";
+import {
+  BUDGET_EXCEEDED_ERROR,
+  buildReviewPrompt,
+  buildSystemPrompt,
+  collectEvidence,
+  contextBudget,
+  estimateTokens,
+  evidencePrefixMatches,
+  parseVerdict,
+  promptTokens,
+  reviewerFingerprint,
+} from "./protocol.ts";
 import type { ComponentReview, EvidenceRecord, ReviewRequest, Verdict } from "./protocol.ts";
 
 export type ReviewResult =
@@ -16,6 +27,8 @@ export interface ReviewInput {
   readonly arguments?: unknown;
   readonly reviewer: ReviewerConfig;
   readonly reviewEvidence: ReviewEvidenceConfig;
+  readonly policy: ReviewerPolicy;
+  readonly projectTrusted: boolean;
   readonly signal: AbortSignal | undefined;
 }
 export type Reviewer = (input: ReviewInput) => Promise<ReviewResult>;
@@ -23,10 +36,11 @@ export type Reviewer = (input: ReviewInput) => Promise<ReviewResult>;
 export interface ReviewContext {
   readonly cwd: string;
   readonly model: Model<Api> | undefined;
-  isProjectTrusted(): boolean;
   readonly sessionManager: {
     getSessionId(): string;
-    buildSessionProjection(): { readonly entries: readonly { readonly sourceEntry: unknown; readonly messages: readonly unknown[] }[] };
+    buildSessionProjection(): {
+      readonly entries: readonly { readonly sourceEntry: unknown; readonly messages: readonly unknown[] }[];
+    };
   };
   readonly modelRegistry: {
     find(provider: string, modelId: string): Model<Api> | undefined;
@@ -61,7 +75,11 @@ function adaptProjection(ctx: ReviewContext): readonly unknown[] {
     const entry = source as { type?: unknown; id?: unknown };
     if (entry.type === "message") {
       for (const message of contribution.messages) {
-        if (message && typeof message === "object" && ["user", "assistant", "toolResult"].includes((message as { role?: string }).role ?? ""))
+        if (
+          message &&
+          typeof message === "object" &&
+          ["user", "assistant", "toolResult"].includes((message as { role?: string }).role ?? "")
+        )
           entries.push({ ...entry, message });
       }
     } else if ((entry.type === "compaction" || entry.type === "branch_summary") && contribution.messages.length > 0) {
@@ -72,35 +90,65 @@ function adaptProjection(ctx: ReviewContext): readonly unknown[] {
 }
 
 async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: ReviewInput): Promise<ReviewResult> {
-  const discard = () => { state.lineage = undefined; };
+  const discard = () => {
+    state.lineage = undefined;
+  };
   try {
     if (input.signal?.aborted) {
       discard();
-      return { ok: false, error: "review timed out or was cancelled", ...(input.signal?.aborted ? { cancelled: true as const } : {}) };
+      return {
+        ok: false,
+        error: "review timed out or was cancelled",
+        ...(input.signal?.aborted ? { cancelled: true as const } : {}),
+      };
     }
     const model = input.reviewer.model
       ? ctx.modelRegistry.find(input.reviewer.model.provider, input.reviewer.model.id)
       : ctx.model;
     if (!model) {
       discard();
-      return { ok: false, error: `review model not found: ${input.reviewer.model ? `${input.reviewer.model.provider}/${input.reviewer.model.id}` : "the active model"}` };
+      return {
+        ok: false,
+        error: `review model not found: ${input.reviewer.model ? `${input.reviewer.model.provider}/${input.reviewer.model.id}` : "the active model"}`,
+      };
     }
-    const signal = AbortSignal.any([AbortSignal.timeout(input.reviewer.timeoutMs), ...(input.signal ? [input.signal] : [])]);
+    const signal = AbortSignal.any([
+      AbortSignal.timeout(input.reviewer.timeoutMs),
+      ...(input.signal ? [input.signal] : []),
+    ]);
     if (signal.aborted) throw new Error("review timed out or was cancelled");
     const mainSessionId = ctx.sessionManager.getSessionId();
-    const projectTrusted = ctx.isProjectTrusted();
-    const projectInstructions = input.reviewEvidence.projectInstructions && projectTrusted ? loadProjectInstructions(ctx.cwd) : undefined;
-    const systemPrompt = buildSystemPrompt(input.reviewer.extraInstructions, projectInstructions);
-    const fingerprint = reviewerFingerprint({ mainSessionId, model: { provider: model.provider, id: model.id, api: model.api, baseUrl: model.baseUrl }, reasoningEffort: input.reviewer.reasoningEffort, systemPrompt, projectTrusted });
+    const { policy, projectTrusted } = input;
+    const projectInstructions =
+      input.reviewEvidence.projectInstructions && projectTrusted ? loadProjectInstructions(ctx.cwd) : undefined;
+    const systemPrompt = buildSystemPrompt(policy, input.reviewer.extraInstructions, projectInstructions);
+    const fingerprint = reviewerFingerprint({
+      mainSessionId,
+      model: { provider: model.provider, id: model.id, api: model.api, baseUrl: model.baseUrl },
+      reasoningEffort: input.reviewer.reasoningEffort,
+      systemPrompt,
+      projectTrusted,
+    });
     const records = collectEvidence(adaptProjection(ctx));
     const budget = contextBudget(model.contextWindow);
     let base = state.lineage;
-    if (base && (base.fingerprint !== fingerprint || !evidencePrefixMatches(base.records, records) || base.lastPromptTokens >= budget)) {
+    if (
+      base &&
+      (base.fingerprint !== fingerprint ||
+        !evidencePrefixMatches(base.records, records) ||
+        base.lastPromptTokens >= budget)
+    ) {
       discard();
       base = undefined;
     }
     const tool = input.tool ?? "bash";
-    const request: ReviewRequest = { tool, command: input.command, arguments: input.arguments, cwd: ctx.cwd, ...(input.component ? { component: input.component } : {}) };
+    const request: ReviewRequest = {
+      tool,
+      command: input.command,
+      arguments: input.arguments,
+      cwd: ctx.cwd,
+      ...(input.component ? { component: input.component } : {}),
+    };
     const makeUser = (selected: readonly EvidenceRecord[], mode: "full" | "delta") => ({
       role: "user" as const,
       content: [{ type: "text" as const, text: buildReviewPrompt(selected, request, mode) }],
@@ -109,35 +157,92 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     let user = makeUser(base ? records.slice(base.records.length) : records, base ? "delta" : "full");
     let messages: Message[] = base ? [...base.messages, user] : [user];
     if (base && estimateTokens(systemPrompt, messages) >= budget) {
-      discard(); base = undefined; user = makeUser(records, "full"); messages = [user];
+      discard();
+      base = undefined;
+      user = makeUser(records, "full");
+      messages = [user];
     }
     if (estimateTokens(systemPrompt, messages) >= budget) {
-      discard(); return { ok: false, error: BUDGET_EXCEEDED_ERROR };
+      discard();
+      return { ok: false, error: BUDGET_EXCEEDED_ERROR };
     }
-    const sessionId = base?.sessionId ?? `ap-review-${randomUUID()}`;
-    if (signal.aborted) throw new Error("review timed out or was cancelled");
-    const pending = ctx.modelRegistry.streamSimple(model, { systemPrompt, messages }, { reasoning: input.reviewer.reasoningEffort, signal, sessionId, cacheRetention: "long" }).result();
-    let abortListener: (() => void) | undefined;
-    const aborted = new Promise<never>((_, reject) => {
-      abortListener = () => reject(new Error("review timed out or was cancelled"));
-      signal.addEventListener("abort", abortListener, { once: true });
-      if (signal.aborted) abortListener();
-    });
-    let msg: AssistantMessage;
-    try { msg = await Promise.race([pending, aborted]); }
-    finally { if (abortListener) signal.removeEventListener("abort", abortListener); void pending.catch(() => {}); }
-    if (signal.aborted || msg.stopReason === "aborted") throw Object.assign(new Error("review timed out or was cancelled"), { cancelled: input.signal?.aborted === true || msg.stopReason === "aborted" });
-    if (msg.stopReason === "error") throw new Error(msg.errorMessage ?? "reviewer request failed");
-    if (msg.stopReason !== "stop") throw new Error("reviewer did not finish normally");
-    const parsed = parseVerdict(msg.content.filter((part) => part.type === "text").map((part) => part.text).join(""));
-    if (!parsed.ok) throw new Error(parsed.error);
-    if (signal.aborted) throw new Error("review timed out or was cancelled");
-    if (parsed.verdict.decision === "revise") discard();
-    else state.lineage = { fingerprint, sessionId, records, messages: [...messages, msg], lastPromptTokens: promptTokens(msg.usage) };
-    return parsed;
+    let sessionId = base?.sessionId ?? `ap-review-${randomUUID()}`;
+    let retryMessages: Message[] | undefined;
+    while (true) {
+      if (signal.aborted) throw new Error("review timed out or was cancelled");
+      const pending = ctx.modelRegistry
+        .streamSimple(
+          model,
+          { systemPrompt, messages: retryMessages ?? messages },
+          { reasoning: input.reviewer.reasoningEffort, signal, sessionId, cacheRetention: "long" },
+        )
+        .result();
+      let abortListener: (() => void) | undefined;
+      const aborted = new Promise<never>((_, reject) => {
+        abortListener = () => reject(new Error("review timed out or was cancelled"));
+        signal.addEventListener("abort", abortListener, { once: true });
+        if (signal.aborted) abortListener();
+      });
+      let msg: AssistantMessage;
+      try {
+        msg = await Promise.race([pending, aborted]);
+      } finally {
+        if (abortListener) signal.removeEventListener("abort", abortListener);
+        void pending.catch(() => {});
+      }
+      if (signal.aborted || msg.stopReason === "aborted") {
+        throw Object.assign(new Error("review timed out or was cancelled"), {
+          cancelled: input.signal?.aborted === true || msg.stopReason === "aborted",
+        });
+      }
+      if (msg.stopReason === "error") throw new Error(msg.errorMessage ?? "reviewer request failed");
+      if (msg.stopReason !== "stop") throw new Error("reviewer did not finish normally");
+      const parsed = parseVerdict(
+        msg.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join(""),
+      );
+      if (signal.aborted) throw new Error("review timed out or was cancelled");
+      if (!parsed.ok) {
+        if (retryMessages) throw new Error(parsed.error);
+        const correction = {
+          type: "text" as const,
+          text: `${parsed.error}. Re-answer the same review with one JSON object containing decision, tier, and a nonempty reason. Valid decision/tier pairs: approve (allow, user_intent, none); block (hard_deny, soft_deny); revise (none, plus nonempty constraint and source fields).`,
+        };
+        retryMessages = [...messages, msg, { role: "user", content: [correction], timestamp: Date.now() }];
+        if (estimateTokens(systemPrompt, retryMessages) >= budget) {
+          const freshUser = base ? makeUser(records, "full") : user;
+          messages = [freshUser];
+          retryMessages = [{ ...freshUser, content: [...freshUser.content, correction] }];
+          if (estimateTokens(systemPrompt, retryMessages) >= budget) throw new Error(BUDGET_EXCEEDED_ERROR);
+          sessionId = `ap-review-${randomUUID()}`;
+        }
+        continue;
+      }
+      if (parsed.verdict.decision === "revise") discard();
+      else {
+        state.lineage = {
+          fingerprint,
+          // The clean transcript no longer matches the provider's retry conversation.
+          sessionId: retryMessages ? `ap-review-${randomUUID()}` : sessionId,
+          records,
+          messages: [...messages, msg],
+          lastPromptTokens: promptTokens(msg.usage),
+        };
+      }
+      return parsed;
+    }
   } catch (error) {
     discard();
-    return { ok: false, error: error instanceof Error ? error.message : String(error), ...((input.signal?.aborted || (error && typeof error === "object" && "cancelled" in error && error.cancelled === true)) ? { cancelled: true as const } : {}) };
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      ...(input.signal?.aborted ||
+      (error && typeof error === "object" && "cancelled" in error && error.cancelled === true)
+        ? { cancelled: true as const }
+        : {}),
+    };
   }
 }
 

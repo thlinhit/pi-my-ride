@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import type { TestContext } from "node:test";
 import test, { mock } from "node:test";
-import { createHarness, plain, reviewerReply, rowState, transitions } from "./factory-harness.ts";
+import { blockReason, createHarness, plain, reviewerReply, rowState, transitions } from "./factory-harness.ts";
 
-const CANCELLED = { block: true, reason: "auto-approval: confirmation failed" };
+const CANCELLED = { block: true, reason: blockReason("cancelled", "auto-approval: confirmation failed") };
 const COMMAND = "danger; noop-cmd harmless";
 const flush = async () => { await new Promise<void>((resolve) => setImmediate(resolve)); await new Promise<void>((resolve) => setImmediate(resolve)); };
 
@@ -146,7 +146,7 @@ for (const reset of ["session_start", "session_shutdown"] as const) {
     const afterCancel = frames.length;
     const competing = h.row("unmatched", "c2");
     const second = await h.call("unmatched", "c2");
-    assert.deepEqual(second, { block: true, reason: "Unmatched Bash command requires confirmation (confirmation failed)" }, "lock rejects an overlapping dialog while the first is unresolved");
+    assert.deepEqual(second, { block: true, reason: blockReason("error", "Unmatched Bash command requires confirmation (confirmation failed)") }, "lock rejects an overlapping dialog while the first is unresolved");
     assert.equal(prompts, 1, "no second dialog opens while the first is unresolved");
     const widgetsBeforeLate = [...h.widgets];
     dialog.resolve(true);
@@ -178,7 +178,7 @@ test("L-6 abort during the dialog keeps the confirmation lock until the original
   await h.sessionStart();
   assert.deepEqual(await first, CANCELLED);
   const rejected = await h.call("unmatched", "lock-2");
-  assert.deepEqual(rejected, { block: true, reason: "Unmatched Bash command requires confirmation (confirmation failed)" });
+  assert.deepEqual(rejected, { block: true, reason: blockReason("error", "Unmatched Bash command requires confirmation (confirmation failed)") });
   assert.equal(prompts, 1);
   dialog.resolve(true);
   await flush();
@@ -294,7 +294,7 @@ test("L-11 non-Bash call while an unresolved confirmation holds the lock is bloc
   await h.sessionStart();
   assert.deepEqual(await first, CANCELLED);
   const rejected = await h.callTool("read", READ_INPUT, "nb-lock-2");
-  assert.deepEqual(rejected, { block: true, reason: "Unmatched read call requires confirmation (confirmation failed)" }, "lock rejects an overlapping non-Bash dialog while the first is unresolved");
+  assert.deepEqual(rejected, { block: true, reason: blockReason("error", "Unmatched read call requires confirmation (confirmation failed)") }, "lock rejects an overlapping non-Bash dialog while the first is unresolved");
   assert.equal(prompts, 1, "no second non-Bash dialog opens while the first is unresolved");
   dialog.resolve(true);
   await flush();

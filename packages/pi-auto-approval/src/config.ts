@@ -4,6 +4,11 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parsePermissionRule } from "./rules.ts";
 import type { PermissionRule } from "./rules.ts";
+import {
+  DEFAULT_REVIEWER_POLICY,
+  DEFAULT_TRUSTED_ENVIRONMENT,
+  DEFAULT_UNTRUSTED_ENVIRONMENT,
+} from "./review/protocol.ts";
 
 export type RuleLevel = "deny" | "ask" | "allow";
 export type ReviewMode = "manual" | "auto";
@@ -21,7 +26,10 @@ export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "low";
 export const REVIEW_TIMEOUT_DEFAULT_MS = 30_000;
 export const REVIEW_TIMEOUT_MIN_MS = 1_000;
 export const REVIEW_TIMEOUT_MAX_MS = 300_000;
-export interface ReviewerConfig {
+export type ReviewerPolicy = { readonly environment: readonly string[]; readonly allow: readonly string[]; readonly softDeny: readonly string[]; readonly hardDeny: readonly string[] };
+const REVIEWER_LISTS = ["environment", "allow", "softDeny", "hardDeny"] as const;
+const DEFAULTS_ENTRY = "$defaults";
+export interface ReviewerConfig extends Partial<ReviewerPolicy> {
   readonly model?: { readonly provider: string; readonly id: string };
   readonly reasoningEffort: ReasoningEffort;
   readonly timeoutMs: number;
@@ -41,10 +49,13 @@ export type ProjectFile = {
   source: string;
   settings: { enabled?: boolean; reviewMode?: ReviewMode };
   rules: readonly PermissionRule[];
+  reviewer?: Partial<ReviewerPolicy>;
 };
-type LoadedConfig =
-  | (GlobalConfig & { global: GlobalConfig; project: { shared?: ProjectFile; local?: ProjectFile } })
-  | ConfigError;
+type LoadedConfigSuccess = GlobalConfig & {
+  global: GlobalConfig;
+  project: { shared?: ProjectFile; local?: ProjectFile };
+};
+type LoadedConfig = LoadedConfigSuccess | ConfigError;
 export const CONFIG_FILENAME = "auto-permissions.json";
 const LOCAL_CONFIG_FILENAME = "auto-permissions.local.json";
 export const CONFIG_DIRNAME = "pi-auto-approval";
@@ -65,8 +76,36 @@ function parseNested<T>(raw: unknown, source: string, key: string, allowed: read
   const unknown = checkKeys(raw, allowed, `${source}: ${key}`);
   return unknown ? fail(unknown) : parse(raw);
 }
+function parseReviewerLists(
+  obj: Record<string, unknown>,
+  source: string,
+  shared = false,
+): Parsed<Partial<ReviewerPolicy>> {
+  const lists: Partial<Record<keyof ReviewerPolicy, readonly string[]>> = {};
+  for (const key of REVIEWER_LISTS) {
+    const entries = obj[key];
+    if (entries === undefined) continue;
+    const field = `${source}: reviewer.${key}`;
+    if (shared && (key === "environment" || key === "allow")) {
+      return fail(`${field} is not allowed in the shared file`);
+    }
+    if (!Array.isArray(entries)) return fail(`${field} must be an array`);
+    const list: string[] = [];
+    for (const [i, entry] of entries.entries()) {
+      if (!isNonBlank(entry)) return fail(`${field}[${i}] must be a non-empty string`);
+      list.push(entry);
+    }
+    if (shared && !list.includes(DEFAULTS_ENTRY)) {
+      return fail(`${field} must include "${DEFAULTS_ENTRY}" in the shared file`);
+    }
+    lists[key] = list;
+  }
+  return { ok: true, value: lists };
+}
 function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<ReviewerConfig> {
-  return parseNested(raw, source, "reviewer", ["provider", "model", "reasoningEffort", "timeoutMs", "extraInstructions", "extraInstructionsFile"], (obj) => {
+  return parseNested(raw, source, "reviewer", ["provider", "model", "reasoningEffort", "timeoutMs", "extraInstructions", "extraInstructionsFile", ...REVIEWER_LISTS], (obj) => {
+    const lists = parseReviewerLists(obj, source);
+    if (!lists.ok) return lists;
     if ((obj.provider === undefined) !== (obj.model === undefined)) return fail(`${source}: reviewer.provider and reviewer.model must be set together`);
     if (obj.provider !== undefined && (!isNonBlank(obj.provider) || !isNonBlank(obj.model))) return fail(`${source}: reviewer.provider and reviewer.model must be non-empty strings`);
     let reasoningEffort: ReasoningEffort = DEFAULT_REASONING_EFFORT;
@@ -90,7 +129,7 @@ function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<Re
       try { extraInstructions = readFileSync(path, "utf8"); } catch { return fail(`${source}: reviewer.extraInstructionsFile cannot be read (${path})`); }
       if (extraInstructions.trim() === "") return fail(`${source}: reviewer.extraInstructionsFile is empty (${path})`);
     }
-    return { ok: true, value: { ...(obj.provider === undefined ? {} : { model: { provider: obj.provider as string, id: obj.model as string } }), reasoningEffort, timeoutMs, ...(extraInstructions === undefined ? {} : { extraInstructions }) } };
+    return { ok: true, value: { ...lists.value, ...(obj.provider === undefined ? {} : { model: { provider: obj.provider as string, id: obj.model as string } }), reasoningEffort, timeoutMs, ...(extraInstructions === undefined ? {} : { extraInstructions }) } };
   }, DEFAULT_REVIEWER);
 }
 export function parseConfig(raw: unknown, source: string, baseDir?: string, scope?: "global"): ConfigResult;
@@ -110,7 +149,7 @@ export function parseConfig(
   const allowed =
     scope === "global"
       ? ["enabled", "reviewMode", "debug", "permissions", "reviewer", "reviewEvidence", "ui"]
-      : ["permissions", "enabled", "reviewMode"];
+      : ["permissions", "enabled", "reviewMode", "reviewer"];
   const moveToLocal = `; move it to ${LOCAL_CONFIG_FILENAME}`;
   const unknown = checkKeys(raw, allowed, source);
   if (unknown) return fail(scope === "shared" ? unknown + moveToLocal : unknown);
@@ -153,7 +192,18 @@ export function parseConfig(
     const settings: ProjectFile["settings"] = {};
     if (raw.enabled !== undefined) settings.enabled = raw.enabled;
     if (raw.reviewMode !== undefined) settings.reviewMode = raw.reviewMode;
-    return { ok: true, value: { source, settings, rules } };
+    if (raw.reviewer === undefined) return { ok: true, value: { source, settings, rules } };
+    const shared = scope === "shared";
+    const reviewer = parseNested(
+      raw.reviewer,
+      source,
+      "reviewer",
+      REVIEWER_LISTS,
+      (obj) => parseReviewerLists(obj, source, shared),
+      {},
+    );
+    if (!reviewer.ok) return fail(shared ? reviewer.error + moveToLocal : reviewer.error);
+    return { ok: true, value: { source, settings, rules, reviewer: reviewer.value } };
   }
   const reviewer = parseReviewer(raw.reviewer, source, baseDir);
   if (!reviewer.ok) return reviewer;
@@ -233,6 +283,31 @@ export function loadConfig(cwd: string, globalDir: string): LoadedConfig {
     global,
     project,
     rules: [...global.rules, ...(project.shared?.rules ?? []), ...(project.local?.rules ?? [])],
+  };
+}
+export function resolveReviewerPolicy(config: LoadedConfigSuccess, trusted: boolean): ReviewerPolicy {
+  const layers = [
+    config.global.reviewer,
+    ...(trusted ? [config.project.shared?.reviewer, config.project.local?.reviewer] : []),
+  ];
+  const defaults = {
+    ...DEFAULT_REVIEWER_POLICY,
+    environment: trusted ? DEFAULT_TRUSTED_ENVIRONMENT : DEFAULT_UNTRUSTED_ENVIRONMENT,
+  };
+  function resolveList(key: keyof ReviewerPolicy): readonly string[] {
+    const lists = layers.map((layer) => layer?.[key]).filter((list) => list !== undefined);
+    if (lists.length === 0) return defaults[key];
+    return [
+      ...new Set(
+        lists.flatMap((list) => list.flatMap((entry) => (entry === DEFAULTS_ENTRY ? defaults[key] : [entry]))),
+      ),
+    ];
+  }
+  return {
+    environment: resolveList("environment"),
+    allow: resolveList("allow"),
+    softDeny: resolveList("softDeny"),
+    hardDeny: resolveList("hardDeny"),
   };
 }
 export function ensureGlobalConfig(globalDir: string): { created: boolean } | { created: false; error: string } {

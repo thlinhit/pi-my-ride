@@ -7,6 +7,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 import * as config from "../src/config.ts";
 import { loadConfig, loadGlobalConfig, parseConfig, saveGlobalSettings, globalConfigDir, projectConfigPath, SEED_CONFIG } from "../src/config.ts";
+import {
+  DEFAULT_REVIEWER_POLICY,
+  DEFAULT_TRUSTED_ENVIRONMENT,
+  DEFAULT_UNTRUSTED_ENVIRONMENT,
+} from "../src/review/protocol.ts";
 
 test("debug defaults off, validates globally, and saves compatibly", () => {
   const t = temp();
@@ -43,6 +48,40 @@ test("complete settings save publishes one validated atomic snapshot and preserv
     assert.equal(saveGlobalSettings(t.global, { enabled: true, reviewMode: "auto", debug: false }, null).ok, true);
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { timeoutMs: 4000, extraInstructionsFile: "instructions.md" });
   } finally { t.cleanup(); }
+});
+
+test("settings saves preserve reviewer lists when keeping, replacing, or clearing the model", () => {
+  const t = temp();
+  try {
+    mkdirSync(t.global, { recursive: true });
+    const path = join(t.global, "auto-permissions.json");
+    const lists = {
+      environment: ["$defaults", "test workspace"],
+      allow: [],
+      softDeny: ["first restriction", "second restriction"],
+      hardDeny: ["strict restriction"],
+    };
+    writeFileSync(path, JSON.stringify({ reviewer: { ...lists, provider: "old", model: "old-id" } }));
+    const settings = { enabled: false, reviewMode: "manual" } as const;
+
+    for (const [model, expectedPair] of [
+      [undefined, { provider: "old", model: "old-id" }],
+      [
+        { provider: "new", id: "new-id" },
+        { provider: "new", model: "new-id" },
+      ],
+      [null, {}],
+    ] as const) {
+      assert.equal(saveGlobalSettings(t.global, settings, model).ok, true);
+      assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { ...lists, ...expectedPair });
+      const loaded = loadGlobalConfig(t.global);
+      assert.ok(loaded.ok);
+      const { environment, allow, softDeny, hardDeny } = loaded.reviewer;
+      assert.deepEqual({ environment, allow, softDeny, hardDeny }, lists);
+    }
+  } finally {
+    t.cleanup();
+  }
 });
 
 test("complete settings failures preserve all old bytes or absence and clean staging", () => {
@@ -170,7 +209,12 @@ for (const [field, raw] of [
   ["enabled", { enabled: false }],
   ["reviewMode", { reviewMode: "auto" }],
   ["permissions.allow", { permissions: { allow: [rule] } }],
-  ["reviewer", { reviewer: {} }],
+  ["reviewer.allow", { reviewer: { allow: ["A"] } }],
+  ["reviewer.environment", { reviewer: { environment: ["A"] } }],
+  ["reviewer.softDeny", { reviewer: { softDeny: ["A"] } }],
+  ["reviewer.hardDeny", { reviewer: { hardDeny: ["A"] } }],
+  ["reviewer.softDeny[1]", { reviewer: { softDeny: ["$defaults", ""] } }],
+  ["reasoningEffort", { reviewer: { reasoningEffort: "high" } }],
   ["defaultMode", { permissions: { defaultMode: "manual" } }],
 ] as const) {
   test(`shared ${field} restriction directs users to the local file`, () => {
@@ -187,6 +231,111 @@ for (const [field, raw] of [
     }
   });
 }
+
+test("reviewer policy resolves the worked example from unmerged file lists", () => {
+  const t = temp();
+  try {
+    const projectDir = join(t.cwd, ".pi", "pi-auto-approval");
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(t.global, { recursive: true });
+    const global = join(t.global, "auto-permissions.json");
+    const shared = projectConfigPath(t.cwd);
+    const local = join(projectDir, "auto-permissions.local.json");
+    writeFileSync(global, JSON.stringify({ reviewer: { softDeny: ["A"] } }));
+    writeFileSync(shared, JSON.stringify({ reviewer: { softDeny: ["$defaults", "B"] } }));
+    writeFileSync(local, JSON.stringify({ reviewer: {} }));
+
+    const loaded = loadConfig(t.cwd, t.global);
+    assert.ok(loaded.ok, !loaded.ok ? loaded.error : undefined);
+    assert.deepEqual(loaded.global.reviewer.softDeny, ["A"]);
+    assert.deepEqual(loaded.project.shared?.reviewer?.softDeny, ["$defaults", "B"]);
+    assert.equal(loaded.project.local?.reviewer?.softDeny, undefined);
+    assert.deepEqual(config.resolveReviewerPolicy(loaded, true).softDeny, [
+      "A",
+      ...DEFAULT_REVIEWER_POLICY.softDeny,
+      "B",
+    ]);
+    assert.deepEqual(config.resolveReviewerPolicy(loaded, false).softDeny, ["A"]);
+
+    writeFileSync(global, JSON.stringify({ reviewer: {} }));
+    writeFileSync(shared, JSON.stringify({ reviewer: {} }));
+    const omitted = loadConfig(t.cwd, t.global);
+    assert.ok(omitted.ok);
+    assert.deepEqual(config.resolveReviewerPolicy(omitted, true), {
+      ...DEFAULT_REVIEWER_POLICY,
+      environment: DEFAULT_TRUSTED_ENVIRONMENT,
+    });
+    assert.deepEqual(config.resolveReviewerPolicy(omitted, false), {
+      ...DEFAULT_REVIEWER_POLICY,
+      environment: DEFAULT_UNTRUSTED_ENVIRONMENT,
+    });
+  } finally {
+    t.cleanup();
+  }
+});
+
+test("reviewer policy expands defaults in place, keeps first duplicates, and trust-filters local lists", () => {
+  const t = temp();
+  try {
+    const projectDir = join(t.cwd, ".pi", "pi-auto-approval");
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(t.global, { recursive: true });
+    const [first, ...rest] = DEFAULT_REVIEWER_POLICY.hardDeny;
+    writeFileSync(
+      join(t.global, "auto-permissions.json"),
+      JSON.stringify({
+        reviewer: { provider: "p", model: "m", environment: ["before", "$defaults", "after"], hardDeny: [first, "A"] },
+      }),
+    );
+    writeFileSync(projectConfigPath(t.cwd), JSON.stringify({ reviewer: { hardDeny: ["B", "$defaults", "A"] } }));
+    writeFileSync(
+      join(projectDir, "auto-permissions.local.json"),
+      JSON.stringify({
+        reviewer: {
+          environment: ["after", "local"],
+          allow: ["C", "$defaults", "C"],
+          softDeny: [],
+          hardDeny: ["A", "C", "B"],
+        },
+      }),
+    );
+    const loaded = loadConfig(t.cwd, t.global);
+    assert.ok(loaded.ok, !loaded.ok ? loaded.error : undefined);
+    assert.deepEqual(loaded.global.reviewer.model, { provider: "p", id: "m" });
+    assert.deepEqual(loaded.project.local?.reviewer, {
+      environment: ["after", "local"],
+      allow: ["C", "$defaults", "C"],
+      softDeny: [],
+      hardDeny: ["A", "C", "B"],
+    });
+    assert.deepEqual(config.resolveReviewerPolicy(loaded, true), {
+      environment: ["before", ...DEFAULT_TRUSTED_ENVIRONMENT, "after", "local"],
+      allow: ["C"],
+      softDeny: [],
+      hardDeny: [first, "A", "B", ...rest, "C"],
+    });
+    assert.deepEqual(config.resolveReviewerPolicy(loaded, false), {
+      environment: ["before", ...DEFAULT_UNTRUSTED_ENVIRONMENT, "after"],
+      allow: [],
+      softDeny: DEFAULT_REVIEWER_POLICY.softDeny,
+      hardDeny: [first, "A"],
+    });
+  } finally {
+    t.cleanup();
+  }
+});
+
+test("global and local reviewer policy lists reject non-array and non-string values", () => {
+  for (const field of ["environment", "allow", "softDeny", "hardDeny"]) {
+    for (const value of ["not an array", [null], [" "]]) {
+      const raw = { reviewer: { [field]: value } };
+      for (const result of [parseConfig(raw, "global.json"), parseConfig(raw, "local.json", ".", "project")]) {
+        assert.ok(!result.ok);
+        assert.ok(result.error.includes(`reviewer.${field}`));
+      }
+    }
+  }
+});
 
 test("global, shared and local rules load once in source order; project settings remain separate", () => {
   const t = temp();
@@ -381,7 +530,7 @@ test("strict nested configuration and values reject malformed inputs with source
     assert.equal(result.ok, false, JSON.stringify(value));
     if (!result.ok) assert.match(result.error, /validation.json/);
   }
-  for (const key of ["enabled", "reviewMode", "debug", "reviewer", "reviewEvidence", "ui", "guardian"]) {
+  for (const key of ["enabled", "reviewMode", "debug", "reviewEvidence", "ui", "guardian"]) {
     assert.equal(parseConfig({ [key]: {} }, "project.json", ".", "project").ok, false, key);
   }
   assert.equal(parseConfig({ ui: { placement: "bad" } }, "global.json").ok, false);
