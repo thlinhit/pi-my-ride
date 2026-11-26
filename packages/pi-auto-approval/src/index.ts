@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -116,10 +117,20 @@ function protectedFileReason(
   try {
     path = resolveToolPath(path, cwd);
     const target = foldPath(resolvePathForPolicy(path));
-    const roots = [globalDir, dirname(projectConfigPath(cwd))];
-    if (!roots.some((root) => isPathInsideOrEqual(target, foldPath(resolvePathForPolicy(root))))) return undefined;
+    const sharedConfig = projectConfigPath(cwd);
+    const projectDir = dirname(sharedConfig);
+    const roots = [globalDir, projectDir];
+    if (!roots.some((root) => isPathInsideOrEqual(target, foldPath(resolvePathForPolicy(root))))) {
+      const files = [join(globalDir, CONFIG_FILENAME), sharedConfig, join(projectDir, "auto-permissions.local.json")];
+      if (
+        !files.some(
+          (file) => statSync(file, { throwIfNoEntry: false }) && target === foldPath(resolvePathForPolicy(file)),
+        )
+      )
+        return undefined;
+    }
   } catch {
-    // An unresolved target or root can't prove that the write is outside the protected directories.
+    // If a path cannot be resolved, ask rather than assume the write is safe.
   }
   return `Changes auto-approval protected file ${path}`;
 }
