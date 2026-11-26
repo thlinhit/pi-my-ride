@@ -18,12 +18,17 @@ import { test } from "node:test";
 import type { AssistantMessage, AssistantMessageEventStream, Context, CredentialStore } from "@earendil-works/pi-ai";
 import { discoverAndLoadExtensions, ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_REVIEW_EVIDENCE, DEFAULT_REVIEWER, projectConfigPath, SEED_CONFIG } from "../src/config.ts";
-import { BUDGET_EXCEEDED_ERROR, POLICY_PROMPT } from "../src/review/protocol.ts";
+import {
+  BUDGET_EXCEEDED_ERROR,
+  DEFAULT_REVIEWER_POLICY,
+  DEFAULT_TRUSTED_ENVIRONMENT,
+  POLICY_PROMPT,
+} from "../src/review/protocol.ts";
 import { createPiReviewer, createReviewerState, type ReviewContext } from "../src/review/session.ts";
 import { menuDriver } from "./permissions-menu-harness.ts";
 
 type Pair = { readonly provider: string; readonly id: string };
-type Decision = "approve" | "revise" | "ask_user";
+type Decision = "approve" | "revise";
 type Select = {
   readonly title: string;
   readonly options: string[];
@@ -136,7 +141,7 @@ async function createHost(startup: GlobalStartup = "written") {
       model: { ...model },
       context,
       signal: options?.signal,
-      release: (decision, tier) =>
+      release: (decision, tier = "none") =>
         settle({
           role: "assistant",
           content: [
@@ -757,7 +762,14 @@ const reviewWith = (host: Host, input: { command?: string; tool?: string; argume
   createPiReviewer(
     host.context() as unknown as ReviewContext,
     createReviewerState(),
-  )({ ...input, reviewer: reviewerConfig, reviewEvidence: DEFAULT_REVIEW_EVIDENCE, signal: undefined });
+  )({
+    ...input,
+    reviewer: reviewerConfig,
+    reviewEvidence: DEFAULT_REVIEW_EVIDENCE,
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
+    signal: undefined,
+  });
 
 test("non-Bash review sends exact tool identity and complete arguments to the selected provider", async () => {
   const host = await createHost();
@@ -766,7 +778,7 @@ test("non-Bash review sends exact tool identity and complete arguments to the se
     const decision = reviewWith(host, { tool: "write", arguments: args });
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, FAKE_A);
-    assert.equal(call.context.systemPrompt, POLICY_PROMPT);
+    assert.ok(call.context.systemPrompt?.startsWith(POLICY_PROMPT));
     assert.deepEqual(JSON.parse(cardOf(userText(call))), { tool: "write", arguments: args, cwd: host.cwd });
     call.release?.("approve");
     const result = await decision;
@@ -826,7 +838,7 @@ test("real loader sends an unmatched Write through the registered handler with f
     const decision = tool(host, extension, "write", args);
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, ACTIVE);
-    assert.equal(call.context.systemPrompt, POLICY_PROMPT);
+    assert.ok(call.context.systemPrompt?.startsWith(POLICY_PROMPT));
     assert.deepEqual(JSON.parse(cardOf(userText(call))), { tool: "write", arguments: args, cwd: host.cwd });
     call.release?.("approve");
     assert.equal(await decision, undefined);
@@ -848,15 +860,15 @@ test("real loader blocks Read .env and Edit/Write secrets before any reviewer re
     const extension = await host.load();
     assert.match(
       (await tool(host, extension, "read", { path: ".env" }))!.reason,
-      /^Blocked by auto-approval \(Read\(\.\/\.env\), /,
+      /^Blocked by auto-approval \(deny rule\): \(Read\(\.\/\.env\), /,
     );
     assert.match(
       (await tool(host, extension, "edit", { path: "./.env", edits: [] }))!.reason,
-      /^Blocked by auto-approval \(Edit\(\.\/\.env\), /,
+      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/\.env\), /,
     );
     assert.match(
       (await tool(host, extension, "write", { path: "secrets/key.pem", content: "x" }))!.reason,
-      /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /,
+      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/secrets\/\*\*\), /,
     );
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 0);
@@ -885,7 +897,10 @@ test("real loader: exact git status needs no provider, git status --short reache
     const prompt = await waitFor(host.confirms, 0);
     assert.match(prompt.message, /Requires confirmation \(Bash\(rm \*\), /);
     prompt.resolve(false);
-    assert.match((await compound)!.reason, /^Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)$/);
+    assert.match(
+      (await compound)!.reason,
+      /^Blocked by auto-approval \(user\): Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)\n/,
+    );
     assert.equal(host.calls.length, 1);
   } finally {
     await host.close();
@@ -940,18 +955,21 @@ test("real factory load writes nothing; session_start seeds before footer refres
     assert.equal(fs.statSync(path).mtimeMs, OLD_MTIME.getTime());
     const rm = bash(host, extension, "rm file.txt");
     (await waitFor(host.confirms, 0)).resolve(false);
-    assert.match((await rm)!.reason, /^Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)$/);
+    assert.match(
+      (await rm)!.reason,
+      /^Blocked by auto-approval \(user\): Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)\n/,
+    );
     assert.match(
       (await tool(host, extension, "read", { path: ".env" }))!.reason,
-      /^Blocked by auto-approval \(Read\(\.\/\.env\), /,
+      /^Blocked by auto-approval \(deny rule\): \(Read\(\.\/\.env\), /,
     );
     assert.match(
       (await tool(host, extension, "edit", { path: "secrets/key.txt", edits: [] }))!.reason,
-      /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /,
+      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/secrets\/\*\*\), /,
     );
     assert.match(
       (await tool(host, extension, "write", { path: ".env", content: "x" }))!.reason,
-      /^Blocked by auto-approval \(Edit\(\.\/\.env\), /,
+      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/\.env\), /,
     );
     assert.equal(await bash(host, extension, "git status"), undefined);
     assert.equal(host.calls.length, 0);
@@ -993,10 +1011,13 @@ test("readable missing global policy keeps the in-memory seed when the seed writ
     assert.equal(host.messages.filter((message) => message.startsWith(SEED_WARNING)).length, 1);
     const rm = bash(host, extension, "rm file.txt");
     (await waitFor(host.confirms, 0)).resolve(false);
-    assert.match((await rm)!.reason, /^Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)$/);
+    assert.match(
+      (await rm)!.reason,
+      /^Blocked by auto-approval \(user\): Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)\n/,
+    );
     assert.match(
       (await tool(host, extension, "edit", { path: "secrets/key.txt", edits: [] }))!.reason,
-      /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /,
+      /^Blocked by auto-approval \(deny rule\): \(Edit\(\.\/secrets\/\*\*\), /,
     );
     assert.equal(await bash(host, extension, "git status"), undefined);
     assert.equal(host.calls.length, 0);
@@ -1122,7 +1143,10 @@ test("real history save failure keeps approve and deny outcomes and warns exactl
     const approved = bash(host, extension, "noop-cmd first");
     (await waitFor(host.calls, 0)).release?.("approve");
     assert.equal(await approved, undefined);
-    assert.match((await bash(host, extension, "rm file.txt"))!.reason, /^Blocked by auto-approval \(Bash\(rm \*\), /);
+    assert.match(
+      (await bash(host, extension, "rm file.txt"))!.reason,
+      /^Blocked by auto-approval \(deny rule\): \(Bash\(rm \*\), /,
+    );
     const warnings = host.messages.filter(
       (message) => message.startsWith("warning:") && message.includes("auto-approval history"),
     );
@@ -1288,7 +1312,7 @@ for (const enabled of [false, true]) {
   });
 }
 
-test("production reviewer uses one trust sample per call for project instructions", async () => {
+test("Obsidian routing sends effective lists and instructions from one trust sample per call", async () => {
   const host = await createHost();
   try {
     writeFileSync(
@@ -1296,14 +1320,41 @@ test("production reviewer uses one trust sample per call for project instruction
       JSON.stringify({
         reviewMode: "auto",
         reviewEvidence: { projectInstructions: true },
+        reviewer: {
+          allow: ["Global note writes"],
+          softDeny: ["Global shared-folder writes"],
+          hardDeny: ["Global restricted case"],
+        },
       }),
+    );
+    const shared = projectConfigPath(host.cwd);
+    mkdirSync(dirname(shared), { recursive: true });
+    writeFileSync(shared, JSON.stringify({ reviewer: { softDeny: ["$defaults", "Shared protected notes"] } }));
+    writeFileSync(
+      join(dirname(shared), "auto-permissions.local.json"),
+      JSON.stringify({ reviewer: { allow: ["Local note writes"] } }),
     );
     const instructions = "Fixture project instructions";
     writeFileSync(join(host.cwd, "AGENTS.md"), instructions);
     const handler = (await host.load()).handlers.get("tool_call")?.[0];
     assert.ok(handler);
     let trustSamples = 0;
-    const ctx = { ...(host.context(false) as object), isProjectTrusted: () => ++trustSamples > 1 } as never;
+    const ctx = {
+      ...(host.context(false) as object),
+      isProjectTrusted: () => ++trustSamples > 1,
+      sessionManager: {
+        getSessionId: () => "note-session",
+        buildSessionProjection: () => ({
+          entries: [
+            {
+              sourceEntry: { type: "message", id: "user-1" },
+              messages: [{ role: "user", content: "create a note in 1. Inbox/Work" }],
+            },
+          ],
+        }),
+      },
+    } as never;
+    const command = 'obsidian create path="1. Inbox/Work/a.md"';
     for (const trusted of [false, true]) {
       const index = Number(trusted);
       const pending = handler(
@@ -1311,13 +1362,30 @@ test("production reviewer uses one trust sample per call for project instruction
           type: "tool_call",
           toolName: "bash",
           toolCallId: `trust-${index}`,
-          input: { command: "unmatched-command" },
+          input: { command },
         },
         ctx,
       );
       const review = await waitFor(host.calls, index);
       review.release?.("approve");
       assert.equal(await pending, undefined);
+      assert.match(userText(review), /USER: create a note in 1\. Inbox\/Work/);
+      assert.equal(JSON.parse(cardOf(userText(review))).command, command);
+      const prompt = review.context.systemPrompt ?? "";
+      assert.ok(
+        prompt.includes(
+          `environment: ${JSON.stringify(trusted ? DEFAULT_TRUSTED_ENVIRONMENT : DEFAULT_REVIEWER_POLICY.environment)}`,
+        ),
+      );
+      assert.ok(
+        prompt.includes(
+          `allow: ${JSON.stringify(trusted ? ["Global note writes", "Local note writes"] : ["Global note writes"])}`,
+        ),
+      );
+      assert.ok(prompt.includes("Global shared-folder writes"));
+      assert.equal(prompt.includes("Shared protected notes"), trusted);
+      assert.ok(prompt.includes('hardDeny: ["Global restricted case"]'));
+      if (!trusted) assert.doesNotMatch(prompt, /Shared protected notes|Local note writes/);
       assert.equal(
         review.context.systemPrompt?.includes(instructions),
         trusted,
@@ -1325,6 +1393,61 @@ test("production reviewer uses one trust sample per call for project instruction
       );
       assert.equal(trustSamples, index + 1);
     }
+  } finally {
+    await host.close();
+  }
+});
+
+test("deterministic Write evidence sends its path but never content to the next review", async () => {
+  const host = await createHost();
+  try {
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({
+        reviewMode: "auto",
+        permissions: { allow: ["Write(scratch/a.md)"] },
+      }),
+    );
+    const handler = (await host.load()).handlers.get("tool_call")?.[0];
+    assert.ok(handler);
+    const sentinel = "write-content-sentinel-never-send-65ff71";
+    const input = { path: "scratch/a.md", content: sentinel };
+    const call = { type: "tool_call", toolName: "write", toolCallId: "saved-note", input } as const;
+    const entries: unknown[] = [];
+    const ctx = {
+      ...(host.context(false) as object),
+      sessionManager: {
+        getSessionId: () => "write-evidence",
+        buildSessionProjection: () => ({ entries }),
+      },
+    } as never;
+    assert.equal(await handler(call, ctx), undefined);
+    assert.equal(host.calls.length, 0);
+    entries.push(
+      {
+        sourceEntry: { type: "message", id: "assistant-1" },
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "toolCall", name: call.toolName, arguments: input, id: call.toolCallId }],
+          },
+        ],
+      },
+      {
+        sourceEntry: { type: "message", id: "result-1" },
+        messages: [{ role: "toolResult", toolCallId: call.toolCallId, content: [{ type: "text", text: "Saved" }] }],
+      },
+    );
+    const pending = handler(
+      { type: "tool_call", toolName: "bash", toolCallId: "later", input: { command: "unmatched-command" } },
+      ctx,
+    );
+    const review = await waitFor(host.calls, 0);
+    review.release?.("approve");
+    assert.equal(await pending, undefined);
+    const messages = JSON.stringify(review.context.messages);
+    assert.match(messages, /TOOL write path=scratch\/a\.md/);
+    assert.ok(!messages.includes(sentinel));
   } finally {
     await host.close();
   }

@@ -75,7 +75,7 @@ async function runRoute(
         reviews.push(input);
         return options.review
           ? options.review(input)
-          : { ok: true, verdict: { decision: "approve", reason: "approved by fixture" } };
+          : { ok: true, verdict: { decision: "approve", tier: "none", reason: "approved by fixture" } };
       },
     },
   );
@@ -144,7 +144,10 @@ test("direct gate calls preserve authorization decisions and inputs across place
     },
     {
       name: "review approve",
-      options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "approve", reason: "safe" } }) },
+      options: {
+        mode: "auto",
+        review: async () => ({ ok: true, verdict: { decision: "approve", tier: "none", reason: "safe" } }),
+      },
       expectedReports: ["guardian-running", "guardian-running", "approved"],
       confirmations: 0,
       reviews: 2,
@@ -155,7 +158,7 @@ test("direct gate calls preserve authorization decisions and inputs across place
         mode: "auto",
         review: async () => ({
           ok: true,
-          verdict: { decision: "revise", reason: "change target", constraint: "target", source: "user" },
+          verdict: { decision: "revise", tier: "none", reason: "change target", constraint: "target", source: "user" },
         }),
       },
       expectedReports: [
@@ -178,10 +181,10 @@ test("direct gate calls preserve authorization decisions and inputs across place
       reviews: 0,
     },
     {
-      name: "review ask_user",
+      name: "review soft_deny",
       options: {
         mode: "auto",
-        review: async () => ({ ok: true, verdict: { decision: "ask_user", reason: "confirm target" } }),
+        review: async () => ({ ok: true, verdict: { decision: "block", tier: "soft_deny", reason: "confirm target" } }),
       },
       expectedReports: ["guardian-running", "guardian-running", "approval-required", "approved"],
       confirmations: 1,

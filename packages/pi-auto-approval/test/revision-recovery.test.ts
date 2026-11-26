@@ -6,6 +6,7 @@ import { parseVerdict } from "../src/review/protocol.ts";
 
 const revision = {
   decision: "revise" as const,
+  tier: "none" as const,
   reason: "Change target",
   constraint: "Use approved target",
   source: "User request",
@@ -56,8 +57,11 @@ for (const tool of ["read", "bash"])
 
 test("valid revision preserves evidence while other verdicts need none", () => {
   assert.deepEqual(parseVerdict(JSON.stringify(revision)), { ok: true, verdict: revision });
-  for (const decision of ["approve", "ask_user"])
-    assert.equal(parseVerdict(JSON.stringify({ decision, reason: "ok" })).ok, true);
+  for (const { decision, tier } of [
+    { decision: "approve", tier: "none" },
+    { decision: "block", tier: "soft_deny" },
+  ])
+    assert.equal(parseVerdict(JSON.stringify({ decision, tier, reason: "ok" })).ok, true);
   for (const value of [null, [], 1, "x"]) assert.equal(parseVerdict(JSON.stringify(value)).ok, false);
 });
 
@@ -104,6 +108,9 @@ test("revision verdict requires structured constraint and source", () => {
     { constraint: 1, source: "user" },
     { constraint: "target", source: [] },
   ]) {
-    assert.equal(parseVerdict(JSON.stringify({ decision: "revise", reason: "Fix message", ...evidence })).ok, false);
+    assert.equal(
+      parseVerdict(JSON.stringify({ decision: "revise", tier: "none", reason: "Fix message", ...evidence })).ok,
+      false,
+    );
   }
 });

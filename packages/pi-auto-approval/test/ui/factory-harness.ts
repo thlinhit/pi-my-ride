@@ -35,6 +35,7 @@ export function reviewerReply(decision: "approve" | "revise", reason = REVIEW_RE
         type: "text",
         text: JSON.stringify({
           decision,
+          tier: "none",
           reason,
           ...(decision === "revise" ? { constraint: "target", source: "user" } : {}),
         }),

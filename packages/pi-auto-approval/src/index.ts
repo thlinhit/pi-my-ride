@@ -3,7 +3,14 @@ import { dirname, join } from "node:path";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PermissionRule, SessionChoices } from "./config.ts";
-import { CONFIG_FILENAME, ensureGlobalConfig, globalConfigDir, loadConfig, projectConfigPath } from "./config.ts";
+import {
+  CONFIG_FILENAME,
+  ensureGlobalConfig,
+  globalConfigDir,
+  loadConfig,
+  projectConfigPath,
+  resolveReviewerPolicy,
+} from "./config.ts";
 import { analyzeShell } from "./shell.ts";
 import { isReadOnlyComponent } from "./readonly.ts";
 import { matchPermission, matchPermissionExact, resolveToolPath } from "./rules.ts";
@@ -14,25 +21,10 @@ import { recordHistory, type HistoryEntry, type HistoryResult } from "./history.
 import { createReviewDisplay } from "./ui/display.ts";
 import type { ConfigUi } from "./config.ts";
 import type { ReviewState } from "./ui/status.ts";
-import type { ReviewInput, ReviewResult as ProtocolReviewResult } from "./review/session.ts";
+import type { ReviewInput, ReviewResult, Reviewer } from "./review/session.ts";
 import { createPiReviewer, createReviewerState } from "./review/session.ts";
 
-export type { ReviewContext, ReviewInput, Reviewer, ReviewerState } from "./review/session.ts";
-
-// T4.4 migrates the gate and its injected reviewer fixtures to tiered verdicts.
-export type ReviewResult =
-  | ProtocolReviewResult
-  | {
-      readonly ok: true;
-      readonly verdict:
-        | { readonly decision: "approve" | "ask_user"; readonly reason: string }
-        | {
-            readonly decision: "revise";
-            readonly reason: string;
-            readonly constraint: string;
-            readonly source: string;
-          };
-    };
+export type { ReviewContext, ReviewInput, ReviewResult, Reviewer, ReviewerState } from "./review/session.ts";
 export { createPiReviewer, createReviewerState } from "./review/session.ts";
 export interface GateContext {
   readonly cwd: string;
@@ -63,7 +55,7 @@ export interface GateDeps {
   ) => PermissionRule | undefined;
   readonly status?: StatusReporter;
   readonly reviewer?: string;
-  readonly review?: (input: ReviewInput) => Promise<ReviewResult>;
+  readonly review?: Reviewer;
   readonly history?: (entry: HistoryEntry) => HistoryResult;
 }
 export type GateStatus = ReviewState;
@@ -71,6 +63,20 @@ export type GateDecision = { block: true; reason: string } | undefined;
 const CONFIRMATION_FAILED = "auto-approval: confirmation failed";
 const MAX_BASH_APPROVAL_BYTES = 65_536;
 const block = (reason: string): { block: true; reason: string } => ({ block: true, reason });
+const blockSources = {
+  denyRule: "deny rule",
+  protectedPath: "protected path",
+  reviewer: "reviewer",
+  noUI: "no UI",
+  user: "user",
+} as const;
+type BlockSource = keyof typeof blockSources;
+function blocked(source: BlockSource, reason: string) {
+  return block(
+    `Blocked by auto-approval (${blockSources[source]}): ${reason}\nThe tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script).`,
+  );
+}
+const invalidVerdict = (_: never) => blocked("reviewer", "Invalid verdict");
 type GateOutcome = { kind: "not-gated" } | { kind: "decided"; decision: GateDecision; log: boolean };
 const NOT_GATED: GateOutcome = { kind: "not-gated" };
 const PATH_TOOLS = new Set(["read", "edit", "write"]);
@@ -290,6 +296,26 @@ async function decideToolCall(
       ? config.reviewer
       : { ...config.reviewer, model: choices.reviewerModel ?? undefined };
   const reviewer = reviewerConfig.model ? `${reviewerConfig.model.provider}/${reviewerConfig.model.id}` : deps.reviewer;
+  const policy = resolveReviewerPolicy(
+    { ...config, global: config.global ?? config, project: config.project ?? {} },
+    projectTrusted,
+  );
+  const review = async (
+    request: Pick<ReviewInput, "command" | "component" | "tool" | "arguments">,
+  ): Promise<ReviewResult> => {
+    try {
+      if (deps.review)
+        return await deps.review({
+          ...request,
+          reviewer: reviewerConfig,
+          reviewEvidence: config.reviewEvidence,
+          policy,
+          projectTrusted,
+          signal: ctx.signal,
+        });
+    } catch {}
+    return { ok: false, error: "reviewer unavailable" } as const;
+  };
   const report = (state: ReviewState, detail?: string) => {
     if (!ctx.hasUI || !settings.debug || !config.ui.status || !deps.status || isAborted(ctx)) return;
     try {
@@ -304,8 +330,8 @@ async function decideToolCall(
     } catch {}
   };
   const attribution = rule ? `(${rule.label}, ${rule.source})` : "";
-  const confirm = async (reason: string): Promise<GateDecision> => {
-    if (!ctx.hasUI) return block(reason);
+  const confirm = async (reason: string, headlessSource: BlockSource = "noUI"): Promise<GateDecision> => {
+    if (!ctx.hasUI) return blocked(headlessSource, reason);
     if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
     report("approval-required");
     if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
@@ -317,7 +343,7 @@ async function decideToolCall(
       );
       if (isAborted(ctx) || approved !== true) {
         report("blocked", isAborted(ctx) ? "Cancelled" : undefined);
-        return block(`${reason}${isAborted(ctx) ? " (review cancelled)" : " (user declined)"}`);
+        return isAborted(ctx) ? block(`${reason} (review cancelled)`) : blocked("user", `${reason} (user declined)`);
       }
       report("approved");
       return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
@@ -328,9 +354,9 @@ async function decideToolCall(
   };
   if (rule?.level === "deny") {
     report("blocked");
-    return block(`Blocked by auto-approval ${attribution}`);
+    return blocked("denyRule", attribution);
   }
-  if (protectedReason) return confirm(protectedReason);
+  if (protectedReason) return confirm(protectedReason, "protectedPath");
   if (analysis && !analysis.supported && !analysis.reviewable)
     return confirm(`${analysis.reason} requires confirmation`);
   if (bash && analysis?.supported) {
@@ -362,27 +388,17 @@ async function decideToolCall(
       }
       report("guardian-running");
       if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
-      let result: ReviewResult;
-      try {
-        result = deps.review
-          ? await deps.review({
-              command: component.command,
-              component: {
-                originalCommand: command!,
-                index: index + 1,
-                count: analysis.components.length,
-                start: component.start,
-                end: component.end,
-                context: component.context,
-              },
-              reviewer: reviewerConfig,
-              reviewEvidence: config.reviewEvidence,
-              signal: ctx.signal,
-            })
-          : { ok: false, error: "reviewer unavailable" };
-      } catch {
-        result = { ok: false, error: "reviewer unavailable" };
-      }
+      const result = await review({
+        command: component.command,
+        component: {
+          originalCommand: command!,
+          index: index + 1,
+          count: analysis.components.length,
+          start: component.start,
+          end: component.end,
+          context: component.context,
+        },
+      });
       if (isAborted(ctx)) {
         report("blocked", "Cancelled");
         return block(CONFIRMATION_FAILED);
@@ -395,22 +411,44 @@ async function decideToolCall(
         reasons.push(`Automatic review failed: ${result.error}`);
         continue;
       }
-      if (result.verdict.decision === "revise") {
-        report("revision-requested");
-        reasons.push(
-          `Reviewer requested a revision: ${result.verdict.reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`,
-        );
-        continue;
+      const { verdict } = result;
+      const { decision, tier, reason: reviewReason } = verdict;
+      switch (decision) {
+        case "approve":
+          switch (tier) {
+            case "allow":
+            case "user_intent":
+            case "none":
+              continue;
+            default:
+              return invalidVerdict(tier);
+          }
+        case "block":
+          switch (tier) {
+            case "hard_deny":
+              report("blocked");
+              return blocked("reviewer", reviewReason);
+            case "soft_deny":
+              reasons.push(`Reviewer needs user approval: ${reviewReason}`);
+              break;
+            default:
+              return invalidVerdict(tier);
+          }
+          break;
+        case "revise":
+          if (tier !== "none") return invalidVerdict(tier);
+          report("revision-requested");
+          reasons.push(
+            `Reviewer requested a revision: ${reviewReason}\nConstraint: ${verdict.constraint}\nSource: ${verdict.source}\nApprove the original action once?`,
+          );
+          break;
+        default:
+          return invalidVerdict(decision);
       }
-      if (result.verdict.decision === "block") {
-        report("blocked");
-        return block(result.verdict.reason);
-      }
-      if (result.verdict.decision === "ask_user")
-        reasons.push(`Reviewer needs user approval: ${result.verdict.reason}`);
     }
     if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
-    if (reasons.length) return confirm([...new Set(reasons)].join("\n"));
+    if (reasons.length)
+      return confirm([...new Set(reasons)].join("\n"), componentReasons.some(Boolean) ? "protectedPath" : "noUI");
     report("approved");
     return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
   }
@@ -424,19 +462,7 @@ async function decideToolCall(
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   report("guardian-running");
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
-  let result: ReviewResult;
-  try {
-    result = deps.review
-      ? await deps.review({
-          ...(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input }),
-          reviewer: reviewerConfig,
-          reviewEvidence: config.reviewEvidence,
-          signal: ctx.signal,
-        })
-      : { ok: false, error: "reviewer unavailable" };
-  } catch {
-    result = { ok: false, error: "reviewer unavailable" };
-  }
+  const result = await review(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input });
   if (isAborted(ctx)) {
     report("blocked", "Cancelled");
     return block(CONFIRMATION_FAILED);
@@ -448,20 +474,38 @@ async function decideToolCall(
     }
     return confirm(`Automatic review failed: ${result.error}`);
   }
-  const { decision, reason } = result.verdict;
-  if (decision === "revise") {
-    report("revision-requested");
-    return confirm(
-      `Reviewer requested a revision: ${reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`,
-    );
+  const { verdict } = result;
+  const { decision, tier, reason } = verdict;
+  switch (decision) {
+    case "approve":
+      switch (tier) {
+        case "allow":
+        case "user_intent":
+        case "none":
+          report("approved");
+          return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
+        default:
+          return invalidVerdict(tier);
+      }
+    case "block":
+      switch (tier) {
+        case "hard_deny":
+          report("blocked");
+          return blocked("reviewer", reason);
+        case "soft_deny":
+          return confirm(`Reviewer needs user approval: ${reason}`);
+        default:
+          return invalidVerdict(tier);
+      }
+    case "revise":
+      if (tier !== "none") return invalidVerdict(tier);
+      report("revision-requested");
+      return confirm(
+        `Reviewer requested a revision: ${reason}\nConstraint: ${verdict.constraint}\nSource: ${verdict.source}\nApprove the original action once?`,
+      );
+    default:
+      return invalidVerdict(decision);
   }
-  if (decision === "block") {
-    report("blocked");
-    return block(reason);
-  }
-  if (decision === "ask_user") return confirm(`Reviewer needs user approval: ${reason}`);
-  report("approved");
-  return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
 }
 
 export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readonly string[]): void {
@@ -552,7 +596,6 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
             },
             modelRegistry: ctx.modelRegistry,
             sessionManager: ctx.sessionManager,
-            isProjectTrusted: () => snapshot.projectTrusted,
           },
           reviewerState,
         ),

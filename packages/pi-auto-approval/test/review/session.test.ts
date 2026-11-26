@@ -3,17 +3,21 @@ import { test } from "node:test";
 import type { AssistantMessage, Context, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import { DEFAULT_REVIEW_EVIDENCE, DEFAULT_REVIEWER, parseConfig } from "../../src/config.ts";
 import { handleToolCall } from "../../src/index.ts";
-import { contextBudget, estimateTokens } from "../../src/review/protocol.ts";
+import { contextBudget, DEFAULT_REVIEWER_POLICY, estimateTokens } from "../../src/review/protocol.ts";
 import { createPiReviewer, createReviewerState, type ReviewContext } from "../../src/review/session.ts";
 
 const input = {
   command: "first request",
   reviewer: DEFAULT_REVIEWER,
   reviewEvidence: DEFAULT_REVIEW_EVIDENCE,
+  policy: DEFAULT_REVIEWER_POLICY,
+  projectTrusted: true,
   signal: undefined,
 };
 const approval = { decision: "approve", tier: "none", reason: "No policy restriction applies." } as const;
 const tierInvalid = '{"decision":"block","tier":"allow","reason":"Invalid pairing."}';
+const blockReason = (source: string, reason: string) =>
+  `Blocked by auto-approval (${source}): ${reason}\nThe tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script).`;
 const malformed = "not a JSON verdict";
 
 function reply(
@@ -36,7 +40,6 @@ function stubReviewer(...replies: Array<AssistantMessage | (() => Promise<Assist
       baseUrl: "",
       contextWindow: 128_000,
     } as ReviewContext["model"],
-    isProjectTrusted: () => true,
     sessionManager: { getSessionId: () => "main", buildSessionProjection: () => ({ entries: [] }) },
     modelRegistry: {
       find: () => undefined,
@@ -82,6 +85,18 @@ test("retries unparseable text without replaying the correction in later reviews
   assert.deepEqual(calls[3]?.messages.slice(0, -1), [...calls[1]!.messages, good]);
   assert.match(JSON.stringify(calls[3]?.messages.at(-1)), /next request/);
   assert.notEqual(calls[3]?.options?.sessionId, calls[2]?.options?.sessionId);
+});
+
+test("an effective policy change in the same trust state resets the reviewer lineage", async () => {
+  const good = reply(JSON.stringify(approval));
+  const { calls, review } = stubReviewer(good, good);
+  assert.equal((await review(input)).ok, true);
+  const changed = { ...DEFAULT_REVIEWER_POLICY, softDeny: [...DEFAULT_REVIEWER_POLICY.softDeny, "Changed note rule"] };
+  assert.equal((await review({ ...input, policy: changed })).ok, true);
+  assert.equal(calls.length, 2);
+  assert.notEqual(calls[1]?.options?.sessionId, calls[0]?.options?.sessionId);
+  assert.match(calls[1]!.systemPrompt, /Changed note rule/);
+  assert.doesNotMatch(calls[0]!.systemPrompt, /Changed note rule/);
 });
 
 test("fails closed after two bad verdicts without a third attempt", async () => {
@@ -133,7 +148,10 @@ test("headless reviewer-backed gate blocks after a tier-invalid verdict and a ma
     () => parseConfig({ enabled: true, reviewMode: "auto" }, "test"),
     { review },
   );
-  assert.deepEqual(result, { block: true, reason: "Automatic review failed: reviewer returned no JSON object" });
+  assert.deepEqual(result, {
+    block: true,
+    reason: blockReason("no UI", "Automatic review failed: reviewer returned no JSON object"),
+  });
   assert.equal(calls.length, 2);
   assert.equal(dialogs, 0);
 });

@@ -14,7 +14,8 @@ import {
   SEED_CONFIG,
 } from "../src/config.ts";
 import { parsePermissionRule } from "../src/rules.ts";
-import { BUDGET_EXCEEDED_ERROR } from "../src/review/protocol.ts";
+import { BUDGET_EXCEEDED_ERROR, DEFAULT_REVIEWER_POLICY } from "../src/review/protocol.ts";
+import type { Verdict } from "../src/review/protocol.ts";
 import type { ConfigLoader, GateContext, GateDeps, ReviewContext, ReviewInput } from "../src/index.ts";
 import { createPiReviewer, createReviewerState, handleToolCall } from "../src/index.ts";
 
@@ -76,6 +77,70 @@ function context(overrides: Partial<GateContext> = {}) {
   return { ctx, calls };
 }
 const event = (command: unknown = "dangerous") => ({ toolName: "bash", input: { command } });
+const blockReason = (source: string, reason: string) =>
+  `Blocked by auto-approval (${source}): ${reason}\nThe tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script).`;
+
+const verdictCases = [
+  { verdict: { decision: "approve", tier: "allow", reason: "allowed by policy" }, confirm: false },
+  { verdict: { decision: "approve", tier: "user_intent", reason: "user authorized" }, confirm: false },
+  { verdict: { decision: "approve", tier: "none", reason: "no restriction" }, confirm: false },
+  { verdict: { decision: "block", tier: "hard_deny", reason: "hard restriction" }, confirm: false },
+  { verdict: { decision: "block", tier: "soft_deny", reason: "soft restriction" }, confirm: true },
+  {
+    verdict: {
+      decision: "revise",
+      tier: "none",
+      reason: "wrong target",
+      constraint: "Use approved target",
+      source: "User request",
+    },
+    confirm: true,
+  },
+] as const satisfies readonly { verdict: Verdict; confirm: boolean }[];
+
+for (const call of [
+  event("unmatched-command"),
+  { toolName: "write", input: { path: "scratch/a.md", content: "example" } },
+]) {
+  for (const hasUI of [true, false]) {
+    test(`${call.toolName} tiered verdict mapping with UI=${hasUI}`, async () => {
+      for (const { verdict, confirm } of verdictCases) {
+        const { ctx, calls } = context({ hasUI });
+        const result = await handleToolCall(call, ctx, () => config([], "auto"), {
+          review: async () => ({ ok: true, verdict }),
+        });
+        const prompts = hasUI && confirm;
+        assert.equal(calls.length, Number(prompts), verdict.tier);
+        const runs = verdict.decision === "approve" || prompts;
+        assert.equal(result?.block, runs ? undefined : true, verdict.tier);
+        if (prompts) assert.ok(String(calls[0]?.[1]).includes(verdict.reason));
+        if (verdict.tier === "hard_deny") assert.equal(result?.reason, blockReason("reviewer", verdict.reason));
+      }
+    });
+  }
+}
+
+test("D16 labels a headless confirmation and a user decline", async () => {
+  const command = event("unmatched-command");
+  const reason = "Unmatched Bash command requires confirmation";
+  const headless = context({ hasUI: false });
+  assert.equal((await handleToolCall(command, headless.ctx, () => config([])))?.reason, blockReason("no UI", reason));
+  let dialogs = 0;
+  const declined = context({
+    ui: {
+      confirm: async () => {
+        dialogs++;
+        return false;
+      },
+      notify: () => {},
+    },
+  });
+  assert.equal(
+    (await handleToolCall(command, declined.ctx, () => config([])))?.reason,
+    blockReason("user", `${reason} (user declined)`),
+  );
+  assert.equal(dialogs, 1);
+});
 
 test("session reviewer choices route both review paths and attribution without mutating config", async () => {
   for (const reviewerModel of [undefined, null, { provider: "session", id: "chosen" }]) {
@@ -107,7 +172,7 @@ test("session reviewer choices route both review paths and attribution without m
             reviewer: "live/active",
             review: async (input) => {
               seen.push(input);
-              return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+              return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
             },
             status: (report) => {
               if (report.state === "guardian-running") labels.push(report.reviewer);
@@ -213,7 +278,7 @@ test("read-only components skip review and manual confirmation but preserve deny
     await handleToolCall(event("cat x | tee y"), ctx, () => config([], "auto"), {
       review: async (input) => {
         seen.push(input.command!);
-        return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+        return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
       },
     }),
     undefined,
@@ -236,7 +301,7 @@ test("compound policy preflight denies later components before any confirmation 
         await handleToolCall(event("first;last"), ctx, () => config(rules, mode), {
           review: async (input) => {
             seen.push(input);
-            return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+            return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
           },
         })
       )?.block,
@@ -248,7 +313,7 @@ test("compound policy preflight denies later components before any confirmation 
 });
 
 test("compound reviewers run serially through asks and failures until later revision", async () => {
-  for (const first of ["ask_user", "failure"] as const) {
+  for (const first of ["soft_deny", "failure"] as const) {
     const { ctx, calls } = context();
     const seen: string[] = [];
     const statuses: string[] = [];
@@ -258,8 +323,11 @@ test("compound reviewers run serially through asks and failures until later revi
         if (input.command === "first")
           return first === "failure"
             ? { ok: false, error: "failed" }
-            : { ok: true, verdict: { decision: "ask_user", reason: "ask" } };
-        return { ok: true, verdict: { decision: "revise", reason: "forbidden", constraint: "target", source: "user" } };
+            : { ok: true, verdict: { decision: "block", tier: "soft_deny", reason: "ask" } };
+        return {
+          ok: true,
+          verdict: { decision: "revise", tier: "none", reason: "forbidden", constraint: "target", source: "user" },
+        };
       },
       status: (report) => statuses.push(report.state),
     });
@@ -283,7 +351,7 @@ test("whole allow never skips components; component allows pass and quoted deny 
     await handleToolCall(event(command), ctx, () => config(rules, "auto"), {
       review: async (input) => {
         seen.push(input);
-        return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+        return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
       },
     }),
     undefined,
@@ -307,7 +375,7 @@ for (const level of ["allow", "deny"] as const) {
     const result = await handleToolCall(event(source), ctx, () => config(rules, "auto"), {
       review: async () => {
         reviews++;
-        return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+        return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
       },
     });
     assert.equal(result?.block, level === "deny" ? true : undefined);
@@ -324,7 +392,7 @@ async function runBashRules(command: string, rules: PermissionRule[]) {
   const result = await handleToolCall(event(command), ctx, () => config(rules, "auto"), {
     review: async (input) => {
       reviews.push(input.command!);
-      return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+      return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
     },
   });
   return { result, reviews, notices, calls };
@@ -485,7 +553,7 @@ test("component reviews retain source context and unchanged frozen input with on
     await handleToolCall(original, ctx, () => config([], "auto"), {
       review: async (input) => {
         seen.push(input);
-        return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+        return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
       },
       history: (entry) => {
         outcomes.push(entry);
@@ -527,7 +595,7 @@ test("asks and failures accumulate into one full-original confirmation after all
           seen.push(input.command!);
           return input.command === "first"
             ? { ok: false, error: "unavailable" }
-            : { ok: true, verdict: { decision: "ask_user", reason: "check target" } };
+            : { ok: true, verdict: { decision: "block", tier: "soft_deny", reason: "check target" } };
         },
       },
     );
@@ -567,7 +635,7 @@ for (const source of [
       const result = await handleToolCall(event(source), ctx, () => config([parsedRule("Bash(*)", "allow")], "auto"), {
         review: async (input) => {
           seen.push(input);
-          return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+          return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
         },
       });
       assert.equal(result, undefined);
@@ -599,8 +667,11 @@ test("whole-command review preserves manual mode and restrictive rules", async (
 test("whole-command review retains failure, escalation and cancellation handling", async () => {
   const outcomes = [
     { ok: false, error: "unavailable" },
-    { ok: true, verdict: { decision: "ask_user", reason: "risk" } },
-    { ok: true, verdict: { decision: "revise", reason: "constraint", constraint: "target", source: "user" } },
+    { ok: true, verdict: { decision: "block", tier: "soft_deny", reason: "risk" } },
+    {
+      ok: true,
+      verdict: { decision: "revise", tier: "none", reason: "constraint", constraint: "target", source: "user" },
+    },
     { ok: false, cancelled: true, error: "cancelled" },
   ] as const;
   for (const outcome of outcomes)
@@ -725,7 +796,7 @@ const parsedRule = (raw: string, level: "deny" | "ask" | "allow" = "deny"): Perm
 };
 const approving = (calls: { count: number }) => async (input: ReviewInput) => {
   calls.count++;
-  return { ok: true as const, verdict: { decision: "approve" as const, reason: "ok" } };
+  return { ok: true as const, verdict: { decision: "approve" as const, tier: "none" as const, reason: "ok" } };
 };
 
 test("every exposed tool is matched by the same permission rules", async () => {
@@ -733,16 +804,16 @@ test("every exposed tool is matched by the same permission rules", async () => {
   const { ctx, calls } = context();
   const denied = async (toolName: string, input: unknown) =>
     (await handleToolCall({ toolName, input }, ctx, () => config(rules), {}))?.reason;
-  assert.equal(await denied("read", { path: ".env" }), "Blocked by auto-approval (Read(./.env), global.json)");
+  assert.equal(await denied("read", { path: ".env" }), blockReason("deny rule", "(Read(./.env), global.json)"));
   assert.equal(
     await denied("write", { path: "secrets/key.pem", content: "x" }),
-    "Blocked by auto-approval (Edit(./secrets/**), global.json)",
+    blockReason("deny rule", "(Edit(./secrets/**), global.json)"),
   );
   assert.equal(
     await denied("edit", { path: "secrets/key.pem", edits: [] }),
-    "Blocked by auto-approval (Edit(./secrets/**), global.json)",
+    blockReason("deny rule", "(Edit(./secrets/**), global.json)"),
   );
-  assert.equal(await denied("CronCreate", {}), "Blocked by auto-approval (CronCreate, global.json)");
+  assert.equal(await denied("CronCreate", {}), blockReason("deny rule", "(CronCreate, global.json)"));
   assert.equal(calls.length, 0);
 });
 
@@ -795,11 +866,18 @@ test("unmatched non-bash review outcomes route to confirmation or block; no UI b
   const input = { path: "notes.md", content: "ok" };
   const outcomes: Array<{ name: string; result: unknown; prompts: number; reason?: string }> = [
     { name: "failure", result: { ok: false, error: "reviewer unavailable" }, prompts: 1 },
-    { name: "ask_user", result: { ok: true, verdict: { decision: "ask_user", reason: "Check." } }, prompts: 1 },
+    {
+      name: "soft_deny",
+      result: { ok: true, verdict: { decision: "block", tier: "soft_deny", reason: "Check." } },
+      prompts: 1,
+    },
     { name: "budget", result: { ok: false, error: BUDGET_EXCEEDED_ERROR }, prompts: 1 },
     {
       name: "revise",
-      result: { ok: true, verdict: { decision: "revise", reason: "Narrow it.", constraint: "target", source: "user" } },
+      result: {
+        ok: true,
+        verdict: { decision: "revise", tier: "none", reason: "Narrow it.", constraint: "target", source: "user" },
+      },
       prompts: 1,
     },
     {
@@ -819,9 +897,9 @@ test("unmatched non-bash review outcomes route to confirmation or block; no UI b
   }
   const noUi = context({ hasUI: false });
   const blocked = await handleToolCall({ toolName: "write", input }, noUi.ctx, () => config([], "auto"), {
-    review: async () => ({ ok: true, verdict: { decision: "ask_user", reason: "Check." } }) as never,
+    review: async () => ({ ok: true, verdict: { decision: "block", tier: "soft_deny", reason: "Check." } }) as never,
   });
-  assert.equal(blocked?.reason, "Reviewer needs user approval: Check.");
+  assert.equal(blocked?.reason, blockReason("no UI", "Reviewer needs user approval: Check."));
   assert.equal(noUi.calls.length, 0);
 });
 
@@ -879,7 +957,7 @@ test("deny rule blocks with attribution", async () => {
   const { ctx, calls } = context();
   assert.equal(
     (await handleToolCall(event(), ctx, () => config([rule("deny")])))?.reason,
-    "Blocked by auto-approval (danger command, global.json)",
+    blockReason("deny rule", "(danger command, global.json)"),
   );
   assert.equal(calls.length, 0);
 });
@@ -901,7 +979,7 @@ test("guardian abort during synchronous running report skips reviewer", async ()
   const result = await handleToolCall(event(), ctx, () => config([], "auto"), {
     review: async () => {
       reviews++;
-      return { ok: true, verdict: { decision: "approve", reason: "late" } };
+      return { ok: true, verdict: { decision: "approve", tier: "none", reason: "late" } };
     },
     status: (report) => {
       statuses.push(typeof report === "string" ? report : report.state);
@@ -920,7 +998,7 @@ test("guardian approves without confirmation and reports review status", async (
   const result = await handleToolCall({ ...event(), toolCallId: "call-1" }, ctx, () => config([], "auto"), {
     review: async (input) => {
       received = input;
-      return { ok: true, verdict: { decision: "approve", reason: "Authorized." } };
+      return { ok: true, verdict: { decision: "approve", tier: "none", reason: "Authorized." } };
     },
     status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
@@ -930,12 +1008,12 @@ test("guardian approves without confirmation and reports review status", async (
   assert.deepEqual((received as { reviewEvidence: unknown }).reviewEvidence, { projectInstructions: false });
 });
 
-test("guardian revise and ask_user confirm with the reason", async () => {
+test("guardian revise and soft_deny confirm with the reason", async () => {
   const denied = context();
   const revised = await handleToolCall(event(), denied.ctx, () => config([], "auto"), {
     review: async () => ({
       ok: true,
-      verdict: { decision: "revise", reason: "Target mismatch.", constraint: "target", source: "user" },
+      verdict: { decision: "revise", tier: "none", reason: "Target mismatch.", constraint: "target", source: "user" },
     }),
   });
   assert.equal(revised, undefined);
@@ -943,7 +1021,7 @@ test("guardian revise and ask_user confirm with the reason", async () => {
   const askCalls = context();
   assert.equal(
     await handleToolCall(event("dangerous exact"), askCalls.ctx, () => config([], "auto"), {
-      review: async () => ({ ok: true, verdict: { decision: "ask_user", reason: "Confirm target." } }),
+      review: async () => ({ ok: true, verdict: { decision: "block", tier: "soft_deny", reason: "Confirm target." } }),
     }),
     undefined,
   );
@@ -1067,7 +1145,7 @@ test("untrusted project allow confirms; deny cannot bypass", async () => {
   const blocked = await handleToolCall(event(), ctx, () => config([rule("deny")]), {
     status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
-  assert.equal(blocked?.reason, "Blocked by auto-approval (danger command, global.json)");
+  assert.equal(blocked?.reason, blockReason("deny rule", "(danger command, global.json)"));
   assert.deepEqual(statuses, ["approval-required", "approved", "blocked"]);
 });
 
@@ -1108,11 +1186,14 @@ test("symlinked local config target blocks headless and asks with UI despite Edi
   const call = { toolName: "write", input: { path } };
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   const reason = `Changes auto-approval protected file ${path}`;
   const headless = context({ cwd, hasUI: false });
-  assert.deepEqual(await handleToolCall(call, headless.ctx, load, { review }), { block: true, reason });
+  assert.deepEqual(await handleToolCall(call, headless.ctx, load, { review }), {
+    block: true,
+    reason: blockReason("protected path", reason),
+  });
   assert.equal(headless.calls.length, 0);
   const interactive = context({ cwd });
   assert.equal(await handleToolCall(call, interactive.ctx, load, { review }), undefined);
@@ -1133,11 +1214,11 @@ test("dangling local config target blocks a headless Write despite Edit allow", 
   const { ctx, calls } = context({ cwd, hasUI: false });
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   assert.deepEqual(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), {
     block: true,
-    reason: `Changes auto-approval protected file ${path}`,
+    reason: blockReason("protected path", `Changes auto-approval protected file ${path}`),
   });
   assert.equal(calls.length, 0);
   assert.equal(review.mock.callCount(), 0);
@@ -1150,7 +1231,7 @@ test("unmatched protected Write asks once without review", async (t) => {
   const path = ".pi/pi-auto-approval/auto-permissions.json";
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
   assert.equal(calls.length, 1);
@@ -1165,7 +1246,7 @@ test("Edit allow cannot auto-approve a protected Write with or without UI", asyn
   const call = { toolName: "write", input: { path } };
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   const reason = `Changes auto-approval protected file ${join(cwd, path)}`;
   const interactive = context({ cwd });
@@ -1173,7 +1254,10 @@ test("Edit allow cannot auto-approve a protected Write with or without UI", asyn
   assert.equal(interactive.calls.length, 1);
   assert.ok(String(interactive.calls[0]?.[1]).startsWith(`${reason}\n`));
   const headless = context({ cwd, hasUI: false });
-  assert.deepEqual(await handleToolCall(call, headless.ctx, load, { review }), { block: true, reason });
+  assert.deepEqual(await handleToolCall(call, headless.ctx, load, { review }), {
+    block: true,
+    reason: blockReason("protected path", reason),
+  });
   assert.equal(headless.calls.length, 0);
   assert.equal(review.mock.callCount(), 0);
 });
@@ -1185,7 +1269,7 @@ test("global protected Writes ask through a symlink and on a different case spel
   symlinkSync(globalDir, alias, "dir");
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   for (const root of [alias, join(home, ".pi", "PI-AUTO-APPROVAL")]) {
     const { ctx, calls } = context({ cwd });
@@ -1203,7 +1287,7 @@ test("case-variant project config Write asks even if the config directory does n
   const path = ".PI/Pi-Auto-Approval/auto-permissions.json";
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   for (const removeDir of [false, true]) {
     // With no directory entry, realpath cannot correct the input casing, even on macOS.
@@ -1229,7 +1313,7 @@ for (const tempRoot of ["/var/tmp", "/tmp"]) {
     const { ctx, calls } = context({ cwd: join(home, "checkout") });
     const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
       ok: true,
-      verdict: { decision: "approve", reason: "ok" },
+      verdict: { decision: "approve", tier: "none", reason: "ok" },
     }));
     assert.equal(
       await handleToolCall({ toolName: "write", input: { path } }, ctx, () => config([], "auto"), { review }),
@@ -1249,7 +1333,7 @@ test("an unresolved Edit target asks without review", async (t) => {
   symlinkSync(path, path);
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   assert.equal(await handleToolCall({ toolName: "edit", input: { path } }, ctx, load, { review }), undefined);
   assert.equal(calls.length, 1);
@@ -1268,7 +1352,7 @@ test("an unresolved config file protects an otherwise allowed Edit", async (t) =
   const allow = parsedRule("Edit(**)", "allow");
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   // Supply a valid policy snapshot to exercise resolution rather than the loader's error handling.
   assert.equal(
@@ -1286,24 +1370,24 @@ test("whole and component Bash denies win over protected paths without prompting
   const command = `${protectedComponent} && obsidian create path=x`;
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   for (const denied of [command, "obsidian create path=x", protectedComponent]) {
     const deny = parsedRule(`Bash(${denied})`);
     const decision = await handleToolCall(event(command), ctx, () => config([deny], "auto"), { review });
-    assert.deepEqual(decision, { block: true, reason: `Blocked by auto-approval (${deny.label}, ${deny.source})` });
+    assert.deepEqual(decision, { block: true, reason: blockReason("deny rule", `(${deny.label}, ${deny.source})`) });
   }
   assert.equal(calls.length, 0);
   assert.equal(review.mock.callCount(), 0);
 });
 
-test("protected Bash component and reviewer ask share one dialog", async (t) => {
+test("protected Bash component and reviewer soft deny share one dialog", async (t) => {
   const { ctx, calls } = context();
   const protectedComponent = "cat .pi/pi-auto-approval/auto-permissions.json";
   const unmatchedComponent = "obsidian create path=x";
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "ask_user", reason: "confirm note creation" },
+    verdict: { decision: "block", tier: "soft_deny", reason: "confirm note creation" },
   }));
   const call = event(`${protectedComponent} && ${unmatchedComponent}`);
   assert.equal(await handleToolCall(call, ctx, () => config([], "auto"), { review }), undefined);
@@ -1321,18 +1405,37 @@ test("protected Bash component and reviewer ask share one dialog", async (t) => 
   );
 });
 
+test("reviewer hard deny blocks a protected compound with zero dialogs", async (t) => {
+  const { ctx, calls } = context();
+  const unmatched = "obsidian create path=x";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "block", tier: "hard_deny", reason: "hard restriction" },
+  }));
+  const call = event(`cat .pi/pi-auto-approval/auto-permissions.json && ${unmatched}`);
+  assert.deepEqual(await handleToolCall(call, ctx, () => config([], "auto"), { review }), {
+    block: true,
+    reason: blockReason("reviewer", "hard restriction"),
+  });
+  assert.deepEqual(
+    review.mock.calls.map(({ arguments: [input] }) => input.command),
+    [unmatched],
+  );
+  assert.equal(calls.length, 0);
+});
+
 test("headless compound stays blocked when the unmatched component is approved", async (t) => {
   const { ctx, calls } = context({ hasUI: false });
   const protectedComponent = "cat .pi/pi-auto-approval/auto-permissions.json";
   const unmatchedComponent = "obsidian create path=x";
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   const call = event(`${protectedComponent} && ${unmatchedComponent}`);
   assert.deepEqual(await handleToolCall(call, ctx, () => config([], "auto"), { review }), {
     block: true,
-    reason: `Changes auto-approval protected file ${protectedComponent}`,
+    reason: blockReason("protected path", `Changes auto-approval protected file ${protectedComponent}`),
   });
   assert.deepEqual(
     review.mock.calls.map(({ arguments: [input] }) => input.command),
@@ -1346,7 +1449,7 @@ test("Bash allow cannot approve a protected component", async (t) => {
   const command = "cat AUTO-PERMISSIONS.JSON";
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   const rules = [parsedRule(`Bash(${command})`, "allow")];
   assert.equal(await handleToolCall(event(command), ctx, () => config(rules, "auto"), { review }), undefined);
@@ -1359,7 +1462,7 @@ test("unsupported Bash with protected text asks once without review", async (t) 
   const { ctx, calls } = context();
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   const commands = [
     "echo '{}' > ~/.pi/pi-auto-approval/x",
@@ -1383,7 +1486,7 @@ test("protection off bypasses protected Write and Bash checks", async (t) => {
   const load = () => ({ ...config([], "auto"), enabled: false });
   const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
     ok: true,
-    verdict: { decision: "approve", reason: "ok" },
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
   }));
   assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
   assert.equal(await handleToolCall(event(`cat ${path}`), ctx, load, { review }), undefined);
@@ -1400,7 +1503,7 @@ for (const source of ["local", "shared"] as const) {
     const deps = {
       review: async () => {
         reviews++;
-        return { ok: true as const, verdict: { decision: "approve" as const, reason: "ok" } };
+        return { ok: true as const, verdict: { decision: "approve" as const, tier: "none" as const, reason: "ok" } };
       },
     };
     assert.equal(await handleToolCall(event("unmatched-command"), ctx, load, deps), undefined);
@@ -1431,7 +1534,7 @@ for (const { name, trusted, shared, local } of [
       await handleToolCall(event("unmatched-command"), ctx, load, {
         review: async () => {
           reviews++;
-          return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+          return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
         },
       }),
       undefined,
@@ -1456,13 +1559,13 @@ test("untrusted shared and local deny and ask rules apply without a D25 notice",
     ["local", "auto-permissions.local.json"],
   ] as const) {
     for (const [level, reason] of [
-      ["deny", "Blocked by auto-approval"],
-      ["ask", "Requires confirmation"],
+      ["deny", "Blocked by auto-approval (deny rule): ("],
+      ["ask", "Blocked by auto-approval (no UI): Requires confirmation ("],
     ] as const) {
       const decision = await handleToolCall(event(`echo ${source}-${level}`), ctx, load);
       assert.ok(decision);
       assert.ok(decision.reason.startsWith(reason));
-      assert.ok(decision.reason.endsWith(`${file})`));
+      assert.ok(decision.reason.includes(`${file})`));
     }
   }
   assert.deepEqual(
@@ -1527,7 +1630,7 @@ test("status disabled hides reports without changing enforcement", async () => {
   const convention = await handleToolCall(event(), trusted.ctx, () => hiddenConfig([rule("deny")]), {
     status: (report) => statuses.push(typeof report === "string" ? report : report.state),
   });
-  assert.equal(convention?.reason, "Blocked by auto-approval (danger command, global.json)");
+  assert.equal(convention?.reason, blockReason("deny rule", "(danger command, global.json)"));
   assert.equal(statuses.length, 0);
 });
 
@@ -1552,7 +1655,7 @@ test("status reporter failures do not change allow or block decisions", async ()
   assert.match((await handleToolCall(event(), denied.ctx, loadConfig, { status: throwing }))!.reason, /user declined/);
   assert.equal(
     (await handleToolCall(event(), context().ctx, () => config([rule("deny")]), { status: throwing }))?.reason,
-    "Blocked by auto-approval (danger command, global.json)",
+    blockReason("deny rule", "(danger command, global.json)"),
   );
 });
 
@@ -1767,7 +1870,7 @@ async function factoryHarness(
     uiStatus = true,
     debug = true,
     guardian = false,
-    reply = '{"decision":"approve","reason":"Allowed."}',
+    reply = '{"decision":"approve","tier":"none","reason":"Allowed."}',
     branch = [],
   }: {
     group?: string;
@@ -1910,7 +2013,7 @@ test("malformed revision evidence uses human confirmation and resets reviewer li
         messages.push(String(message));
         return accepted;
       },
-      { guardian: true, reply: '{"decision":"revise","reason":"unsupported restriction"}' },
+      { guardian: true, reply: '{"decision":"revise","tier":"none","reason":"unsupported restriction"}' },
     );
     for (let attempt = 0; attempt < 2; attempt++) assert.equal((await h.invoke()) === undefined, accepted);
     assert.equal(messages.length, 2);
@@ -2008,10 +2111,10 @@ test("factory reviews an unmatched non-bash call with full arguments and shows i
   );
 });
 
-test("guardian ask_user without UI blocks; parent cancellation never prompts", async () => {
+test("guardian soft_deny without UI blocks; parent cancellation never prompts", async () => {
   const noUi = context({ hasUI: false });
   const needsUser = await handleToolCall(event(), noUi.ctx, () => config([], "auto"), {
-    review: async () => ({ ok: true, verdict: { decision: "ask_user", reason: "Confirm this." } }),
+    review: async () => ({ ok: true, verdict: { decision: "block", tier: "soft_deny", reason: "Confirm this." } }),
   });
   assert.equal(needsUser?.block, true);
   assert.match(needsUser!.reason, /Reviewer needs user approval: Confirm this/);
@@ -2034,7 +2137,7 @@ test("guardian cancellation after automatic approval blocks", async () => {
   const statuses: string[] = [];
   const { ctx, calls } = context({ signal: controller.signal });
   const result = await handleToolCall(event(), ctx, () => config([], "auto"), {
-    review: async () => ({ ok: true, verdict: { decision: "approve", reason: "Allowed." } }),
+    review: async () => ({ ok: true, verdict: { decision: "approve", tier: "none", reason: "Allowed." } }),
     status: (state) => {
       statuses.push(typeof state === "string" ? state : state.state);
       if (state.state === "approved") controller.abort();
@@ -2072,7 +2175,7 @@ test("guardian bypasses reviewer for trusted, convention, and unmatched routes",
   const deps = {
     review: async () => {
       reviews++;
-      return { ok: true as const, verdict: { decision: "approve" as const, reason: "ok" } };
+      return { ok: true as const, verdict: { decision: "approve" as const, tier: "none" as const, reason: "ok" } };
     },
   };
   assert.equal(
@@ -2083,7 +2186,7 @@ test("guardian bypasses reviewer for trusted, convention, and unmatched routes",
   );
   assert.equal(
     (await handleToolCall(event(), ctx, () => config([rule("deny")], "auto"), deps))?.reason,
-    "Blocked by auto-approval (danger command, global.json)",
+    blockReason("deny rule", "(danger command, global.json)"),
   );
   assert.equal(await handleToolCall(event("noop-cmd safe"), ctx, () => config([], "auto"), deps), undefined);
   assert.equal(reviews, 1, "unmatched auto command must be reviewed");
@@ -2120,7 +2223,7 @@ test("guardian-on factory reviews live evidence, filters the pending call, and r
       assert.match(String(message), /Reviewer needs user approval: Confirm the target/);
       return true;
     },
-    { guardian: true, reply: '{"decision":"ask_user","reason":"Confirm the target."}' },
+    { guardian: true, reply: '{"decision":"block","tier":"soft_deny","reason":"Confirm the target."}' },
   );
   assert.equal(await ask.invoke(), undefined);
 });
@@ -2172,13 +2275,21 @@ test("createPiReviewer uses the active or explicitly selected model and parses r
     rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: undefined,
   };
   const activeReview = createPiReviewer(
-    makeCtx({ stopReason: "stop", content: [{ type: "text", text: '{"decision":"approve","reason":"Low risk."}' }] }),
+    makeCtx({
+      stopReason: "stop",
+      content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"Low risk."}' }],
+    }),
     createReviewerState(),
   );
-  assert.deepEqual(await activeReview(input), { ok: true, verdict: { decision: "approve", reason: "Low risk." } });
+  assert.deepEqual(await activeReview(input), {
+    ok: true,
+    verdict: { decision: "approve", tier: "none", reason: "Low risk." },
+  });
   assert.deepEqual((used[0] as unknown[])[0], active);
 
   const selectedInput = {
@@ -2216,6 +2327,8 @@ test("createPiReviewer fails closed when the active or selected model is missing
     rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: undefined,
   };
 
@@ -2270,12 +2383,14 @@ test("createPiReviewer rejects every non-stop reason and request failures", asyn
     rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: undefined,
   };
   for (const stopReason of ["error", "aborted", "length", "toolUse", "pending", "deferred", "other"]) {
     const result = await reviewer(async () => ({
       stopReason,
-      content: [{ type: "text", text: '{"decision":"approve","reason":"Allowed."}' }],
+      content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"Allowed."}' }],
       errorMessage: "provider error",
     }))(input);
     assert.equal(result.ok, false, stopReason);
@@ -2283,9 +2398,9 @@ test("createPiReviewer rejects every non-stop reason and request failures", asyn
   assert.deepEqual(
     await reviewer(async () => ({
       stopReason: "stop",
-      content: [{ type: "text", text: '{"decision":"approve","reason":"Allowed."}' }],
+      content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"Allowed."}' }],
     }))(input),
-    { ok: true, verdict: { decision: "approve", reason: "Allowed." } },
+    { ok: true, verdict: { decision: "approve", tier: "none", reason: "Allowed." } },
   );
   for (const result of [
     reviewer(async () => {
@@ -2325,6 +2440,8 @@ test("createPiReviewer observes parent cancellation and retries accumulated budg
     rule: rule(),
     reviewer: reviewerConfig({ timeoutMs: 1_000 }),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: controller.signal,
   };
   const pending = createPiReviewer(base, createReviewerState())(input);
@@ -2353,7 +2470,7 @@ test("createPiReviewer observes parent cancellation and retries accumulated budg
         return {
           result: async () => ({
             stopReason: "stop",
-            content: [{ type: "text", text: '{"decision":"approve","reason":"Allowed."}' }],
+            content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"Allowed."}' }],
             usage: { input: 1, cacheRead: 0, cacheWrite: 0 },
           }),
         };
@@ -2424,7 +2541,7 @@ test("reviewer serializes shared-state calls, preserves successful lineage, and 
         return {
           result: async () => ({
             stopReason: "stop",
-            content: [{ type: "text", text: '{"decision":"approve","reason":"ok"}' }],
+            content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"ok"}' }],
             usage: { input: 10, cacheRead: 0, cacheWrite: 0 },
           }),
         };
@@ -2438,6 +2555,8 @@ test("reviewer serializes shared-state calls, preserves successful lineage, and 
     rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: undefined,
   };
   const first = review(input);
@@ -2446,7 +2565,7 @@ test("reviewer serializes shared-state calls, preserves successful lineage, and 
   assert.equal(calls.length, 1);
   release({
     stopReason: "stop",
-    content: [{ type: "text", text: '{"decision":"approve","reason":"ok"}' }],
+    content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"ok"}' }],
     usage: { input: 10, cacheRead: 0, cacheWrite: 0 },
   });
   assert.equal((await first).ok, true);
@@ -2510,7 +2629,9 @@ test("projection adapter uses installed compaction/context-edit semantics and ig
           return {
             result: async () => ({
               stopReason: "stop",
-              content: [{ type: "text", text: '{"decision":"ask_user","reason":"Need confirmation."}' }],
+              content: [
+                { type: "text", text: '{"decision":"block","tier":"soft_deny","reason":"Need confirmation."}' },
+              ],
               usage: { input: 1, cacheRead: 0, cacheWrite: 0 },
             }),
           };
@@ -2523,6 +2644,8 @@ test("projection adapter uses installed compaction/context-edit semantics and ig
     command: "dangerous",
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: undefined,
   });
   assert.equal(result.ok, true);
@@ -2555,7 +2678,7 @@ test("reviewer resets seeded lineage for fingerprint and effective-evidence chan
         return {
           result: async () => ({
             stopReason: "stop",
-            content: [{ type: "text", text: '{"decision":"approve","reason":"ok"}' }],
+            content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"ok"}' }],
             usage: { input: 1, cacheRead: 0, cacheWrite: 0 },
           }),
         };
@@ -2569,6 +2692,8 @@ test("reviewer resets seeded lineage for fingerprint and effective-evidence chan
     rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: undefined,
   };
   const seed = async (reviewInput = input) => {
@@ -2629,7 +2754,10 @@ test("reviewer failures discard shared lineage and queued requests recover fresh
             return {
               stopReason: "stop",
               content: [
-                { type: "text", text: mode === "malformed" ? "not json" : '{"decision":"approve","reason":"ok"}' },
+                {
+                  type: "text",
+                  text: mode === "malformed" ? "not json" : '{"decision":"approve","tier":"none","reason":"ok"}',
+                },
               ],
               usage: { input: 1, cacheRead: 0, cacheWrite: 0 },
             };
@@ -2644,6 +2772,8 @@ test("reviewer failures discard shared lineage and queued requests recover fresh
     rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: undefined,
   };
   assert.equal((await review(input)).ok, true);
@@ -2687,7 +2817,7 @@ test("reviewer compares five chronological steps against fresh verdicts and pres
           options: { sessionId: options.sessionId, cacheRetention: options.cacheRetention },
         });
         const prompt = JSON.stringify(context.messages);
-        const decision = /forbid/.test(prompt) ? "revise" : /unclear/.test(prompt) ? "ask_user" : "approve";
+        const decision = /forbid/.test(prompt) ? "revise" : /unclear/.test(prompt) ? "block" : "approve";
         replies.push(decision);
         return {
           result: async () => ({
@@ -2697,6 +2827,7 @@ test("reviewer compares five chronological steps against fresh verdicts and pres
                 type: "text",
                 text: JSON.stringify({
                   decision,
+                  tier: decision === "block" ? "soft_deny" : "none",
                   reason: decision,
                   ...(decision === "revise" ? { constraint: "forbidden target", source: "user evidence" } : {}),
                 }),
@@ -2713,6 +2844,8 @@ test("reviewer compares five chronological steps against fresh verdicts and pres
     rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: undefined,
   };
   const reusedState = createReviewerState();
@@ -2803,7 +2936,7 @@ test("synchronous abort during stream setup cannot hang or commit abandoned repl
         return {
           result: async () => ({
             stopReason: "stop",
-            content: [{ type: "text", text: '{"decision":"approve","reason":"ok"}' }],
+            content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"ok"}' }],
             usage: { input: 1, cacheRead: 0, cacheWrite: 0 },
           }),
         };
@@ -2817,6 +2950,8 @@ test("synchronous abort during stream setup cannot hang or commit abandoned repl
     rule: rule(),
     reviewer: reviewerConfig(),
     reviewEvidence: { projectInstructions: false },
+    policy: DEFAULT_REVIEWER_POLICY,
+    projectTrusted: true,
     signal: controller.signal,
   };
   const result = await review(input);
@@ -2827,7 +2962,7 @@ test("synchronous abort during stream setup cannot hang or commit abandoned repl
   const recoveredSession = state.lineage!.sessionId;
   resolveAbandoned({
     stopReason: "stop",
-    content: [{ type: "text", text: '{"decision":"approve","reason":"late"}' }],
+    content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"late"}' }],
     usage: { input: 1, cacheRead: 0, cacheWrite: 0 },
   });
   await new Promise((resolve) => setImmediate(resolve));
@@ -2889,7 +3024,6 @@ test("project instruction files stay system-only, are trust-gated, and edits res
     const ctx = {
       cwd,
       model: { provider: "p", id: "m", api: "fake", baseUrl: "", contextWindow: 128_000 },
-      isProjectTrusted: () => trusted,
       sessionManager: {
         getSessionId: () => "main",
         buildSessionProjection: () => ({
@@ -2905,7 +3039,7 @@ test("project instruction files stay system-only, are trust-gated, and edits res
           return {
             result: async () => ({
               stopReason: "stop",
-              content: [{ type: "text", text: '{"decision":"ask_user","reason":"Confirm."}' }],
+              content: [{ type: "text", text: '{"decision":"block","tier":"soft_deny","reason":"Confirm."}' }],
               usage: { input: 1, cacheRead: 0, cacheWrite: 0 },
             }),
           };
@@ -2918,22 +3052,24 @@ test("project instruction files stay system-only, are trust-gated, and edits res
       rule: rule(),
       reviewer: reviewerConfig(),
       reviewEvidence: { projectInstructions: true },
+      policy: DEFAULT_REVIEWER_POLICY,
+      projectTrusted: true,
       signal: undefined,
     };
     assert.equal((await reviewer(input)).ok, true);
     assert.match(calls[0].context.systemPrompt, /Never run destructive commands/);
     assert.doesNotMatch(calls[0].context.messages[0].content[0].text, /Never run destructive commands/);
     trusted = false;
-    await reviewer(input);
+    await reviewer({ ...input, projectTrusted: trusted });
     assert.doesNotMatch(calls.at(-1).context.systemPrompt, /Never run destructive commands/);
     trusted = true;
     writeFileSync(path, "Updated: never run anything.\n");
-    await reviewer(input);
+    await reviewer({ ...input, projectTrusted: trusted });
     assert.match(calls.at(-1).context.systemPrompt, /Updated: never run anything/);
     assert.equal(calls.at(-1).context.messages.length, 1);
     rmSync(path);
     mkdirSync(path);
-    const failed = await reviewer(input);
+    const failed = await reviewer({ ...input, projectTrusted: trusted });
     assert.equal(failed.ok, false);
     assert.equal(calls.length, 3);
   } finally {
@@ -3110,7 +3246,10 @@ test("menu cancels active and queued model reviews without late approval or fall
       new Set(["auto-approval:1", "auto-approval:2"]),
     );
     assert.equal(streams, 1, "queued cancelled review cannot call provider");
-    late.resolve({ stopReason: "stop", content: [{ type: "text", text: '{"decision":"approve","reason":"late"}' }] });
+    late.resolve({
+      stopReason: "stop",
+      content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"late"}' }],
+    });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(
       h.setWidget.mock.calls.some((call) => JSON.stringify(call.arguments).includes("approved")),
@@ -3162,7 +3301,10 @@ test("external edits do not cancel pending review and session overrides persist 
   const pending = h.invoke();
   await started.promise;
   writeFileSync(join(h.globalDir, "auto-permissions.json"), "{broken");
-  reply.resolve({ stopReason: "stop", content: [{ type: "text", text: '{"decision":"approve","reason":"ok"}' }] });
+  reply.resolve({
+    stopReason: "stop",
+    content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"ok"}' }],
+  });
   assert.equal(await pending, undefined);
   assert.match(((await h.invoke()) as { reason: string }).reason, /invalid config/);
   await h.menu("Protection off");
@@ -3195,7 +3337,7 @@ test("authorization routes enforce priority, attribution, trust and unsupported 
   const deps = {
     review: async () => {
       reviews++;
-      return { ok: true as const, verdict: { decision: "approve" as const, reason: "ok" } };
+      return { ok: true as const, verdict: { decision: "approve" as const, tier: "none" as const, reason: "ok" } };
     },
   };
   for (const mode of ["manual", "auto"] as const) {
@@ -3306,7 +3448,8 @@ const historyLog = () => {
     },
   };
 };
-const approveReview = () => async () => ({ ok: true, verdict: { decision: "approve", reason: "Safe." } }) as never;
+const approveReview = () => async () =>
+  ({ ok: true, verdict: { decision: "approve", tier: "none", reason: "Safe." } }) as never;
 const historyFields = (row: Record<string, unknown>) => ({
   tool: row.tool,
   command: row.command,
@@ -3383,7 +3526,7 @@ test("terminal history covers AI approve, revise, no-UI blocks, and failed confi
         review: async () =>
           ({
             ok: true,
-            verdict: { decision: "revise", reason: "Narrow it.", constraint: "target", source: "user" },
+            verdict: { decision: "revise", tier: "none", reason: "Narrow it.", constraint: "target", source: "user" },
           }) as never,
         history: revised.history,
       })

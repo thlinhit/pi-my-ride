@@ -121,7 +121,7 @@ const scenarios: Scenario[] = [
   {
     name: "review approve",
     config: { reviewMode: "auto" },
-    reply: '{"decision":"approve","reason":"safe"}',
+    reply: '{"decision":"approve","tier":"none","reason":"safe"}',
     expectedStatuses: ["guardian-running", "approved"],
     expectedConfirmations: 0,
     expectedProviderCalls: 2,
@@ -129,7 +129,7 @@ const scenarios: Scenario[] = [
   {
     name: "review revise",
     config: { reviewMode: "auto" },
-    reply: '{"decision":"revise","reason":"change target","constraint":"target","source":"user"}',
+    reply: '{"decision":"revise","tier":"none","reason":"change target","constraint":"target","source":"user"}',
     expectedStatuses: [
       "guardian-running",
       "revision-requested",
@@ -142,9 +142,9 @@ const scenarios: Scenario[] = [
     expectedProviderCalls: 2,
   },
   {
-    name: "review ask_user",
+    name: "review soft_deny",
     config: { reviewMode: "auto" },
-    reply: '{"decision":"ask_user","reason":"confirm target"}',
+    reply: '{"decision":"block","tier":"soft_deny","reason":"confirm target"}',
     expectedStatuses: ["guardian-running", "approval-required", "approved"],
     expectedConfirmations: 1,
     expectedProviderCalls: 2,
@@ -155,7 +155,7 @@ const scenarios: Scenario[] = [
     reply: "not JSON",
     expectedStatuses: ["guardian-running", "approval-required", "approved"],
     expectedConfirmations: 1,
-    expectedProviderCalls: 2,
+    expectedProviderCalls: 4,
   },
   {
     name: "review provider failure fallback",
@@ -249,7 +249,9 @@ async function runFactoryScenario(scenario: Scenario, placement: "widget" | "too
               if (scenario.reply === "provider-error") throw new Error("mock provider rejection");
               return {
                 stopReason: "stop",
-                content: [{ type: "text", text: scenario.reply ?? '{"decision":"approve","reason":"ok"}' }],
+                content: [
+                  { type: "text", text: scenario.reply ?? '{"decision":"approve","tier":"none","reason":"ok"}' },
+                ],
                 usage: { input: 20, cacheRead: 0, cacheWrite: 0 },
               };
             },
@@ -462,7 +464,7 @@ async function runFactoryScenario(scenario: Scenario, placement: "widget" | "too
 
 const REVIEW_REPLY = {
   role: "assistant",
-  content: [{ type: "text", text: '{"decision":"approve","reason":"ok"}' }],
+  content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"ok"}' }],
   stopReason: "stop",
   usage: { input: 20, cacheRead: 0, cacheWrite: 0 },
 };
@@ -832,7 +834,7 @@ test("connected reviewer cancellation ignores a late approval and permits a fres
       const widgetKey = cancelled.widgets[0]?.[0];
       finishReview({
         stopReason: "stop",
-        content: [{ type: "text", text: '{"decision":"approve","reason":"late"}' }],
+        content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"late"}' }],
         usage: { input: 10, cacheRead: 0, cacheWrite: 0 },
       });
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1036,8 +1038,7 @@ test("connected fresh evidence overflow confirms or blocks with the exact budget
             ? undefined
             : {
                 block: true,
-                reason:
-                  "Automatic review failed: compact review evidence exceeds the review model's safe context budget (user declined)",
+                reason: `Blocked by auto-approval (user): Automatic review failed: compact review evidence exceeds the review model's safe context budget (user declined)\nThe tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script).`,
               },
         );
         assert.deepEqual(
@@ -1183,7 +1184,10 @@ test("connected reviewer timeout falls back to confirmation and ignores a late d
       );
       const widgetsBefore = harness.widgets.length;
       const framesBefore = harness.rows[0]?.frames.length ?? 0;
-      settleLate({ ...REVIEW_REPLY, content: [{ type: "text", text: '{"decision":"approve","reason":"late"}' }] });
+      settleLate({
+        ...REVIEW_REPLY,
+        content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"late"}' }],
+      });
       await new Promise<void>((resolve) => setImmediate(resolve));
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert.equal(harness.widgets.length, widgetsBefore, `${placement}: late reviewer reply publishes no widget`);

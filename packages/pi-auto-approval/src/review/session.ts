@@ -1,12 +1,10 @@
 import type { AssistantMessage, Context, Message, Model, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import type { Api } from "@earendil-works/pi-ai";
 import { randomUUID } from "node:crypto";
-import type { ReviewEvidenceConfig, ReviewerConfig } from "../config.ts";
+import type { ReviewEvidenceConfig, ReviewerConfig, ReviewerPolicy } from "../config.ts";
 import { loadProjectInstructions } from "../config.ts";
 import {
   BUDGET_EXCEEDED_ERROR,
-  DEFAULT_REVIEWER_POLICY,
-  DEFAULT_TRUSTED_ENVIRONMENT,
   buildReviewPrompt,
   buildSystemPrompt,
   collectEvidence,
@@ -29,6 +27,8 @@ export interface ReviewInput {
   readonly arguments?: unknown;
   readonly reviewer: ReviewerConfig;
   readonly reviewEvidence: ReviewEvidenceConfig;
+  readonly policy: ReviewerPolicy;
+  readonly projectTrusted: boolean;
   readonly signal: AbortSignal | undefined;
 }
 export type Reviewer = (input: ReviewInput) => Promise<ReviewResult>;
@@ -36,7 +36,6 @@ export type Reviewer = (input: ReviewInput) => Promise<ReviewResult>;
 export interface ReviewContext {
   readonly cwd: string;
   readonly model: Model<Api> | undefined;
-  isProjectTrusted(): boolean;
   readonly sessionManager: {
     getSessionId(): string;
     buildSessionProjection(): {
@@ -119,12 +118,9 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     ]);
     if (signal.aborted) throw new Error("review timed out or was cancelled");
     const mainSessionId = ctx.sessionManager.getSessionId();
-    const projectTrusted = ctx.isProjectTrusted();
+    const { policy, projectTrusted } = input;
     const projectInstructions =
       input.reviewEvidence.projectInstructions && projectTrusted ? loadProjectInstructions(ctx.cwd) : undefined;
-    const policy = projectTrusted
-      ? { ...DEFAULT_REVIEWER_POLICY, environment: DEFAULT_TRUSTED_ENVIRONMENT }
-      : DEFAULT_REVIEWER_POLICY;
     const systemPrompt = buildSystemPrompt(policy, input.reviewer.extraInstructions, projectInstructions);
     const fingerprint = reviewerFingerprint({
       mainSessionId,

@@ -171,7 +171,7 @@ test("menu and footer show trusted settings and session choices beat both files 
       {
         review: async () => {
           reviews++;
-          return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+          return { ok: true, verdict: { decision: "approve", tier: "none", reason: "ok" } };
         },
       },
       h.controller.snapshot(),
