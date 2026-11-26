@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RuleLevel } from "./config.ts";
 import { foldPath, resolvePathForPolicy } from "./paths.ts";
@@ -106,20 +106,40 @@ function bashMatches(specifier: string, command: string, scanSegments: boolean):
     .split(SHELL_SEGMENT_DELIMITER)
     .some((segment) => segment.trim() !== "" && matchesText(specifier, segment.trim(), false));
 }
-function filePatternMatches(specifier: string, actual: string, cwd: string, folded: boolean): boolean {
+function filePatternMatches(
+  specifier: string,
+  actual: string,
+  cwd: string,
+  folded: boolean,
+  resolveAnchor = false,
+): boolean {
   const compare = folded ? foldPath : (path: string) => path;
   const isUrl = specifier.startsWith("file://");
   const decoded = isUrl ? fileURLToPath(specifier) : specifier;
+  const isHomeRelative = specifier.startsWith("~/");
   const home = homedir();
+  let anchor = cwd;
+  let pattern = specifier;
+  if (resolveAnchor && !isUrl && !isHomeRelative && !isAbsolute(specifier)) {
+    // Pi applies leading dot segments to the lexical cwd before following symlinks.
+    const dots = sep === "\\" ? /^(?:\.{1,2}(?:[/\\]+|$))+/ : /^(?:\.{1,2}(?:\/+|$))+/;
+    const leading = dots.exec(specifier)?.[0] ?? "";
+    try {
+      anchor = resolvePathForPolicy(leading, cwd);
+    } catch {
+      return false; // No resolved match; deny and ask already checked the lexical path.
+    }
+    pattern = specifier.slice(leading.length);
+  }
   // Mark written wildcards before URL decoding or adding literal cwd/HOME characters.
   // An uncased marker preserves case folding, and its opening bracket cannot overlap its suffix.
   let nonce = 0;
   let wildcard = `[${nonce}]`;
-  while ([specifier, decoded, cwd, home].some((value) => value.includes(wildcard))) wildcard = `[${++nonce}]`;
-  let configured = specifier.replaceAll("*", wildcard);
+  while ([specifier, decoded, anchor, home].some((value) => value.includes(wildcard))) wildcard = `[${++nonce}]`;
+  let configured = pattern.replaceAll("*", wildcard);
   if (isUrl) configured = fileURLToPath(configured);
-  else if (configured.startsWith("~/")) configured = join(home, configured.slice(2));
-  return globRegex(compare(resolve(cwd, configured)), true, wildcard).test(compare(actual));
+  else if (isHomeRelative) configured = join(home, configured.slice(2));
+  return globRegex(compare(resolve(anchor, configured)), true, wildcard).test(compare(actual));
 }
 
 export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string, scanSegments = true): boolean {
@@ -138,15 +158,12 @@ export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string, s
     const actual = rule.tool === "read" ? resolveReadPath(call.input.path, cwd) : lexical;
     if (folded && actual !== lexical && filePatternMatches(rule.specifier, actual, cwd, true)) return true;
     let resolved: string;
-    let resolvedCwd: string;
     try {
       resolved = resolvePathForPolicy(actual);
-      // Resolve the anchor for relative rules, not the rule's own path components.
-      resolvedCwd = resolvePathForPolicy(cwd);
     } catch {
       return folded; // With no reliable target, deny or ask rather than grant access.
     }
-    return filePatternMatches(rule.specifier, resolved, resolvedCwd, folded);
+    return filePatternMatches(rule.specifier, resolved, cwd, folded, true);
   }
   return false;
 }

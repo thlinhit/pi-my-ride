@@ -84,6 +84,50 @@ test("allow matches the symlink target but not the link directory", (t) => {
   assert.equal(ruleMatches(parse("Edit(./link/**)"), edit, cwd), false);
 });
 
+test("parent-relative rules use the lexical parent of a symlinked cwd", (t) => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "permissions-linked-parent-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cwd = join(root, "lexical", "project");
+  mkdirSync(join(root, "lexical", "docs"), { recursive: true });
+  mkdirSync(join(root, "physical", "project"), { recursive: true });
+  mkdirSync(join(root, "physical", "docs"));
+  symlinkSync(join(root, "physical", "project"), cwd);
+  symlinkSync(join(root, "lexical", "docs"), join(cwd, "docs-link"));
+  const pattern = "Edit(../docs/**)";
+  const lexicalEdit = call("edit", { path: "../docs/x.md" });
+  const linkedEdit = call("edit", { path: "./docs-link/x.md" });
+  const physicalEdit = call("edit", { path: join(root, "physical", "docs", "x.md") });
+
+  assert.deepEqual(
+    [
+      ruleMatches(parse(pattern, "deny"), lexicalEdit, cwd),
+      ruleMatches(parse(pattern, "ask"), lexicalEdit, cwd),
+      ruleMatches(parse(pattern, "deny"), linkedEdit, cwd),
+      ruleMatches(parse(pattern, "ask"), linkedEdit, cwd),
+      ruleMatches(parse(pattern), lexicalEdit, cwd),
+      ruleMatches(parse(pattern), physicalEdit, cwd),
+    ],
+    [true, true, true, true, true, false],
+  );
+});
+
+test("deny and ask match only the folded resolved target through a symlinked cwd", (t) => {
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "permissions-linked-folded-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cwd = join(root, "lexical", "project");
+  const project = join(root, "physical", "project");
+  mkdirSync(join(root, "lexical"));
+  mkdirSync(join(project, "DOCS"), { recursive: true });
+  symlinkSync(project, cwd);
+  symlinkSync("DOCS", join(project, "alias"));
+  const edit = call("edit", { path: "./alias/x.md" });
+  const pattern = "Edit(./docs/**)";
+
+  assert.equal(ruleMatches(parse(pattern, "deny"), edit, cwd), true);
+  assert.equal(ruleMatches(parse(pattern, "ask"), edit, cwd), true);
+  assert.equal(ruleMatches(parse(pattern), edit, cwd), false);
+});
+
 test("allow stays case-sensitive and deny folds case even on a missing path", (t) => {
   const cwd = mkdtempSync(join(tmpdir(), "permissions-case-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
