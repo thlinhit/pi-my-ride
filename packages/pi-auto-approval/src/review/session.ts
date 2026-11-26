@@ -132,26 +132,75 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
       discard(); return { ok: false, error: BUDGET_EXCEEDED_ERROR };
     }
     const sessionId = base?.sessionId ?? `ap-review-${randomUUID()}`;
-    if (signal.aborted) throw new Error("review timed out or was cancelled");
-    const pending = ctx.modelRegistry.streamSimple(model, { systemPrompt, messages }, { reasoning: input.reviewer.reasoningEffort, signal, sessionId, cacheRetention: "long" }).result();
-    let abortListener: (() => void) | undefined;
-    const aborted = new Promise<never>((_, reject) => {
-      abortListener = () => reject(new Error("review timed out or was cancelled"));
-      signal.addEventListener("abort", abortListener, { once: true });
-      if (signal.aborted) abortListener();
-    });
-    let msg: AssistantMessage;
-    try { msg = await Promise.race([pending, aborted]); }
-    finally { if (abortListener) signal.removeEventListener("abort", abortListener); void pending.catch(() => {}); }
-    if (signal.aborted || msg.stopReason === "aborted") throw Object.assign(new Error("review timed out or was cancelled"), { cancelled: input.signal?.aborted === true || msg.stopReason === "aborted" });
-    if (msg.stopReason === "error") throw new Error(msg.errorMessage ?? "reviewer request failed");
-    if (msg.stopReason !== "stop") throw new Error("reviewer did not finish normally");
-    const parsed = parseVerdict(msg.content.filter((part) => part.type === "text").map((part) => part.text).join(""));
-    if (!parsed.ok) throw new Error(parsed.error);
-    if (signal.aborted) throw new Error("review timed out or was cancelled");
-    if (parsed.verdict.decision === "revise") discard();
-    else state.lineage = { fingerprint, sessionId, records, messages: [...messages, msg], lastPromptTokens: promptTokens(msg.usage) };
-    return parsed;
+    let retryMessages: Message[] | undefined;
+    while (true) {
+      if (signal.aborted) throw new Error("review timed out or was cancelled");
+      const pending = ctx.modelRegistry
+        .streamSimple(
+          model,
+          { systemPrompt, messages: retryMessages ?? messages },
+          { reasoning: input.reviewer.reasoningEffort, signal, sessionId, cacheRetention: "long" },
+        )
+        .result();
+      let abortListener: (() => void) | undefined;
+      const aborted = new Promise<never>((_, reject) => {
+        abortListener = () => reject(new Error("review timed out or was cancelled"));
+        signal.addEventListener("abort", abortListener, { once: true });
+        if (signal.aborted) abortListener();
+      });
+      let msg: AssistantMessage;
+      try {
+        msg = await Promise.race([pending, aborted]);
+      } finally {
+        if (abortListener) signal.removeEventListener("abort", abortListener);
+        void pending.catch(() => {});
+      }
+      if (signal.aborted || msg.stopReason === "aborted") {
+        throw Object.assign(new Error("review timed out or was cancelled"), {
+          cancelled: input.signal?.aborted === true || msg.stopReason === "aborted",
+        });
+      }
+      if (msg.stopReason === "error") throw new Error(msg.errorMessage ?? "reviewer request failed");
+      if (msg.stopReason !== "stop") throw new Error("reviewer did not finish normally");
+      const parsed = parseVerdict(
+        msg.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join(""),
+      );
+      if (signal.aborted) throw new Error("review timed out or was cancelled");
+      if (!parsed.ok) {
+        if (retryMessages) throw new Error(parsed.error);
+        retryMessages = [
+          ...messages,
+          msg,
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `${parsed.error}. Re-answer the same review with one JSON object containing decision, tier, and a nonempty reason. Valid decision/tier pairs: approve (allow, user_intent, none); block (hard_deny, soft_deny); revise (none, plus nonempty constraint and source fields).`,
+              },
+            ],
+            timestamp: Date.now(),
+          },
+        ];
+        if (estimateTokens(systemPrompt, retryMessages) >= budget) throw new Error(BUDGET_EXCEEDED_ERROR);
+        continue;
+      }
+      if (parsed.verdict.decision === "revise") discard();
+      else {
+        state.lineage = {
+          fingerprint,
+          // The clean transcript no longer matches the provider's retry conversation.
+          sessionId: retryMessages ? `ap-review-${randomUUID()}` : sessionId,
+          records,
+          messages: [...messages, msg],
+          lastPromptTokens: promptTokens(msg.usage),
+        };
+      }
+      return parsed;
+    }
   } catch (error) {
     discard();
     return { ok: false, error: error instanceof Error ? error.message : String(error), ...((input.signal?.aborted || (error && typeof error === "object" && "cancelled" in error && error.cancelled === true)) ? { cancelled: true as const } : {}) };

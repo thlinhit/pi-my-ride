@@ -1073,7 +1073,10 @@ test("factory gates a non-bash call under the same single confirmation lock", as
 
 test("factory reviews an unmatched non-bash call with full arguments and shows it in the widget", async (t) => {
   const content = "z".repeat(3000);
-  const h = await factoryHarness(t, async () => true, { guardian: true });
+  const h = await factoryHarness(t, async () => true, {
+    guardian: true,
+    reply: '{"decision":"approve","tier":"none","reason":"Allowed."}',
+  });
   assert.equal(await h.invokeTool("write", { path: "notes.md", content }, "write-review"), undefined);
   assert.equal(h.prompts.length, 1);
   assert.match(h.prompts[0]!, /"tool": "write"/);

@@ -419,7 +419,11 @@ test("connected abort cancels an in-flight fallback confirmation and retains its
       const recovered = await harness.call();
       assert.equal(recovered.result, undefined, `${placement}: settled confirmation releases the lock`);
       assert.equal(promptCalls, 2);
-      assert.equal(harness.providerRequests.length, 6, "three original calls review two components each");
+      assert.equal(
+        harness.providerRequests.length,
+        12,
+        "three calls review two components each, with one retry per component",
+      );
     } finally {
       harness.close();
     }
@@ -439,7 +443,11 @@ test("connected reviewer cancellation ignores a late approval and permits a fres
           reviewerStarted();
           return new Promise((resolve) => { finishReview = resolve; });
         }
-        return { stopReason: "stop", content: [{ type: "text", text: '{"decision":"approve","reason":"fresh"}' }], usage: { input: 10, cacheRead: 0, cacheWrite: 0 } };
+        return {
+          stopReason: "stop",
+          content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"fresh"}' }],
+          usage: { input: 10, cacheRead: 0, cacheWrite: 0 },
+        };
       },
     });
     try {

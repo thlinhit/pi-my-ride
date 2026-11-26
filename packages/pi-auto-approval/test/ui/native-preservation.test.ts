@@ -60,8 +60,12 @@ async function reachState(t: TestContext, state: State, id: string): Promise<Run
     row,
     native,
     settle: async () => {
-      if (state === "guardian-running") finish(reviewerReply("approve"));
-      else if (state === "approval-required") finish(true);
+      if (state === "guardian-running") {
+        finish({
+          ...reviewerReply("approve"),
+          content: [{ type: "text", text: '{"decision":"approve","tier":"none","reason":"ok"}' }],
+        });
+      } else if (state === "approval-required") finish(true);
       else if (state === "blocked-cancelled") finish(false);
       return pending;
     },
