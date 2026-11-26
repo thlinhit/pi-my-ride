@@ -39,7 +39,10 @@ export interface GateContext {
   readonly hasUI: boolean;
   readonly signal: AbortSignal | undefined;
   isProjectTrusted(): boolean;
-  readonly ui: { confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean>; notify(message: string, type?: "info" | "warning" | "error"): void };
+  readonly ui: {
+    confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean>;
+    notify(message: string, type?: "info" | "warning" | "error"): void;
+  };
 }
 export type ConfigLoader = (cwd: string) => PermissionConfig;
 export interface GateReport {
@@ -52,7 +55,12 @@ export interface GateReport {
 }
 export type StatusReporter = (report: GateReport) => void;
 export interface GateDeps {
-  readonly matcher?: (call: { toolName: string; input: unknown }, cwd: string, rules: readonly PermissionRule[], projectTrusted: boolean) => PermissionRule | undefined;
+  readonly matcher?: (
+    call: { toolName: string; input: unknown },
+    cwd: string,
+    rules: readonly PermissionRule[],
+    projectTrusted: boolean,
+  ) => PermissionRule | undefined;
   readonly status?: StatusReporter;
   readonly reviewer?: string;
   readonly review?: (input: ReviewInput) => Promise<ReviewResult>;
@@ -67,7 +75,10 @@ type GateOutcome = { kind: "not-gated" } | { kind: "decided"; decision: GateDeci
 const NOT_GATED: GateOutcome = { kind: "not-gated" };
 const PATH_TOOLS = new Set(["read", "edit", "write"]);
 function historyCommandOf(toolName: string, input: unknown): string {
-  const value = input !== null && typeof input === "object" ? (input as Record<string, unknown>)[PATH_TOOLS.has(toolName) ? "path" : "command"] : undefined;
+  const value =
+    input !== null && typeof input === "object"
+      ? (input as Record<string, unknown>)[PATH_TOOLS.has(toolName) ? "path" : "command"]
+      : undefined;
   return typeof value === "string" ? value : "";
 }
 function bashCommandOf(input: unknown): string | undefined {
@@ -80,8 +91,14 @@ function callExcerpt(toolName: string, input: unknown): string {
   const json = JSON.stringify(input) ?? String(input);
   return `${toolName} ${json.length > EXCERPT_LIMIT ? `${json.slice(0, EXCERPT_LIMIT)}...` : json}`;
 }
-function safeNotify(ctx: GateContext, message: string): void { try { ctx.ui.notify(message); } catch {} }
-function isAborted(ctx: GateContext): boolean { return ctx.signal?.aborted === true; }
+function safeNotify(ctx: GateContext, message: string): void {
+  try {
+    ctx.ui.notify(message);
+  } catch {}
+}
+function isAborted(ctx: GateContext): boolean {
+  return ctx.signal?.aborted === true;
+}
 function snapshotGate(ctx: GateContext, choices: SessionChoices, load?: ConfigLoader, globalDir = globalConfigDir()) {
   let config: PermissionConfig | undefined;
   try {
@@ -110,9 +127,19 @@ function recordGateOutcome(
   }
   if (!result.ok) warn(`Could not record auto-approval history: ${result.error}`);
 }
-function safeWarn(ctx: GateContext, message: string): void { try { ctx.ui.notify(message, "warning"); } catch {} }
+function safeWarn(ctx: GateContext, message: string): void {
+  try {
+    ctx.ui.notify(message, "warning");
+  } catch {}
+}
 
-export async function handleToolCall(event: { toolName: string; input: unknown; toolCallId?: string }, ctx: GateContext, load: ConfigLoader, deps: GateDeps = {}, choices: SessionChoices = {}): Promise<GateDecision> {
+export async function handleToolCall(
+  event: { toolName: string; input: unknown; toolCallId?: string },
+  ctx: GateContext,
+  load: ConfigLoader,
+  deps: GateDeps = {},
+  choices: SessionChoices = {},
+): Promise<GateDecision> {
   const snapshot = snapshotGate(ctx, choices, choices.enabled === false ? undefined : load);
   const outcome = await gateToolCall(event, ctx, snapshot, deps, choices, new Set());
   if (deps.history) recordGateOutcome(event, outcome, deps.history, (message) => safeWarn(ctx, message));
@@ -224,7 +251,9 @@ async function decideToolCall(
         denied = exactMatcher(componentCall(component.command), ctx.cwd, denyRules, projectTrusted, component.words);
       }
     }
-  } catch { return block("auto-approval: matcher error"); }
+  } catch {
+    return block("auto-approval: matcher error");
+  }
 
   let protectedReason: string | undefined;
   let componentReasons: (string | undefined)[] = [];
@@ -256,11 +285,23 @@ async function decideToolCall(
   }
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   const label = rule?.label ?? (bash ? "Unmatched Bash command" : `Unmatched ${event.toolName} call`);
-  const reviewerConfig = choices.reviewerModel === undefined ? config.reviewer : { ...config.reviewer, model: choices.reviewerModel ?? undefined };
+  const reviewerConfig =
+    choices.reviewerModel === undefined
+      ? config.reviewer
+      : { ...config.reviewer, model: choices.reviewerModel ?? undefined };
   const reviewer = reviewerConfig.model ? `${reviewerConfig.model.provider}/${reviewerConfig.model.id}` : deps.reviewer;
   const report = (state: ReviewState, detail?: string) => {
     if (!ctx.hasUI || !settings.debug || !config.ui.status || !deps.status || isAborted(ctx)) return;
-    try { deps.status({ state, label, ...(rule?.source ? { source: rule.source } : {}), ...(state === "guardian-running" && reviewer ? { reviewer } : {}), ...(detail ? { detail } : {}), ui: config.ui }); } catch {}
+    try {
+      deps.status({
+        state,
+        label,
+        ...(rule?.source ? { source: rule.source } : {}),
+        ...(state === "guardian-running" && reviewer ? { reviewer } : {}),
+        ...(detail ? { detail } : {}),
+        ui: config.ui,
+      });
+    } catch {}
   };
   const attribution = rule ? `(${rule.label}, ${rule.source})` : "";
   const confirm = async (reason: string): Promise<GateDecision> => {
@@ -307,19 +348,45 @@ async function decideToolCall(
         if (settings.debug) safeNotify(ctx, `Allowed by rule (${componentRule.label}, ${componentRule.source})`);
         continue;
       }
-      if (componentRule?.level === "ask") { reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`); continue; }
+      if (componentRule?.level === "ask") {
+        reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`);
+        continue;
+      }
       if (!overBashApprovalLimit && isReadOnlyComponent(component.command)) {
         if (settings.debug) safeNotify(ctx, "Allowed as read-only command");
         continue;
       }
-      if (mode === "manual") { reasons.push(`${label} requires confirmation`); continue; }
+      if (mode === "manual") {
+        reasons.push(`${label} requires confirmation`);
+        continue;
+      }
       report("guardian-running");
       if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
       let result: ReviewResult;
       try {
-        result = deps.review ? await deps.review({ command: component.command, component: { originalCommand: command!, index: index + 1, count: analysis.components.length, start: component.start, end: component.end, context: component.context }, reviewer: reviewerConfig, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" };
-      } catch { result = { ok: false, error: "reviewer unavailable" }; }
-      if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
+        result = deps.review
+          ? await deps.review({
+              command: component.command,
+              component: {
+                originalCommand: command!,
+                index: index + 1,
+                count: analysis.components.length,
+                start: component.start,
+                end: component.end,
+                context: component.context,
+              },
+              reviewer: reviewerConfig,
+              reviewEvidence: config.reviewEvidence,
+              signal: ctx.signal,
+            })
+          : { ok: false, error: "reviewer unavailable" };
+      } catch {
+        result = { ok: false, error: "reviewer unavailable" };
+      }
+      if (isAborted(ctx)) {
+        report("blocked", "Cancelled");
+        return block(CONFIRMATION_FAILED);
+      }
       if (!result.ok) {
         if (result.cancelled) {
           report("blocked", "Cancelled");
@@ -330,7 +397,9 @@ async function decideToolCall(
       }
       if (result.verdict.decision === "revise") {
         report("revision-requested");
-        reasons.push(`Reviewer requested a revision: ${result.verdict.reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`);
+        reasons.push(
+          `Reviewer requested a revision: ${result.verdict.reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`,
+        );
         continue;
       }
       if (result.verdict.decision === "block") {
@@ -356,9 +425,22 @@ async function decideToolCall(
   report("guardian-running");
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   let result: ReviewResult;
-  try { result = deps.review ? await deps.review({ ...(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input }), reviewer: reviewerConfig, reviewEvidence: config.reviewEvidence, signal: ctx.signal }) : { ok: false, error: "reviewer unavailable" }; }
-  catch { result = { ok: false, error: "reviewer unavailable" }; }
-  if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
+  try {
+    result = deps.review
+      ? await deps.review({
+          ...(bash ? { command: command ?? "" } : { tool: event.toolName, arguments: event.input }),
+          reviewer: reviewerConfig,
+          reviewEvidence: config.reviewEvidence,
+          signal: ctx.signal,
+        })
+      : { ok: false, error: "reviewer unavailable" };
+  } catch {
+    result = { ok: false, error: "reviewer unavailable" };
+  }
+  if (isAborted(ctx)) {
+    report("blocked", "Cancelled");
+    return block(CONFIRMATION_FAILED);
+  }
   if (!result.ok) {
     if (result.cancelled) {
       report("blocked", "Cancelled");
@@ -369,7 +451,9 @@ async function decideToolCall(
   const { decision, reason } = result.verdict;
   if (decision === "revise") {
     report("revision-requested");
-    return confirm(`Reviewer requested a revision: ${reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`);
+    return confirm(
+      `Reviewer requested a revision: ${reason}\nConstraint: ${result.verdict.constraint}\nSource: ${result.verdict.source}\nApprove the original action once?`,
+    );
   }
   if (decision === "block") {
     report("blocked");
@@ -383,7 +467,9 @@ async function decideToolCall(
 export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readonly string[]): void {
   const reviewerState = createReviewerState();
   const controllers = new Set<AbortController>();
-  const cancelPending = () => { for (const controller of controllers) controller.abort(); };
+  const cancelPending = () => {
+    for (const controller of controllers) controller.abort();
+  };
   const globalDir = globalConfigDir();
   const display = createReviewDisplay(pi, VERSION, verifiedVersions);
   const permissions = createPermissionsController(globalDir, cancelPending, (ctx) => display.reset(ctx));
@@ -391,7 +477,10 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
   let historyWarned = false;
   const noticedFiles = new Set<string>();
   let callId = 0;
-  pi.registerCommand("permissions", { description: "Configure tool protection and review mode", handler: (args, ctx) => permissions.menu(args, ctx) });
+  pi.registerCommand("permissions", {
+    description: "Configure tool protection and review mode",
+    handler: (args, ctx) => permissions.menu(args, ctx),
+  });
   pi.on("tool_call", async (event, ctx) => {
     const controller = new AbortController();
     controllers.add(controller);
@@ -399,14 +488,24 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
     const widgetKey = `auto-approval:${++callId}`;
     const callToolId = event.toolCallId ?? widgetKey;
     const displayGeneration = display.generation();
-    const adapted: GateContext = { cwd: ctx.cwd, hasUI: ctx.hasUI, signal, isProjectTrusted: () => ctx.isProjectTrusted(), ui: {
-      confirm: async (title, message, opts) => {
-        if (approvalDialogOpened) throw new Error("confirmation already in progress");
-        approvalDialogOpened = true;
-        try { return await ctx.ui.confirm(title, message, opts); } finally { approvalDialogOpened = false; }
+    const adapted: GateContext = {
+      cwd: ctx.cwd,
+      hasUI: ctx.hasUI,
+      signal,
+      isProjectTrusted: () => ctx.isProjectTrusted(),
+      ui: {
+        confirm: async (title, message, opts) => {
+          if (approvalDialogOpened) throw new Error("confirmation already in progress");
+          approvalDialogOpened = true;
+          try {
+            return await ctx.ui.confirm(title, message, opts);
+          } finally {
+            approvalDialogOpened = false;
+          }
+        },
+        notify: (message, type) => ctx.ui.notify(message, type),
       },
-      notify: (message, type) => ctx.ui.notify(message, type),
-    } };
+    };
     const choices = permissions.snapshot();
     const snapshot = snapshotGate(adapted, choices, (cwd) => loadConfig(cwd, globalDir), globalDir);
     permissions.refreshFooter(ctx, snapshot);
@@ -426,7 +525,14 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
     let abortListener: (() => void) | undefined;
     const aborted = new Promise<GateOutcome>((resolve) => {
       abortListener = () => {
-        if (lastReport) display.show(ctx, lastReport.ui, { ...lastReport, state: "blocked", detail: "Cancelled", toolCallId: callToolId }, widgetKey, displayGeneration);
+        if (lastReport)
+          display.show(
+            ctx,
+            lastReport.ui,
+            { ...lastReport, state: "blocked", detail: "Cancelled", toolCallId: callToolId },
+            widgetKey,
+            displayGeneration,
+          );
         resolve({ kind: "decided", decision: block(CONFIRMATION_FAILED), log: snapshot.settings.enabled });
       };
       signal.addEventListener("abort", abortListener, { once: true });
@@ -438,13 +544,18 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
       snapshot,
       {
         reviewer: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-        review: createPiReviewer({
-          cwd: ctx.cwd,
-          get model() { return ctx.model; },
-          modelRegistry: ctx.modelRegistry,
-          sessionManager: ctx.sessionManager,
-          isProjectTrusted: () => snapshot.projectTrusted,
-        }, reviewerState),
+        review: createPiReviewer(
+          {
+            cwd: ctx.cwd,
+            get model() {
+              return ctx.model;
+            },
+            modelRegistry: ctx.modelRegistry,
+            sessionManager: ctx.sessionManager,
+            isProjectTrusted: () => snapshot.projectTrusted,
+          },
+          reviewerState,
+        ),
         status: (report) => {
           lastReport = report;
           display.show(ctx, report.ui, { ...report, toolCallId: callToolId }, widgetKey, displayGeneration);
@@ -457,17 +568,27 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
       const outcome = await Promise.race([pending, aborted]);
       finalize(outcome);
       return outcome.kind === "decided" ? outcome.decision : undefined;
+    } finally {
+      if (abortListener) signal.removeEventListener("abort", abortListener);
+      controllers.delete(controller);
+      void pending.catch(() => {});
     }
-    finally { if (abortListener) signal.removeEventListener("abort", abortListener); controllers.delete(controller); void pending.catch(() => {}); }
   });
-  pi.on("tool_execution_end", (event) => { if (event.toolName === "bash") display.dropInvalidator(event.toolCallId); });
+  pi.on("tool_execution_end", (event) => {
+    if (event.toolName === "bash") display.dropInvalidator(event.toolCallId);
+  });
   pi.on("session_start", (_event, ctx) => {
     cancelPending();
     noticedFiles.clear();
     const seeded = ensureGlobalConfig(globalDir);
-    if ("error" in seeded) ctx.ui.notify(`Could not create default config ${join(globalDir, CONFIG_FILENAME)}: ${seeded.error}`, "warning");
+    if ("error" in seeded)
+      ctx.ui.notify(`Could not create default config ${join(globalDir, CONFIG_FILENAME)}: ${seeded.error}`, "warning");
     permissions.reset(ctx);
     permissions.refreshFooter(ctx);
   });
-  pi.on("session_shutdown", (_event, ctx) => { permissions.close(); cancelPending(); display.shutdown(ctx); });
+  pi.on("session_shutdown", (_event, ctx) => {
+    permissions.close();
+    cancelPending();
+    display.shutdown(ctx);
+  });
 }

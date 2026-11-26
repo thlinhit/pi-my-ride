@@ -39,7 +39,9 @@ export interface ReviewContext {
   isProjectTrusted(): boolean;
   readonly sessionManager: {
     getSessionId(): string;
-    buildSessionProjection(): { readonly entries: readonly { readonly sourceEntry: unknown; readonly messages: readonly unknown[] }[] };
+    buildSessionProjection(): {
+      readonly entries: readonly { readonly sourceEntry: unknown; readonly messages: readonly unknown[] }[];
+    };
   };
   readonly modelRegistry: {
     find(provider: string, modelId: string): Model<Api> | undefined;
@@ -74,7 +76,11 @@ function adaptProjection(ctx: ReviewContext): readonly unknown[] {
     const entry = source as { type?: unknown; id?: unknown };
     if (entry.type === "message") {
       for (const message of contribution.messages) {
-        if (message && typeof message === "object" && ["user", "assistant", "toolResult"].includes((message as { role?: string }).role ?? ""))
+        if (
+          message &&
+          typeof message === "object" &&
+          ["user", "assistant", "toolResult"].includes((message as { role?: string }).role ?? "")
+        )
           entries.push({ ...entry, message });
       }
     } else if ((entry.type === "compaction" || entry.type === "branch_summary") && contribution.messages.length > 0) {
@@ -85,20 +91,32 @@ function adaptProjection(ctx: ReviewContext): readonly unknown[] {
 }
 
 async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: ReviewInput): Promise<ReviewResult> {
-  const discard = () => { state.lineage = undefined; };
+  const discard = () => {
+    state.lineage = undefined;
+  };
   try {
     if (input.signal?.aborted) {
       discard();
-      return { ok: false, error: "review timed out or was cancelled", ...(input.signal?.aborted ? { cancelled: true as const } : {}) };
+      return {
+        ok: false,
+        error: "review timed out or was cancelled",
+        ...(input.signal?.aborted ? { cancelled: true as const } : {}),
+      };
     }
     const model = input.reviewer.model
       ? ctx.modelRegistry.find(input.reviewer.model.provider, input.reviewer.model.id)
       : ctx.model;
     if (!model) {
       discard();
-      return { ok: false, error: `review model not found: ${input.reviewer.model ? `${input.reviewer.model.provider}/${input.reviewer.model.id}` : "the active model"}` };
+      return {
+        ok: false,
+        error: `review model not found: ${input.reviewer.model ? `${input.reviewer.model.provider}/${input.reviewer.model.id}` : "the active model"}`,
+      };
     }
-    const signal = AbortSignal.any([AbortSignal.timeout(input.reviewer.timeoutMs), ...(input.signal ? [input.signal] : [])]);
+    const signal = AbortSignal.any([
+      AbortSignal.timeout(input.reviewer.timeoutMs),
+      ...(input.signal ? [input.signal] : []),
+    ]);
     if (signal.aborted) throw new Error("review timed out or was cancelled");
     const mainSessionId = ctx.sessionManager.getSessionId();
     const projectTrusted = ctx.isProjectTrusted();
@@ -108,16 +126,33 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
       ? { ...DEFAULT_REVIEWER_POLICY, environment: DEFAULT_TRUSTED_ENVIRONMENT }
       : DEFAULT_REVIEWER_POLICY;
     const systemPrompt = buildSystemPrompt(policy, input.reviewer.extraInstructions, projectInstructions);
-    const fingerprint = reviewerFingerprint({ mainSessionId, model: { provider: model.provider, id: model.id, api: model.api, baseUrl: model.baseUrl }, reasoningEffort: input.reviewer.reasoningEffort, systemPrompt, projectTrusted });
+    const fingerprint = reviewerFingerprint({
+      mainSessionId,
+      model: { provider: model.provider, id: model.id, api: model.api, baseUrl: model.baseUrl },
+      reasoningEffort: input.reviewer.reasoningEffort,
+      systemPrompt,
+      projectTrusted,
+    });
     const records = collectEvidence(adaptProjection(ctx));
     const budget = contextBudget(model.contextWindow);
     let base = state.lineage;
-    if (base && (base.fingerprint !== fingerprint || !evidencePrefixMatches(base.records, records) || base.lastPromptTokens >= budget)) {
+    if (
+      base &&
+      (base.fingerprint !== fingerprint ||
+        !evidencePrefixMatches(base.records, records) ||
+        base.lastPromptTokens >= budget)
+    ) {
       discard();
       base = undefined;
     }
     const tool = input.tool ?? "bash";
-    const request: ReviewRequest = { tool, command: input.command, arguments: input.arguments, cwd: ctx.cwd, ...(input.component ? { component: input.component } : {}) };
+    const request: ReviewRequest = {
+      tool,
+      command: input.command,
+      arguments: input.arguments,
+      cwd: ctx.cwd,
+      ...(input.component ? { component: input.component } : {}),
+    };
     const makeUser = (selected: readonly EvidenceRecord[], mode: "full" | "delta") => ({
       role: "user" as const,
       content: [{ type: "text" as const, text: buildReviewPrompt(selected, request, mode) }],
@@ -126,10 +161,14 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     let user = makeUser(base ? records.slice(base.records.length) : records, base ? "delta" : "full");
     let messages: Message[] = base ? [...base.messages, user] : [user];
     if (base && estimateTokens(systemPrompt, messages) >= budget) {
-      discard(); base = undefined; user = makeUser(records, "full"); messages = [user];
+      discard();
+      base = undefined;
+      user = makeUser(records, "full");
+      messages = [user];
     }
     if (estimateTokens(systemPrompt, messages) >= budget) {
-      discard(); return { ok: false, error: BUDGET_EXCEEDED_ERROR };
+      discard();
+      return { ok: false, error: BUDGET_EXCEEDED_ERROR };
     }
     let sessionId = base?.sessionId ?? `ap-review-${randomUUID()}`;
     let retryMessages: Message[] | undefined;
@@ -200,7 +239,14 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     }
   } catch (error) {
     discard();
-    return { ok: false, error: error instanceof Error ? error.message : String(error), ...((input.signal?.aborted || (error && typeof error === "object" && "cancelled" in error && error.cancelled === true)) ? { cancelled: true as const } : {}) };
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      ...(input.signal?.aborted ||
+      (error && typeof error === "object" && "cancelled" in error && error.cancelled === true)
+        ? { cancelled: true as const }
+        : {}),
+    };
   }
 }
 

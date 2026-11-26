@@ -12,7 +12,13 @@ import {
   ToolExecutionComponent,
   VERSION,
 } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, ExtensionContext, ToolCallEvent, ToolRendererResolver, ToolRenderers } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ToolCallEvent,
+  ToolRendererResolver,
+  ToolRenderers,
+} from "@earendil-works/pi-coding-agent";
 import autoApproval from "../../src/index.ts";
 
 initTheme("dark", false);
@@ -22,13 +28,30 @@ export const nativeExecute = nativeBash.execute;
 
 export const REVIEW_REASON = "ok";
 export function reviewerReply(decision: "approve" | "revise", reason = REVIEW_REASON) {
-  return { stopReason: "stop", content: [{ type: "text", text: JSON.stringify({ decision, reason, ...(decision === "revise" ? { constraint: "target", source: "user" } : {}) }) }], usage: { input: 20, cacheRead: 0, cacheWrite: 0 } };
+  return {
+    stopReason: "stop",
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          decision,
+          reason,
+          ...(decision === "revise" ? { constraint: "target", source: "user" } : {}),
+        }),
+      },
+    ],
+    usage: { input: 20, cacheRead: 0, cacheWrite: 0 },
+  };
 }
 
 export interface HarnessOptions {
   readonly reviewMode: "manual" | "auto";
   readonly placement?: "widget" | "toolRow";
-  readonly permissions?: { readonly allow?: readonly string[]; readonly ask?: readonly string[]; readonly deny?: readonly string[] };
+  readonly permissions?: {
+    readonly allow?: readonly string[];
+    readonly ask?: readonly string[];
+    readonly deny?: readonly string[];
+  };
   readonly confirm?: (...args: unknown[]) => Promise<boolean>;
   readonly provider?: (call: number) => Promise<unknown>;
 }
@@ -55,17 +78,20 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
   const home = join(root, "home");
   const globalDir = join(home, ".pi", "pi-auto-approval");
   mkdirSync(globalDir, { recursive: true });
-  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({
-    enabled: true,
-    debug: true,
-    reviewMode: options.reviewMode,
-    permissions: {
-      allow: ["Bash(seed)", ...(options.permissions?.allow ?? [])],
-      ask: options.permissions?.ask ?? [],
-      deny: options.permissions?.deny ?? [],
-    },
-    ui: { status: true, placement: options.placement ?? "toolRow" },
-  }));
+  writeFileSync(
+    join(globalDir, "auto-permissions.json"),
+    JSON.stringify({
+      enabled: true,
+      debug: true,
+      reviewMode: options.reviewMode,
+      permissions: {
+        allow: ["Bash(seed)", ...(options.permissions?.allow ?? [])],
+        ask: options.permissions?.ask ?? [],
+        deny: options.permissions?.deny ?? [],
+      },
+      ui: { status: true, placement: options.placement ?? "toolRow" },
+    }),
+  );
   const previousHome = process.env.HOME;
   process.env.HOME = home;
   t.after(() => {
@@ -82,15 +108,26 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
   const providerRequests: unknown[] = [];
   const controller = new AbortController();
   const pi = {
-    on: (name: string, handler: (...args: any[]) => unknown) => { handlers.set(name, handler); return () => {}; },
-    registerCommand: (_name: string, options: { handler: typeof menu }) => { menu = options.handler; },
+    on: (name: string, handler: (...args: any[]) => unknown) => {
+      handlers.set(name, handler);
+      return () => {};
+    },
+    registerCommand: (_name: string, options: { handler: typeof menu }) => {
+      menu = options.handler;
+    },
     getAllTools: () => [{ name: "bash", sourceInfo: { source: "builtin", path: "builtin:bash" } }],
-    registerToolRenderer: (value: ToolRendererResolver) => { resolver = value; },
+    registerToolRenderer: (value: ToolRendererResolver) => {
+      resolver = value;
+    },
   } as unknown as ExtensionAPI;
   autoApproval(pi, [VERSION]);
   const model = { provider: "mock", id: "reviewer", api: "mock", baseUrl: "", contextWindow: 128_000 };
   const ctx = {
-    mode: "tui", hasUI: true, cwd: root, signal: controller.signal, model,
+    mode: "tui",
+    hasUI: true,
+    cwd: root,
+    signal: controller.signal,
+    model,
     isProjectTrusted: () => true,
     sessionManager: { getSessionId: () => "factory-session", buildSessionProjection: () => ({ entries: [] }) },
     modelRegistry: {
@@ -107,7 +144,8 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
         return options.confirm ? options.confirm(...args) : true;
       },
       setWidget: (...args: unknown[]) => widgets.push(args),
-      setStatus: () => {}, notify: () => {},
+      setStatus: () => {},
+      notify: () => {},
     },
   } as unknown as ExtensionContext;
 
@@ -115,16 +153,33 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
   const resolve = (renderTarget: string) => {
     assert.ok(resolver, "the actual factory registers the public renderer resolver");
     const extension = {
-      path: `/test/${renderTarget}.ts`, resolvedPath: `/test/${renderTarget}.ts`,
-      sourceInfo: { source: "extension", path: `/test/${renderTarget}.ts`, scope: "user" as const, origin: "top-level" as const },
-      handlers: new Map(), tools: new Map(), messageRenderers: new Map(), toolRenderers: [resolver],
-      commands: new Map(), flags: new Map(), shortcuts: new Map(),
+      path: `/test/${renderTarget}.ts`,
+      resolvedPath: `/test/${renderTarget}.ts`,
+      sourceInfo: {
+        source: "extension",
+        path: `/test/${renderTarget}.ts`,
+        scope: "user" as const,
+        origin: "top-level" as const,
+      },
+      handlers: new Map(),
+      tools: new Map(),
+      messageRenderers: new Map(),
+      toolRenderers: [resolver],
+      commands: new Map(),
+      flags: new Map(),
+      shortcuts: new Map(),
     };
     const runner = new ExtensionRunner([extension], createExtensionRuntime(), root, {} as never, {} as never);
     return runner.resolveToolRenderers("bash", () => nativeBash as unknown as ToolRenderers)!;
   };
   if (options.placement !== "widget") {
-    assert.equal(await toolCall({ type: "tool_call", toolName: "bash", toolCallId: "harness-seed", input: { command: "seed" } }, ctx), undefined);
+    assert.equal(
+      await toolCall(
+        { type: "tool_call", toolName: "bash", toolCallId: "harness-seed", input: { command: "seed" } },
+        ctx,
+      ),
+      undefined,
+    );
     assert.ok(resolver);
     widgets.length = 0;
     providerRequests.length = 0;
@@ -136,19 +191,39 @@ export async function createHarness(t: TestContext, options: HarnessOptions): Pr
     confirmations,
     providerRequests,
     controller,
-    call: (command, toolCallId) => toolCall({ type: "tool_call", toolName: "bash", toolCallId, input: { command } }, ctx),
+    call: (command, toolCallId) =>
+      toolCall({ type: "tool_call", toolName: "bash", toolCallId, input: { command } }, ctx),
     callTool: (toolName, input, toolCallId) => toolCall({ type: "tool_call", toolName, toolCallId, input }, ctx),
     row(command, toolCallId) {
       const frames: string[] = [];
       const renderers = resolve(toolCallId);
       let row!: ToolExecutionComponent;
-      row = new ToolExecutionComponent("bash", toolCallId, { command }, {}, renderers as never, {
-        requestRender: () => { if (row) frames.push(row.render(100).join("\n")); },
-      } as never, root);
+      row = new ToolExecutionComponent(
+        "bash",
+        toolCallId,
+        { command },
+        {},
+        renderers as never,
+        {
+          requestRender: () => {
+            if (row) frames.push(row.render(100).join("\n"));
+          },
+        } as never,
+        root,
+      );
       row.render(100);
       return { row, frames, renderers };
     },
-    nativeRow: (command, toolCallId) => new ToolExecutionComponent("bash", toolCallId, { command }, {}, nativeBash as never, { requestRender: () => {} } as never, root),
+    nativeRow: (command, toolCallId) =>
+      new ToolExecutionComponent(
+        "bash",
+        toolCallId,
+        { command },
+        {},
+        nativeBash as never,
+        { requestRender: () => {} } as never,
+        root,
+      ),
     sessionStart: () => handlers.get("session_start")!({ reason: "new" }, ctx),
     shutdown: () => handlers.get("session_shutdown")!({}, ctx),
     menu: async (selection) => {
@@ -164,8 +239,14 @@ export function plain(lines: string[]): string[] {
 
 // Removes exactly the expected inserted status block and the known padding pair, and proves they are present.
 export function withoutInsertedStatus(lines: string[], expected: string[]): string[] {
-  const start = lines.findIndex((_line, index) => expected.every((text, offset) => plain([lines[index + offset] ?? ""])[0] === text));
-  assert.notEqual(start, -1, `expected exact inserted status lines ${JSON.stringify(expected)} in ${JSON.stringify(lines)}`);
+  const start = lines.findIndex((_line, index) =>
+    expected.every((text, offset) => plain([lines[index + offset] ?? ""])[0] === text),
+  );
+  assert.notEqual(
+    start,
+    -1,
+    `expected exact inserted status lines ${JSON.stringify(expected)} in ${JSON.stringify(lines)}`,
+  );
   let end = start + expected.length;
   const padding = lines[end];
   if (padding && PADDING.test(padding)) {

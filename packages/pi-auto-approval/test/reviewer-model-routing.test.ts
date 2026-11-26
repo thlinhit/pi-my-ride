@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -15,8 +24,17 @@ import { menuDriver } from "./permissions-menu-harness.ts";
 
 type Pair = { readonly provider: string; readonly id: string };
 type Decision = "approve" | "revise" | "ask_user";
-type Select = { readonly title: string; readonly options: string[]; readonly resolve: (value: string | undefined) => void };
-type Confirm = { readonly title: string; readonly message: string; readonly signal?: AbortSignal; readonly resolve: (approved: boolean) => void };
+type Select = {
+  readonly title: string;
+  readonly options: string[];
+  readonly resolve: (value: string | undefined) => void;
+};
+type Confirm = {
+  readonly title: string;
+  readonly message: string;
+  readonly signal?: AbortSignal;
+  readonly resolve: (approved: boolean) => void;
+};
 type Call = {
   readonly provider: string;
   readonly id: string;
@@ -45,10 +63,14 @@ type GlobalStartup = "written" | "absent" | "parent-file" | "read-only";
 async function createHost(startup: GlobalStartup = "written") {
   const configured = new Set(FIXTURES.filter((pair) => pair !== NOAUTH).map((pair) => pair.provider));
   const credentials: CredentialStore = {
-    read: async (providerId) => configured.has(providerId) ? { type: "api_key", key: "test-only" } : undefined,
+    read: async (providerId) => (configured.has(providerId) ? { type: "api_key", key: "test-only" } : undefined),
     list: async () => [...configured].map((providerId) => ({ providerId, type: "api_key" as const })),
-    modify: async () => { throw new Error("unexpected credential write"); },
-    delete: async () => { throw new Error("unexpected credential delete"); },
+    modify: async () => {
+      throw new Error("unexpected credential write");
+    },
+    delete: async () => {
+      throw new Error("unexpected credential delete");
+    },
   };
   const root = mkdtempSync(join(tmpdir(), "phase6-routing-"));
   const home = join(root, "home");
@@ -64,20 +86,36 @@ async function createHost(startup: GlobalStartup = "written") {
     mkdirSync(home, { recursive: true });
   } else {
     mkdirSync(globalDir, { recursive: true });
-    if (startup === "written") writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({ permissions: {}, reviewMode: "auto" }));
+    if (startup === "written")
+      writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({ permissions: {}, reviewMode: "auto" }));
     if (startup === "read-only") chmodSync(globalDir, 0o555);
   }
   const previousHome = process.env.HOME;
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.HOME = home;
   process.env.PI_CODING_AGENT_DIR = agentDir;
-  const runtime = await ModelRuntime.create({ credentials, modelsPath: null, allowModelNetwork: false, refreshOnCreate: false });
+  const runtime = await ModelRuntime.create({
+    credentials,
+    modelsPath: null,
+    allowModelNetwork: false,
+    refreshOnCreate: false,
+  });
   const registry = new ModelRegistry(runtime);
   for (const pair of FIXTURES) {
     registry.registerProvider(pair.provider, {
       baseUrl: "http://127.0.0.1:9/phase6",
       api: "openai-completions",
-      models: [{ id: pair.id, name: pair.id, input: ["text"], reasoning: false, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 8192, maxTokens: 1024 }],
+      models: [
+        {
+          id: pair.id,
+          name: pair.id,
+          input: ["text"],
+          reasoning: false,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 8192,
+          maxTokens: 1024,
+        },
+      ],
     });
   }
   await runtime.refresh({ allowNetwork: false });
@@ -89,29 +127,39 @@ async function createHost(startup: GlobalStartup = "written") {
       return originalStream(model, context, options);
     }
     let settle: (message: AssistantMessage) => void = () => {};
-    const result = new Promise<AssistantMessage>((resolve) => { settle = resolve; });
+    const result = new Promise<AssistantMessage>((resolve) => {
+      settle = resolve;
+    });
     calls.push({
       provider: model.provider,
       id: model.id,
       model: { ...model },
       context,
       signal: options?.signal,
-      release: (decision, tier) => settle({
-        role: "assistant",
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              decision,
-              tier,
-              reason: `${decision} for ${model.provider}/${model.id}`,
-              ...(decision === "revise" ? { constraint: "target", source: "user" } : {}),
-            }),
+      release: (decision, tier) =>
+        settle({
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                decision,
+                tier,
+                reason: `${decision} for ${model.provider}/${model.id}`,
+                ...(decision === "revise" ? { constraint: "target", source: "user" } : {}),
+              }),
+            },
+          ],
+          stopReason: "stop",
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
           },
-        ],
-        stopReason: "stop",
-        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      } as unknown as AssistantMessage),
+        } as unknown as AssistantMessage),
     });
     return { result: () => result } as unknown as AssistantMessageEventStream;
   }) as typeof registry.streamSimple;
@@ -122,27 +170,51 @@ async function createHost(startup: GlobalStartup = "written") {
   const messages: string[] = [];
   const extensions: Awaited<ReturnType<typeof discoverAndLoadExtensions>>["extensions"] = [];
   let activePair: Pair = ACTIVE;
-  const context = (hasUI = true) => ({
-    cwd,
-    hasUI,
-    mode: "tui",
-    get model() { return registry.find(activePair.provider, activePair.id); },
-    modelRegistry: registry,
-    sessionManager,
-    isProjectTrusted: () => false,
-    signal: undefined,
-    ui: {
-      custom: driver.custom,
-      select: (title: string, options: string[]) => new Promise<string | undefined>((resolve) => { selects.push({ title, options, resolve }); }),
-      confirm: (title: string, message: string, opts?: { signal?: AbortSignal }) => new Promise<boolean>((resolve) => { confirms.push({ title, message, signal: opts?.signal, resolve }); }),
-      notify: (message: string, type?: string) => { messages.push(`${type ?? "info"}:${message}`); },
-      setStatus: () => {},
-      setWidget: () => {},
-    },
-  }) as never;
+  const context = (hasUI = true) =>
+    ({
+      cwd,
+      hasUI,
+      mode: "tui",
+      get model() {
+        return registry.find(activePair.provider, activePair.id);
+      },
+      modelRegistry: registry,
+      sessionManager,
+      isProjectTrusted: () => false,
+      signal: undefined,
+      ui: {
+        custom: driver.custom,
+        select: (title: string, options: string[]) =>
+          new Promise<string | undefined>((resolve) => {
+            selects.push({ title, options, resolve });
+          }),
+        confirm: (title: string, message: string, opts?: { signal?: AbortSignal }) =>
+          new Promise<boolean>((resolve) => {
+            confirms.push({ title, message, signal: opts?.signal, resolve });
+          }),
+        notify: (message: string, type?: string) => {
+          messages.push(`${type ?? "info"}:${message}`);
+        },
+        setStatus: () => {},
+        setWidget: () => {},
+      },
+    }) as never;
   const host = {
-    cwd, home, agentDir, globalDir, registry, calls, selects, confirms, messages, extensions, context, driver,
-    setActive(pair: Pair) { activePair = pair; },
+    cwd,
+    home,
+    agentDir,
+    globalDir,
+    registry,
+    calls,
+    selects,
+    confirms,
+    messages,
+    extensions,
+    context,
+    driver,
+    setActive(pair: Pair) {
+      activePair = pair;
+    },
     async setConfigured(pair: Pair, available: boolean) {
       if (available) configured.add(pair.provider);
       else configured.delete(pair.provider);
@@ -159,13 +231,18 @@ async function createHost(startup: GlobalStartup = "written") {
     },
     async close() {
       for (const extension of extensions) {
-        for (const shutdown of extension.handlers.get("session_shutdown") ?? []) await shutdown({ type: "session_shutdown" }, context());
+        for (const shutdown of extension.handlers.get("session_shutdown") ?? [])
+          await shutdown({ type: "session_shutdown" }, context());
       }
       if (previousHome === undefined) delete process.env.HOME;
       else process.env.HOME = previousHome;
       if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-      try { chmodSync(globalDir, 0o755); } catch { /* directory absent for this startup case */ }
+      try {
+        chmodSync(globalDir, 0o755);
+      } catch {
+        /* directory absent for this startup case */
+      }
       rmSync(root, { recursive: true, force: true });
     },
   };
@@ -190,7 +267,9 @@ function assertRouted(host: Host, call: Call, pair: Pair): void {
 }
 
 function labelFor(host: Host, pair: Pair): string {
-  const index = host.registry.getAvailable().findIndex((model) => model.provider === pair.provider && model.id === pair.id);
+  const index = host.registry
+    .getAvailable()
+    .findIndex((model) => model.provider === pair.provider && model.id === pair.id);
   assert.notEqual(index, -1, `${key(pair)} is registered`);
   return `${index + 1}. ${key(pair)}`;
 }
@@ -201,12 +280,16 @@ async function chooseReviewer(host: Host, extension: Extension, label: string, s
   assert.ok(command, "permissions command is registered");
   const pending = command.handler("", host.context(true));
   let screen = host.driver.screens.length - 1;
-  await host.driver.next(screen++); host.driver.row(2);
+  await host.driver.next(screen++);
+  host.driver.row(2);
   const picker = await waitFor(host.selects, start);
   const options = picker.options;
   picker.resolve(label);
   await host.driver.next(screen++);
-  if (save) { host.driver.key("\u0007"); await host.driver.next(screen); }
+  if (save) {
+    host.driver.key("\u0007");
+    await host.driver.next(screen);
+  }
   host.driver.key("\u001b");
   await pending;
   return options;
@@ -217,7 +300,10 @@ function bash(host: Host, extension: Extension, command: string, hasUI = true): 
   assert.equal(handlers.length, 1);
   const handler = handlers[0];
   assert.ok(handler);
-  return handler({ type: "tool_call", toolName: "bash", toolCallId: `call-${host.calls.length}-${command}`, input: { command } }, host.context(hasUI)) as Promise<Block>;
+  return handler(
+    { type: "tool_call", toolName: "bash", toolCallId: `call-${host.calls.length}-${command}`, input: { command } },
+    host.context(hasUI),
+  ) as Promise<Block>;
 }
 
 function tool(host: Host, extension: Extension, toolName: string, input: unknown, hasUI = true): Promise<Block> {
@@ -225,7 +311,10 @@ function tool(host: Host, extension: Extension, toolName: string, input: unknown
   assert.equal(handlers.length, 1);
   const handler = handlers[0];
   assert.ok(handler);
-  return handler({ type: "tool_call", toolName, toolCallId: `call-${host.calls.length}-${toolName}`, input }, host.context(hasUI)) as Promise<Block>;
+  return handler(
+    { type: "tool_call", toolName, toolCallId: `call-${host.calls.length}-${toolName}`, input },
+    host.context(hasUI),
+  ) as Promise<Block>;
 }
 
 function sessionStart(host: Host, extension: Extension, reason: string): Promise<unknown> {
@@ -239,7 +328,11 @@ function sessionStart(host: Host, extension: Extension, reason: string): Promise
 function injectPartialSaveFailure() {
   const originalWrite = fs.writeFileSync;
   const state = { armed: false, injected: 0 };
-  fs.writeFileSync = ((file: Parameters<typeof originalWrite>[0], data: Parameters<typeof originalWrite>[1], ...args: Parameters<typeof originalWrite>[2][]) => {
+  fs.writeFileSync = ((
+    file: Parameters<typeof originalWrite>[0],
+    data: Parameters<typeof originalWrite>[1],
+    ...args: Parameters<typeof originalWrite>[2][]
+  ) => {
     if (state.armed && String(file).includes("auto-permissions.json.")) {
       state.injected++;
       originalWrite(file, String(data).slice(0, 5), ...args);
@@ -248,7 +341,13 @@ function injectPartialSaveFailure() {
     return originalWrite(file, data, ...args);
   }) as typeof fs.writeFileSync;
   syncBuiltinESMExports();
-  return { state, restore: () => { fs.writeFileSync = originalWrite; syncBuiltinESMExports(); } };
+  return {
+    state,
+    restore: () => {
+      fs.writeFileSync = originalWrite;
+      syncBuiltinESMExports();
+    },
+  };
 }
 
 test("real loader registers the permissions command and the four current handlers", async () => {
@@ -256,15 +355,25 @@ test("real loader registers the permissions command and the four current handler
   try {
     const extension = await host.load();
     assert.ok(extension.commands.has("permissions"));
-    assert.deepEqual([...extension.handlers.keys()].sort(), ["session_shutdown", "session_start", "tool_call", "tool_execution_end"]);
-  } finally { await host.close(); }
+    assert.deepEqual([...extension.handlers.keys()].sort(), [
+      "session_shutdown",
+      "session_start",
+      "tool_call",
+      "tool_execution_end",
+    ]);
+  } finally {
+    await host.close();
+  }
 });
 
 test("reviewer picker lists only real available entries and routes the selected pair to the stream", async () => {
   const host = await createHost();
   try {
     const extension = await host.load();
-    const expected = [USE_ACTIVE_MODEL, ...host.registry.getAvailable().map((model, index) => `${index + 1}. ${model.provider}/${model.id}`)];
+    const expected = [
+      USE_ACTIVE_MODEL,
+      ...host.registry.getAvailable().map((model, index) => `${index + 1}. ${model.provider}/${model.id}`),
+    ];
     const options = await chooseReviewer(host, extension, labelFor(host, FAKE_A));
     assert.deepEqual(options, expected);
     assert.notEqual(labelFor(host, SLASH_A), labelFor(host, SLASH_B));
@@ -275,7 +384,9 @@ test("reviewer picker lists only real available entries and routes the selected 
     assertRouted(host, call, FAKE_A);
     call.release?.("approve");
     assert.equal(await decision, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("explicit reviewer selection survives every session_start reason and a fresh load", async () => {
@@ -299,7 +410,9 @@ test("explicit reviewer selection survives every session_start reason and a fres
     assertRouted(host, call, FAKE_A);
     call.release?.("approve");
     assert.equal(await decision, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("a queued attempt keeps its captured reviewer while a later selection applies to new attempts", async () => {
@@ -329,7 +442,9 @@ test("a queued attempt keeps its captured reviewer while a later selection appli
     assertRouted(host, callB, FAKE_B);
     callB.release?.("approve");
     assert.equal(await third, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("a failed real save keeps disk unchanged but session reviewer governs next attempt", async () => {
@@ -351,8 +466,12 @@ test("a failed real save keeps disk unchanged but session reviewer governs next 
     assertRouted(host, call, FAKE_B);
     call.release?.("approve");
     assert.equal(await decision, undefined);
-    const fresh = await host.load(), next = bash(host, fresh, "noop-cmd second"), persisted = await waitFor(host.calls, 1);
-    assertRouted(host, persisted, FAKE_A); persisted.release?.("approve"); await next;
+    const fresh = await host.load(),
+      next = bash(host, fresh, "noop-cmd second"),
+      persisted = await waitFor(host.calls, 1);
+    assertRouted(host, persisted, FAKE_A);
+    persisted.release?.("approve");
+    await next;
     await chooseReviewer(host, extension, labelFor(host, FAKE_B), true);
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { provider: FAKE_B.provider, model: FAKE_B.id });
   } finally {
@@ -378,7 +497,9 @@ test("a selected model removed from the registry asks the human and never stream
     (await waitFor(host.confirms, 1)).resolve(false);
     assert.equal((await rejected)?.block, true);
     assert.deepEqual(host.calls, []);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("a selected model losing configured auth reports the real Pi auth error to the human", async () => {
@@ -393,10 +514,15 @@ test("a selected model losing configured auth reports the real Pi auth error to 
     assert.match(confirm.message, /Automatic review failed: Provider is not configured: phase6-noauth/);
     confirm.resolve(false);
     assert.equal((await decision)?.block, true);
-    assert.deepEqual(host.calls.map((call) => key(call)), [key(NOAUTH)]);
+    assert.deepEqual(
+      host.calls.map((call) => key(call)),
+      [key(NOAUTH)],
+    );
     assertRouted(host, host.calls[0] as Call, NOAUTH);
     assert.equal(host.calls[0]?.release, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("without UI, a missing or unauthenticated selected reviewer blocks without a dialog or substitute", async () => {
@@ -415,9 +541,14 @@ test("without UI, a missing or unauthenticated selected reviewer blocks without 
     assert.equal(noauth?.block, true);
     assert.match(noauth?.reason ?? "", /Provider is not configured: phase6-noauth/);
     assert.equal(host.confirms.length, 0);
-    assert.deepEqual(host.calls.map((call) => key(call)), [key(NOAUTH)]);
+    assert.deepEqual(
+      host.calls.map((call) => key(call)),
+      [key(NOAUTH)],
+    );
     assertRouted(host, host.calls[0] as Call, NOAUTH);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("selecting another reviewer while an unauthenticated fallback dialog is open leaves that attempt governed by its dialog", async () => {
@@ -438,7 +569,9 @@ test("selecting another reviewer while an unauthenticated fallback dialog is ope
     assertRouted(host, call, FAKE_B);
     call.release?.("approve");
     assert.equal(await next, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("Use active model clears the persisted pair and later attempts follow the live conversation model", async () => {
@@ -462,7 +595,9 @@ test("Use active model clears the persisted pair and later attempts follow the l
     assertRouted(host, callNext, ACTIVE_NEXT);
     callNext.release?.("approve");
     assert.equal(await second, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("clearing while an explicit review is unresolved leaves it running and later attempts follow the live active model", async () => {
@@ -488,7 +623,9 @@ test("clearing while an explicit review is unresolved leaves it running and late
     assertRouted(host, callNext, ACTIVE_NEXT);
     callNext.release?.("approve");
     assert.equal(await third, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("session_start while the clear picker is open discards that delayed clear and keeps the prior selection", async () => {
@@ -500,12 +637,16 @@ test("session_start while the clear picker is open discards that delayed clear a
     assert.ok(command, "permissions command is registered");
     const start = host.selects.length;
     const pending = command.handler("", host.context(true));
-    await host.driver.next(host.driver.screens.length - 1); host.driver.row(2);
+    await host.driver.next(host.driver.screens.length - 1);
+    host.driver.row(2);
     const picker = await waitFor(host.selects, start);
     await sessionStart(host, extension, "reload");
     picker.resolve(USE_ACTIVE_MODEL);
     await pending;
-    assert.deepEqual(JSON.parse(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8")).reviewer, { provider: FAKE_A.provider, model: FAKE_A.id });
+    assert.deepEqual(JSON.parse(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8")).reviewer, {
+      provider: FAKE_A.provider,
+      model: FAKE_A.id,
+    });
     const decision = bash(host, extension, "noop-cmd first");
     const call = await waitFor(host.calls, 0);
     assertRouted(host, call, FAKE_A);
@@ -513,47 +654,110 @@ test("session_start while the clear picker is open discards that delayed clear a
     assert.equal(await decision, undefined);
     await chooseReviewer(host, extension, USE_ACTIVE_MODEL, true);
     assert.equal(JSON.parse(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8")).reviewer, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("unsaved explicit selection routes now but resets on session_start and fresh load", async () => {
-  const host = await createHost(); try {
-    const extension = await host.load(); const path = join(host.globalDir, "auto-permissions.json"), before = readFileSync(path, "utf8");
-    await chooseReviewer(host, extension, labelFor(host, FAKE_A)); assert.equal(readFileSync(path, "utf8"), before);
-    for (const [current, expected] of [[extension, FAKE_A], [await host.load(), ACTIVE]] as const) {
-      const index = host.calls.length, pending = bash(host, current, "noop-cmd first"); const call = await waitFor(host.calls, index); assertRouted(host, call, expected); call.release?.("approve"); assert.equal(await pending, undefined);
+  const host = await createHost();
+  try {
+    const extension = await host.load();
+    const path = join(host.globalDir, "auto-permissions.json"),
+      before = readFileSync(path, "utf8");
+    await chooseReviewer(host, extension, labelFor(host, FAKE_A));
+    assert.equal(readFileSync(path, "utf8"), before);
+    for (const [current, expected] of [
+      [extension, FAKE_A],
+      [await host.load(), ACTIVE],
+    ] as const) {
+      const index = host.calls.length,
+        pending = bash(host, current, "noop-cmd first");
+      const call = await waitFor(host.calls, index);
+      assertRouted(host, call, expected);
+      call.release?.("approve");
+      assert.equal(await pending, undefined);
     }
-    await sessionStart(host, extension, "new"); const pending = bash(host, extension, "noop-cmd second"), call = await waitFor(host.calls, 2); assertRouted(host, call, ACTIVE); call.release?.("approve"); await pending;
-  } finally { await host.close(); }
+    await sessionStart(host, extension, "new");
+    const pending = bash(host, extension, "noop-cmd second"),
+      call = await waitFor(host.calls, 2);
+    assertRouted(host, call, ACTIVE);
+    call.release?.("approve");
+    await pending;
+  } finally {
+    await host.close();
+  }
 });
 
 test("active session choice follows live model and reset reveals saved explicit pair", async () => {
-  const host = await createHost(); try {
-    const extension = await host.load(); await chooseReviewer(host, extension, labelFor(host, FAKE_A), true);
-    const path = join(host.globalDir, "auto-permissions.json"), before = readFileSync(path, "utf8"); await chooseReviewer(host, extension, USE_ACTIVE_MODEL);
-    host.setActive(ACTIVE_NEXT); const first = bash(host, extension, "noop-cmd first"), active = await waitFor(host.calls, 0); assertRouted(host, active, ACTIVE_NEXT); active.release?.("approve"); await first;
+  const host = await createHost();
+  try {
+    const extension = await host.load();
+    await chooseReviewer(host, extension, labelFor(host, FAKE_A), true);
+    const path = join(host.globalDir, "auto-permissions.json"),
+      before = readFileSync(path, "utf8");
+    await chooseReviewer(host, extension, USE_ACTIVE_MODEL);
+    host.setActive(ACTIVE_NEXT);
+    const first = bash(host, extension, "noop-cmd first"),
+      active = await waitFor(host.calls, 0);
+    assertRouted(host, active, ACTIVE_NEXT);
+    active.release?.("approve");
+    await first;
     assert.equal(readFileSync(path, "utf8"), before);
-    const command = extension.commands.get("permissions")!; let screen = host.driver.screens.length;
-    const menu = command.handler("", host.context()); await host.driver.next(screen++); host.driver.key("\u0012"); await host.driver.next(screen); host.driver.key("\u001b"); await menu;
-    const second = bash(host, extension, "noop-cmd second"), explicit = await waitFor(host.calls, 1); assertRouted(host, explicit, FAKE_A); explicit.release?.("approve"); await second;
-  } finally { await host.close(); }
+    const command = extension.commands.get("permissions")!;
+    let screen = host.driver.screens.length;
+    const menu = command.handler("", host.context());
+    await host.driver.next(screen++);
+    host.driver.key("\u0012");
+    await host.driver.next(screen);
+    host.driver.key("\u001b");
+    await menu;
+    const second = bash(host, extension, "noop-cmd second"),
+      explicit = await waitFor(host.calls, 1);
+    assertRouted(host, explicit, FAKE_A);
+    explicit.release?.("approve");
+    await second;
+  } finally {
+    await host.close();
+  }
 });
 
-for (const event of ["session_start", "session_shutdown"] as const) for (const nested of [false, true]) test(`real ${event} invalidates waiting ${nested ? "picker" : "screen"}`, async () => {
-  const host = await createHost(); try {
-    const extension = await host.load(), command = extension.commands.get("permissions")!, before = readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8");
-    const pending = command.handler("", host.context()); await host.driver.next(0); let picker: Select | undefined;
-    if (nested) { host.driver.row(2); picker = await waitFor(host.selects, 0); }
-    const handler = extension.handlers.get(event)![0]!; await handler({ type: event, reason: "reload" }, host.context()); picker?.resolve(labelFor(host, FAKE_A)); await pending;
-    assert.equal(host.driver.mounted, undefined); assert.equal(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8"), before);
-  } finally { await host.close(); }
-});
+for (const event of ["session_start", "session_shutdown"] as const)
+  for (const nested of [false, true])
+    test(`real ${event} invalidates waiting ${nested ? "picker" : "screen"}`, async () => {
+      const host = await createHost();
+      try {
+        const extension = await host.load(),
+          command = extension.commands.get("permissions")!,
+          before = readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8");
+        const pending = command.handler("", host.context());
+        await host.driver.next(0);
+        let picker: Select | undefined;
+        if (nested) {
+          host.driver.row(2);
+          picker = await waitFor(host.selects, 0);
+        }
+        const handler = extension.handlers.get(event)![0]!;
+        await handler({ type: event, reason: "reload" }, host.context());
+        picker?.resolve(labelFor(host, FAKE_A));
+        await pending;
+        assert.equal(host.driver.mounted, undefined);
+        assert.equal(readFileSync(join(host.globalDir, "auto-permissions.json"), "utf8"), before);
+      } finally {
+        await host.close();
+      }
+    });
 
 const reviewerConfig = { ...DEFAULT_REVIEWER, model: { provider: FAKE_A.provider, id: FAKE_A.id } };
-const userText = (call: Call): string => (call.context.messages[0] as unknown as { content: { text: string }[] }).content[0]!.text;
-const cardOf = (text: string): string => text.split("<LATEST_PROPOSED_ACTION>\n")[1]!.split("\n</LATEST_PROPOSED_ACTION>")[0]!;
+const userText = (call: Call): string =>
+  (call.context.messages[0] as unknown as { content: { text: string }[] }).content[0]!.text;
+const cardOf = (text: string): string =>
+  text.split("<LATEST_PROPOSED_ACTION>\n")[1]!.split("\n</LATEST_PROPOSED_ACTION>")[0]!;
 const reviewWith = (host: Host, input: { command?: string; tool?: string; arguments?: unknown }) =>
-  createPiReviewer(host.context() as unknown as ReviewContext, createReviewerState())({ ...input, reviewer: reviewerConfig, reviewEvidence: DEFAULT_REVIEW_EVIDENCE, signal: undefined });
+  createPiReviewer(
+    host.context() as unknown as ReviewContext,
+    createReviewerState(),
+  )({ ...input, reviewer: reviewerConfig, reviewEvidence: DEFAULT_REVIEW_EVIDENCE, signal: undefined });
 
 test("non-Bash review sends exact tool identity and complete arguments to the selected provider", async () => {
   const host = await createHost();
@@ -567,7 +771,9 @@ test("non-Bash review sends exact tool identity and complete arguments to the se
     call.release?.("approve");
     const result = await decision;
     assert.equal(result.ok && result.verdict.decision, "approve");
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("command-only review reaches the provider without routing metadata", async () => {
@@ -582,16 +788,23 @@ test("command-only review reaches the provider without routing metadata", async 
     assert.equal(text.includes("undefined"), false);
     call.release?.("approve", "none");
     await decision;
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("oversize non-Bash arguments fail the budget and never reach the provider or approve", async () => {
   const host = await createHost();
   try {
-    const result = await reviewWith(host, { tool: "write", arguments: { path: "big.md", content: "x".repeat(200_000) } });
+    const result = await reviewWith(host, {
+      tool: "write",
+      arguments: { path: "big.md", content: "x".repeat(200_000) },
+    });
     assert.deepEqual(result, { ok: false, error: BUDGET_EXCEEDED_ERROR });
     assert.equal(host.calls.length, 0);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("non-serializable non-Bash arguments fail closed without reaching the provider", async () => {
@@ -600,7 +813,9 @@ test("non-serializable non-Bash arguments fail closed without reaching the provi
     const result = await reviewWith(host, { tool: "custom", arguments: { run() {} } });
     assert.deepEqual(result, { ok: false, error: "review request arguments must be JSON-serializable" });
     assert.equal(host.calls.length, 0);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real loader sends an unmatched Write through the registered handler with full arguments and identity", async () => {
@@ -615,26 +830,48 @@ test("real loader sends an unmatched Write through the registered handler with f
     assert.deepEqual(JSON.parse(cardOf(userText(call))), { tool: "write", arguments: args, cwd: host.cwd });
     call.release?.("approve");
     assert.equal(await decision, undefined);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real loader blocks Read .env and Edit/Write secrets before any reviewer request", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", permissions: { deny: ["Read(./.env)", "Edit(./.env)", "Edit(./secrets/**)"] } }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({
+        reviewMode: "auto",
+        permissions: { deny: ["Read(./.env)", "Edit(./.env)", "Edit(./secrets/**)"] },
+      }),
+    );
     const extension = await host.load();
-    assert.match((await tool(host, extension, "read", { path: ".env" }))!.reason, /^Blocked by auto-approval \(Read\(\.\/\.env\), /);
-    assert.match((await tool(host, extension, "edit", { path: "./.env", edits: [] }))!.reason, /^Blocked by auto-approval \(Edit\(\.\/\.env\), /);
-    assert.match((await tool(host, extension, "write", { path: "secrets/key.pem", content: "x" }))!.reason, /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /);
+    assert.match(
+      (await tool(host, extension, "read", { path: ".env" }))!.reason,
+      /^Blocked by auto-approval \(Read\(\.\/\.env\), /,
+    );
+    assert.match(
+      (await tool(host, extension, "edit", { path: "./.env", edits: [] }))!.reason,
+      /^Blocked by auto-approval \(Edit\(\.\/\.env\), /,
+    );
+    assert.match(
+      (await tool(host, extension, "write", { path: "secrets/key.pem", content: "x" }))!.reason,
+      /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /,
+    );
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 0);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real loader: exact git status needs no provider, git status --short reaches the reviewer, compound rm asks", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", permissions: { allow: ["Bash(git status)"], ask: ["Bash(rm *)"] } }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ reviewMode: "auto", permissions: { allow: ["Bash(git status)"], ask: ["Bash(rm *)"] } }),
+    );
     const extension = await host.load();
     assert.equal(await bash(host, extension, "git status"), undefined);
     assert.equal(host.calls.length, 0);
@@ -650,7 +887,9 @@ test("real loader: exact git status needs no provider, git status --short reache
     prompt.resolve(false);
     assert.match((await compound)!.reason, /^Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)$/);
     assert.equal(host.calls.length, 1);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real loader: invalid config blocks a non-Bash tool with the run-tools message and no review", async () => {
@@ -658,10 +897,15 @@ test("real loader: invalid config blocks a non-Bash tool with the run-tools mess
   try {
     writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", rules: [] }));
     const extension = await host.load();
-    assert.match((await tool(host, extension, "read", { path: "notes.md" }))!.reason, /^auto-approval: invalid config - .+\. Fix it to run tools\.$/);
+    assert.match(
+      (await tool(host, extension, "read", { path: "notes.md" }))!.reason,
+      /^auto-approval: invalid config - .+\. Fix it to run tools\.$/,
+    );
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 0);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 const SEED_BYTES = JSON.stringify(SEED_CONFIG, null, 2) + "\n";
@@ -677,14 +921,19 @@ test("real factory load writes nothing; session_start seeds before footer refres
     assert.deepEqual(readdirSync(host.home), []);
     const footerSeen: boolean[] = [];
     const ctx = host.context(true) as unknown as { ui: { setStatus: (key: string, value: unknown) => void } };
-    ctx.ui.setStatus = () => { footerSeen.push(fs.existsSync(path)); };
+    ctx.ui.setStatus = () => {
+      footerSeen.push(fs.existsSync(path));
+    };
     const startup = extension.handlers.get("session_start")![0]!;
     await startup({ type: "session_start", reason: "startup" }, ctx as never);
     assert.ok(footerSeen.length > 0);
     assert.ok(footerSeen.every(Boolean), "the seed exists at every footer refresh");
     assert.equal(readFileSync(path, "utf8"), SEED_BYTES);
     assert.equal(fs.existsSync(projectConfigPath(host.cwd)), false);
-    assert.deepEqual(host.messages.filter((message) => message.startsWith("warning:")), []);
+    assert.deepEqual(
+      host.messages.filter((message) => message.startsWith("warning:")),
+      [],
+    );
     fs.utimesSync(path, OLD_MTIME, OLD_MTIME);
     await startup({ type: "session_start", reason: "startup" }, ctx as never);
     assert.equal(readFileSync(path, "utf8"), SEED_BYTES);
@@ -692,20 +941,36 @@ test("real factory load writes nothing; session_start seeds before footer refres
     const rm = bash(host, extension, "rm file.txt");
     (await waitFor(host.confirms, 0)).resolve(false);
     assert.match((await rm)!.reason, /^Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)$/);
-    assert.match((await tool(host, extension, "read", { path: ".env" }))!.reason, /^Blocked by auto-approval \(Read\(\.\/\.env\), /);
-    assert.match((await tool(host, extension, "edit", { path: "secrets/key.txt", edits: [] }))!.reason, /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /);
-    assert.match((await tool(host, extension, "write", { path: ".env", content: "x" }))!.reason, /^Blocked by auto-approval \(Edit\(\.\/\.env\), /);
+    assert.match(
+      (await tool(host, extension, "read", { path: ".env" }))!.reason,
+      /^Blocked by auto-approval \(Read\(\.\/\.env\), /,
+    );
+    assert.match(
+      (await tool(host, extension, "edit", { path: "secrets/key.txt", edits: [] }))!.reason,
+      /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /,
+    );
+    assert.match(
+      (await tool(host, extension, "write", { path: ".env", content: "x" }))!.reason,
+      /^Blocked by auto-approval \(Edit\(\.\/\.env\), /,
+    );
     assert.equal(await bash(host, extension, "git status"), undefined);
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 1);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real startup seed failure with a file parent warns, keeps handlers, and blocks protected calls without provider or confirmation", async () => {
   const host = await createHost("parent-file");
   try {
     const extension = await host.load();
-    assert.deepEqual([...extension.handlers.keys()].sort(), ["session_shutdown", "session_start", "tool_call", "tool_execution_end"]);
+    assert.deepEqual([...extension.handlers.keys()].sort(), [
+      "session_shutdown",
+      "session_start",
+      "tool_call",
+      "tool_execution_end",
+    ]);
     await sessionStart(host, extension, "startup");
     const warnings = host.messages.filter((message) => message.startsWith(SEED_WARNING));
     assert.equal(warnings.length, 1);
@@ -714,7 +979,9 @@ test("real startup seed failure with a file parent warns, keeps handlers, and bl
     assert.match((await tool(host, extension, "read", { path: ".env" }))!.reason, INVALID_CONFIG);
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 0);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("readable missing global policy keeps the in-memory seed when the seed write fails", async () => {
@@ -727,11 +994,16 @@ test("readable missing global policy keeps the in-memory seed when the seed writ
     const rm = bash(host, extension, "rm file.txt");
     (await waitFor(host.confirms, 0)).resolve(false);
     assert.match((await rm)!.reason, /^Requires confirmation \(Bash\(rm \*\), .+\) \(user declined\)$/);
-    assert.match((await tool(host, extension, "edit", { path: "secrets/key.txt", edits: [] }))!.reason, /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /);
+    assert.match(
+      (await tool(host, extension, "edit", { path: "secrets/key.txt", edits: [] }))!.reason,
+      /^Blocked by auto-approval \(Edit\(\.\/secrets\/\*\*\), /,
+    );
     assert.equal(await bash(host, extension, "git status"), undefined);
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 1);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("existing invalid or legacy global policy is never repaired and still blocks; explicit opt-out still bypasses", async () => {
@@ -749,7 +1021,9 @@ test("existing invalid or legacy global policy is never repaired and still block
       assert.equal(host.calls.length, 0);
       assert.equal(host.confirms.length, 0);
       assert.equal(host.messages.filter((message) => message.startsWith(SEED_WARNING)).length, 0);
-    } finally { await host.close(); }
+    } finally {
+      await host.close();
+    }
   }
   const host = await createHost();
   try {
@@ -762,18 +1036,27 @@ test("existing invalid or legacy global policy is never repaired and still block
     assert.equal(await bash(host, extension, "rm file.txt"), undefined);
     assert.equal(host.calls.length, 0);
     assert.equal(host.confirms.length, 0);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 const HISTORY_KEYS = ["command", "decision", "time", "tool"];
 const historyPathOf = (cwd: string) => join(cwd, ".pi", "pi-auto-approval", "history.jsonl");
-const historyRowsIn = (cwd: string): Array<Record<string, unknown>> => readFileSync(historyPathOf(cwd), "utf8").trimEnd().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+const historyRowsIn = (cwd: string): Array<Record<string, unknown>> =>
+  readFileSync(historyPathOf(cwd), "utf8")
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 const afterTick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 test("real confirmed bash persists four redacted keys only, never the raw token or reasons", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "manual", permissions: { ask: ["Bash(echo *)"] } }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ reviewMode: "manual", permissions: { ask: ["Bash(echo *)"] } }),
+    );
     const extension = await host.load();
     const pending = bash(host, extension, "echo token=abc123 && git status");
     (await waitFor(host.confirms, 0)).resolve(true);
@@ -788,13 +1071,18 @@ test("real confirmed bash persists four redacted keys only, never the raw token 
     assert.doesNotMatch(String(row.command), /abc123/);
     const raw = readFileSync(historyPathOf(host.cwd), "utf8");
     assert.doesNotMatch(raw, /abc123|Requires confirmation|user declined/);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real Read, Edit, Write, and powershell persist path or command only, with no file body", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", permissions: {} }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ reviewMode: "auto", permissions: {} }),
+    );
     const extension = await host.load();
     const inputs: Array<[string, unknown]> = [
       ["read", { path: "notes.txt" }],
@@ -807,50 +1095,73 @@ test("real Read, Edit, Write, and powershell persist path or command only, with 
       (await waitFor(host.calls, index)).release?.("approve");
       assert.equal(await pending, undefined);
     }
-    assert.deepEqual(historyRowsIn(host.cwd).map((row) => ({ tool: row.tool, command: row.command, decision: row.decision })), [
-      { tool: "read", command: "notes.txt", decision: "approved" },
-      { tool: "edit", command: "src/a.ts", decision: "approved" },
-      { tool: "write", command: "out.txt", decision: "approved" },
-      { tool: "powershell", command: "Write-Output hello", decision: "approved" },
-    ]);
+    assert.deepEqual(
+      historyRowsIn(host.cwd).map((row) => ({ tool: row.tool, command: row.command, decision: row.decision })),
+      [
+        { tool: "read", command: "notes.txt", decision: "approved" },
+        { tool: "edit", command: "src/a.ts", decision: "approved" },
+        { tool: "write", command: "out.txt", decision: "approved" },
+        { tool: "powershell", command: "Write-Output hello", decision: "approved" },
+      ],
+    );
     assert.doesNotMatch(readFileSync(historyPathOf(host.cwd), "utf8"), /SECRET-BODY/);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real history save failure keeps approve and deny outcomes and warns exactly once", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }),
+    );
     const extension = await host.load();
     mkdirSync(historyPathOf(host.cwd), { recursive: true });
     const approved = bash(host, extension, "noop-cmd first");
     (await waitFor(host.calls, 0)).release?.("approve");
     assert.equal(await approved, undefined);
     assert.match((await bash(host, extension, "rm file.txt"))!.reason, /^Blocked by auto-approval \(Bash\(rm \*\), /);
-    const warnings = host.messages.filter((message) => message.startsWith("warning:") && message.includes("auto-approval history"));
+    const warnings = host.messages.filter(
+      (message) => message.startsWith("warning:") && message.includes("auto-approval history"),
+    );
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /History save failed/);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real protection off writes no history file", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ enabled: false, reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ enabled: false, reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }),
+    );
     const extension = await host.load();
     assert.equal(await bash(host, extension, "rm file.txt"), undefined);
     assert.equal(existsSync(historyPathOf(host.cwd)), false);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real outer abort with pending confirmation records one blocked row and ignores late approval", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "manual", permissions: { ask: ["Bash(echo *)"] } }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ reviewMode: "manual", permissions: { ask: ["Bash(echo *)"] } }),
+    );
     const extension = await host.load();
     const controller = new AbortController();
     const handler = (extension.handlers.get("tool_call") ?? [])[0]!;
-    const pending = handler({ type: "tool_call", toolName: "bash", toolCallId: "abort-confirm", input: { command: "echo token=abc123" } }, { ...(host.context(true) as object), signal: controller.signal }) as Promise<Block>;
+    const pending = handler(
+      { type: "tool_call", toolName: "bash", toolCallId: "abort-confirm", input: { command: "echo token=abc123" } },
+      { ...(host.context(true) as object), signal: controller.signal },
+    ) as Promise<Block>;
     const prompt = await waitFor(host.confirms, 0);
     controller.abort();
     assert.equal((await pending)?.block, true);
@@ -859,17 +1170,25 @@ test("real outer abort with pending confirmation records one blocked row and ign
     const rows = historyRowsIn(host.cwd);
     assert.equal(rows.length, 1);
     assert.equal(rows[0]!.decision, "blocked");
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 test("real outer abort with pending review records one blocked row and ignores late approval", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ reviewMode: "auto", permissions: {} }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ reviewMode: "auto", permissions: {} }),
+    );
     const extension = await host.load();
     const controller = new AbortController();
     const handler = (extension.handlers.get("tool_call") ?? [])[0]!;
-    const pending = handler({ type: "tool_call", toolName: "bash", toolCallId: "abort-review", input: { command: "noop-cmd first" } }, { ...(host.context(true) as object), signal: controller.signal }) as Promise<Block>;
+    const pending = handler(
+      { type: "tool_call", toolName: "bash", toolCallId: "abort-review", input: { command: "noop-cmd first" } },
+      { ...(host.context(true) as object), signal: controller.signal },
+    ) as Promise<Block>;
     const review = await waitFor(host.calls, 0);
     controller.abort();
     assert.equal((await pending)?.block, true);
@@ -877,12 +1196,20 @@ test("real outer abort with pending review records one blocked row and ignores l
     await afterTick();
     const rows = historyRowsIn(host.cwd);
     assert.equal(rows.length, 1);
-    assert.deepEqual({ tool: rows[0]!.tool, command: rows[0]!.command, decision: rows[0]!.decision }, { tool: "bash", command: "noop-cmd first", decision: "blocked" });
-  } finally { await host.close(); }
+    assert.deepEqual(
+      { tool: rows[0]!.tool, command: rows[0]!.command, decision: rows[0]!.decision },
+      { tool: "bash", command: "noop-cmd first", decision: "blocked" },
+    );
+  } finally {
+    await host.close();
+  }
 });
 
 function abortAfterMicrotasks(controller: AbortController, hops: number): () => void {
-  const hop = (remaining: number): void => { if (remaining === 0) controller.abort(); else queueMicrotask(() => hop(remaining - 1)); };
+  const hop = (remaining: number): void => {
+    if (remaining === 0) controller.abort();
+    else queueMicrotask(() => hop(remaining - 1));
+  };
   return () => hop(hops);
 }
 function contextWithStatus(host: Host, signal: AbortSignal | undefined, setStatus: () => void): object {
@@ -893,15 +1220,23 @@ function contextWithStatus(host: Host, signal: AbortSignal | undefined, setStatu
 test("real off with an already-aborted signal blocks without writing history", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ enabled: false, reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ enabled: false, reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }),
+    );
     const extension = await host.load();
     const controller = new AbortController();
     controller.abort();
     const handler = (extension.handlers.get("tool_call") ?? [])[0]!;
-    const result = await handler({ type: "tool_call", toolName: "bash", toolCallId: "off-aborted", input: { command: "rm file.txt" } }, { ...(host.context(true) as object), signal: controller.signal }) as Block;
+    const result = (await handler(
+      { type: "tool_call", toolName: "bash", toolCallId: "off-aborted", input: { command: "rm file.txt" } },
+      { ...(host.context(true) as object), signal: controller.signal },
+    )) as Block;
     assert.equal(result?.block, true);
     assert.equal(existsSync(historyPathOf(host.cwd)), false);
-  } finally { await host.close(); }
+  } finally {
+    await host.close();
+  }
 });
 
 for (const enabled of [false, true]) {
@@ -956,10 +1291,13 @@ for (const enabled of [false, true]) {
 test("production reviewer uses one trust sample per call for project instructions", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({
-      reviewMode: "auto",
-      reviewEvidence: { projectInstructions: true },
-    }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({
+        reviewMode: "auto",
+        reviewEvidence: { projectInstructions: true },
+      }),
+    );
     const instructions = "Fixture project instructions";
     writeFileSync(join(host.cwd, "AGENTS.md"), instructions);
     const handler = (await host.load()).handlers.get("tool_call")?.[0];
@@ -968,12 +1306,15 @@ test("production reviewer uses one trust sample per call for project instruction
     const ctx = { ...(host.context(false) as object), isProjectTrusted: () => ++trustSamples > 1 } as never;
     for (const trusted of [false, true]) {
       const index = Number(trusted);
-      const pending = handler({
-        type: "tool_call",
-        toolName: "bash",
-        toolCallId: `trust-${index}`,
-        input: { command: "unmatched-command" },
-      }, ctx);
+      const pending = handler(
+        {
+          type: "tool_call",
+          toolName: "bash",
+          toolCallId: `trust-${index}`,
+          input: { command: "unmatched-command" },
+        },
+        ctx,
+      );
       const review = await waitFor(host.calls, index);
       review.release?.("approve");
       assert.equal(await pending, undefined);
@@ -1058,9 +1399,10 @@ test("untrusted local allow-only file gets one D25 notice across two calls", asy
       assert.ok(decision);
       assert.match(decision.reason, /requires confirmation/i);
     }
-    assert.deepEqual(host.messages.filter((message) => message.includes("because the project is untrusted.")), [
-      `info:Ignored project settings from ${local} because the project is untrusted.`,
-    ]);
+    assert.deepEqual(
+      host.messages.filter((message) => message.includes("because the project is untrusted.")),
+      [`info:Ignored project settings from ${local} because the project is untrusted.`],
+    );
   } finally {
     await host.close();
   }
@@ -1074,45 +1416,72 @@ for (const { hops, reason } of OFF_LATE_OUTCOMES) {
   test(`real off with a ${hops}-microtask abort keeps the race outcome and writes no history`, async () => {
     const host = await createHost();
     try {
-      writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ enabled: false, reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }));
+      writeFileSync(
+        join(host.globalDir, "auto-permissions.json"),
+        JSON.stringify({ enabled: false, reviewMode: "auto", permissions: { deny: ["Bash(rm *)"] } }),
+      );
       const extension = await host.load();
       const controller = new AbortController();
       const handler = (extension.handlers.get("tool_call") ?? [])[0]!;
-      const pending = handler({ type: "tool_call", toolName: "bash", toolCallId: `off-late-${hops}`, input: { command: "rm file.txt" } }, contextWithStatus(host, controller.signal, abortAfterMicrotasks(controller, hops))) as Promise<Block>;
+      const pending = handler(
+        { type: "tool_call", toolName: "bash", toolCallId: `off-late-${hops}`, input: { command: "rm file.txt" } },
+        contextWithStatus(host, controller.signal, abortAfterMicrotasks(controller, hops)),
+      ) as Promise<Block>;
       assert.equal((await pending)?.reason, reason);
       assert.equal(existsSync(historyPathOf(host.cwd)), false);
-    } finally { await host.close(); }
+    } finally {
+      await host.close();
+    }
   });
 
   test(`real enabled allow with a ${hops}-microtask abort records exactly one row matching the returned winner`, async () => {
     const host = await createHost();
     try {
-      writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ enabled: true, reviewMode: "manual", permissions: { allow: ["Bash(echo *)"] } }));
+      writeFileSync(
+        join(host.globalDir, "auto-permissions.json"),
+        JSON.stringify({ enabled: true, reviewMode: "manual", permissions: { allow: ["Bash(echo *)"] } }),
+      );
       const extension = await host.load();
       const controller = new AbortController();
       const handler = (extension.handlers.get("tool_call") ?? [])[0]!;
-      const pending = handler({ type: "tool_call", toolName: "bash", toolCallId: `on-late-${hops}`, input: { command: "echo ok" } }, contextWithStatus(host, controller.signal, abortAfterMicrotasks(controller, hops))) as Promise<Block>;
+      const pending = handler(
+        { type: "tool_call", toolName: "bash", toolCallId: `on-late-${hops}`, input: { command: "echo ok" } },
+        contextWithStatus(host, controller.signal, abortAfterMicrotasks(controller, hops)),
+      ) as Promise<Block>;
       const result = await pending;
       const rows = historyRowsIn(host.cwd);
       assert.equal(rows.length, 1);
       assert.equal(rows[0]!.decision, result?.block ? "blocked" : "approved");
       assert.equal(rows[0]!.command, "echo ok");
-    } finally { await host.close(); }
+    } finally {
+      await host.close();
+    }
   });
 }
 
 test("real enabled already-aborted call records exactly one blocked row", async () => {
   const host = await createHost();
   try {
-    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ enabled: true, reviewMode: "manual", permissions: { allow: ["Bash(echo *)"] } }));
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ enabled: true, reviewMode: "manual", permissions: { allow: ["Bash(echo *)"] } }),
+    );
     const extension = await host.load();
     const controller = new AbortController();
     controller.abort();
     const handler = (extension.handlers.get("tool_call") ?? [])[0]!;
-    const result = await handler({ type: "tool_call", toolName: "bash", toolCallId: "on-aborted", input: { command: "echo ok" } }, { ...(host.context(true) as object), signal: controller.signal }) as Block;
+    const result = (await handler(
+      { type: "tool_call", toolName: "bash", toolCallId: "on-aborted", input: { command: "echo ok" } },
+      { ...(host.context(true) as object), signal: controller.signal },
+    )) as Block;
     assert.equal(result?.block, true);
     const rows = historyRowsIn(host.cwd);
     assert.equal(rows.length, 1);
-    assert.deepEqual({ tool: rows[0]!.tool, command: rows[0]!.command, decision: rows[0]!.decision }, { tool: "bash", command: "echo ok", decision: "blocked" });
-  } finally { await host.close(); }
+    assert.deepEqual(
+      { tool: rows[0]!.tool, command: rows[0]!.command, decision: rows[0]!.decision },
+      { tool: "bash", command: "echo ok", decision: "blocked" },
+    );
+  } finally {
+    await host.close();
+  }
 });
