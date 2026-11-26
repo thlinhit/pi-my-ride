@@ -27,8 +27,23 @@ for (const source of [
   "echo ok\r\npwd", "echo ok &&", "echo ok |", "echo 'unfinished", "echo ok; ;pwd", "echo $(pwd)", "echo `pwd`", "cat <(pwd)",
   "for i in a; do echo $i; done", "f() { pwd; }", "(pwd)", "{ pwd; }", "! pwd", "((1+1))", "[[ -f x ]]",
   "if true; then pwd; fi", "echo x > out", "cat <<EOF\nx\nEOF", "cat <<< x", ">out", "x=1 pwd", "echo $HOME",
-  "echo *.ts", "echo ~", "echo {a,b}", "echo $'abc'", 'echo $"abc"', "a |& b", "coproc pwd", "", "#only comment",
+  "echo *.ts", "echo ~", "echo {a,b}", 'echo $"abc"', "a |& b", "coproc pwd", "", "#only comment",
 ]) test(`fails closed: ${JSON.stringify(source)}`, () => assert.equal(analyzeShell(source).supported, false));
+
+test("ANSI-C quotes with plain escapes preserve exact source", () => {
+  const source = String.raw`printf $'é/\n\t\\x\'\"'`;
+  const result = analyzeShell(source);
+  assert.equal(result.supported, true);
+  if (result.supported) assert.equal(result.components[0]?.command, source);
+});
+
+test("ANSI-C quotes with other escapes require whole-command review", () => {
+  for (const sequence of ["\\x2drf", "\\u002f", "\\U0000002f", "\\057", "\\cA", "\\e", "\\r"]) {
+    const result = analyzeShell(`printf $'${sequence}'`);
+    assert.equal(result.supported, false, sequence);
+    if (!result.supported) assert.equal(result.reviewable, true, sequence);
+  }
+});
 
 test("distinguishes reviewable syntax from invalid or parser-ambiguous input", () => {
   for (const source of ["echo $HOME", "x=1", "echo x >out", "echo $(pwd)"]) {

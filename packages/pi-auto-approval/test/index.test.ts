@@ -185,6 +185,25 @@ test("whole allow never skips components; component allows pass and quoted deny 
   assert.equal(calls.length, 0);
 });
 
+for (const level of ["allow", "deny"] as const) {
+  test(`ANSI-C quoted Obsidian content: ${level} rule decides without review`, async () => {
+    const command = `obsidian create path="1. Inbox/Work/a.md" content=$'l1\\nl2'`;
+    const { ctx, calls } = context();
+    const rules = [parsedRule('Bash(obsidian create path="1. Inbox/Work/*" content=*)', "allow")];
+    if (level === "deny") rules.push(parsedRule("Bash(obsidian create *)", "deny"));
+    let reviews = 0;
+    const result = await handleToolCall(event(command), ctx, () => config(rules, "auto"), {
+      review: async () => {
+        reviews++;
+        return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+      },
+    });
+    assert.equal(reviews, 0);
+    assert.equal(result?.block, level === "deny" ? true : undefined);
+    assert.equal(calls.length, 0);
+  });
+}
+
 test("component reviews retain source context and unchanged frozen input with one final outcome", async () => {
   const command = "echo dir && printf middle | tee out;echo '😀' & printf end";
   const input = Object.freeze({ command, timeout: 30 });
