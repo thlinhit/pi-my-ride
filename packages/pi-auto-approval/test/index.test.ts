@@ -709,13 +709,39 @@ for (const source of ["local", "shared"] as const) {
   });
 }
 
-test("untrusted shared and local deny and ask rules still apply", async (t) => {
+for (const { name, trusted, shared, local } of [
+  { name: "untrusted shared manual keeps global auto", trusted: false, shared: { reviewMode: "manual" }, local: {} },
+  { name: "untrusted local manual keeps global auto", trusted: false, shared: {}, local: { reviewMode: "manual" } },
+  {
+    name: "trusted local auto overrides shared manual",
+    trusted: true,
+    shared: { reviewMode: "manual" },
+    local: { reviewMode: "auto" },
+  },
+]) {
+  test(name, async (t) => {
+    const { cwd, load } = projectFixture(t, shared, local);
+    const { ctx } = context({ cwd, hasUI: false, isProjectTrusted: () => trusted });
+    let reviews = 0;
+    assert.equal(await handleToolCall(event("unmatched-command"), ctx, load, {
+      review: async () => {
+        reviews++;
+        return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+      },
+    }), undefined);
+    assert.equal(reviews, 1);
+  });
+}
+
+test("untrusted shared and local deny and ask rules apply without a D25 notice", async (t) => {
   const { cwd, load } = projectFixture(
     t,
     { permissions: { deny: ["Bash(echo shared-deny)"], ask: ["Bash(echo shared-ask)"] } },
     { permissions: { deny: ["Bash(echo local-deny)"], ask: ["Bash(echo local-ask)"] } },
   );
+  const notices: string[] = [];
   const { ctx } = context({ cwd, hasUI: false, isProjectTrusted: () => false });
+  ctx.ui.notify = (message) => { notices.push(message); };
   for (const [source, file] of [
     ["shared", "auto-permissions.json"],
     ["local", "auto-permissions.local.json"],
@@ -730,6 +756,7 @@ test("untrusted shared and local deny and ask rules still apply", async (t) => {
       assert.ok(decision.reason.endsWith(`${file})`));
     }
   }
+  assert.deepEqual(notices.filter((message) => message.startsWith("Ignored project settings from ")), []);
 });
 
 test("home gate sees seed rules once and honors untrusted home local deny", async (t) => {

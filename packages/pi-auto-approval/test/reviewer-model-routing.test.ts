@@ -936,6 +936,42 @@ for (const enabled of [false, true]) {
   });
 }
 
+test("production reviewer uses one trust sample per call for project instructions", async () => {
+  const host = await createHost();
+  try {
+    writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({
+      reviewMode: "auto",
+      reviewEvidence: { projectInstructions: true },
+    }));
+    const instructions = "Fixture project instructions";
+    writeFileSync(join(host.cwd, "AGENTS.md"), instructions);
+    const handler = (await host.load()).handlers.get("tool_call")?.[0];
+    assert.ok(handler);
+    let trustSamples = 0;
+    const ctx = { ...(host.context(false) as object), isProjectTrusted: () => ++trustSamples > 1 } as never;
+    for (const trusted of [false, true]) {
+      const index = Number(trusted);
+      const pending = handler({
+        type: "tool_call",
+        toolName: "bash",
+        toolCallId: `trust-${index}`,
+        input: { command: "unmatched-command" },
+      }, ctx);
+      const review = await waitFor(host.calls, index);
+      review.release?.("approve");
+      assert.equal(await pending, undefined);
+      assert.equal(
+        review.context.systemPrompt?.includes(instructions),
+        trusted,
+        "provider sees project instructions only when the gate trusts the project",
+      );
+      assert.equal(trustSamples, index + 1);
+    }
+  } finally {
+    await host.close();
+  }
+});
+
 test("untrusted project settings and allow rules are ignored with one notice per file per session", async () => {
   const host = await createHost();
   try {
@@ -966,6 +1002,48 @@ test("untrusted project settings and allow rules are ignored with one notice per
     await extension.handlers.get("session_start")![0]!({ type: "session_start" }, ctx);
     assert.match(((await handler(call, ctx)) as Block)!.reason, /requires confirmation/i);
     assert.deepEqual(notices(), [...expected, ...expected]);
+  } finally {
+    await host.close();
+  }
+});
+
+test("untrusted project enabled true leaves global protection off and writes no history", async () => {
+  const host = await createHost();
+  try {
+    writeFileSync(join(host.globalDir, "auto-permissions.json"), '{"enabled":false,"reviewMode":"auto"}');
+    const shared = projectConfigPath(host.cwd);
+    mkdirSync(dirname(shared), { recursive: true });
+    writeFileSync(shared, '{"enabled":true}');
+    writeFileSync(join(dirname(shared), "auto-permissions.local.json"), '{"enabled":true}');
+    const pending = bash(host, await host.load(), "unmatched-command", false);
+    // Settle any unexpected provider request instead of waiting for its timeout.
+    const review = await Promise.race([pending.then(() => undefined), waitFor(host.calls, 0)]);
+    review?.release?.("approve");
+    assert.equal(await pending, undefined);
+    assert.equal(host.calls.length, 0);
+    assert.equal(existsSync(historyPathOf(host.cwd)), false);
+  } finally {
+    await host.close();
+  }
+});
+
+test("untrusted local allow-only file gets one D25 notice across two calls", async () => {
+  const host = await createHost();
+  try {
+    writeFileSync(join(host.globalDir, "auto-permissions.json"), '{"reviewMode":"manual"}');
+    const dir = dirname(projectConfigPath(host.cwd));
+    const local = join(dir, "auto-permissions.local.json");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(local, '{"permissions":{"allow":["Bash(unmatched-command)"]}}');
+    const extension = await host.load();
+    for (let i = 0; i < 2; i++) {
+      const decision = await bash(host, extension, "unmatched-command", false);
+      assert.ok(decision);
+      assert.match(decision.reason, /requires confirmation/i);
+    }
+    assert.deepEqual(host.messages.filter((message) => message.includes("because the project is untrusted.")), [
+      `info:Ignored project settings from ${local} because the project is untrusted.`,
+    ]);
   } finally {
     await host.close();
   }

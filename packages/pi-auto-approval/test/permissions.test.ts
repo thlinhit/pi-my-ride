@@ -143,6 +143,30 @@ test("menu and footer show trusted settings and session choices beat both files 
   }
 });
 
+test("menu and footer show global settings when project settings conflict and are untrusted", async () => {
+  const h = harness();
+  try {
+    const shared = projectConfigPath(h.cwd);
+    const local = join(dirname(shared), "auto-permissions.local.json");
+    mkdirSync(dirname(shared), { recursive: true });
+    writeFileSync(shared, '{"enabled":true,"reviewMode":"manual"}');
+    for (const enabled of [false, true]) {
+      writeFileSync(h.path, JSON.stringify({ enabled, reviewMode: "auto" }));
+      writeFileSync(local, JSON.stringify({ enabled: !enabled, reviewMode: "manual" }));
+      h.controller.refreshFooter(h.ctx);
+      assert.equal(h.statuses.at(-1), enabled ? "🛡️ auto" : "🛡️ off");
+      const pending = h.open();
+      const screen = (await h.next()).render(160).join("\n");
+      assert.ok(screen.includes(`Permission: ${enabled ? "on" : "off"}`));
+      assert.match(screen, /Review mode: auto/);
+      h.driver.key("\u001b");
+      await pending;
+    }
+  } finally {
+    h.close();
+  }
+});
+
 test("all binary rows toggle twice; closing keeps unsaved choices", async () => {
   const h = harness(); try {
     const bytes = readFileSync(h.path, "utf8"), pending = h.open(); await h.next();

@@ -12,7 +12,7 @@ import { recordHistory, type HistoryEntry, type HistoryResult } from "./history.
 import { createReviewDisplay } from "./ui/display.ts";
 import type { ConfigUi } from "./config.ts";
 import type { ReviewState } from "./ui/status.ts";
-import type { ReviewContext, ReviewResult, Reviewer } from "./review/session.ts";
+import type { ReviewResult, Reviewer } from "./review/session.ts";
 import { createPiReviewer, createReviewerState } from "./review/session.ts";
 
 export type { ReviewContext, ReviewInput, ReviewResult, Reviewer, ReviewerState } from "./review/session.ts";
@@ -339,7 +339,13 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
       snapshot,
       {
         reviewer: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-        review: createPiReviewer(ctx as unknown as ReviewContext, reviewerState),
+        review: createPiReviewer({
+          cwd: ctx.cwd,
+          get model() { return ctx.model; },
+          modelRegistry: ctx.modelRegistry,
+          sessionManager: ctx.sessionManager,
+          isProjectTrusted: () => snapshot.projectTrusted,
+        }, reviewerState),
         status: (report) => {
           lastReport = report;
           display.show(ctx, report.ui, { ...report, toolCallId: callToolId }, widgetKey, displayGeneration);
