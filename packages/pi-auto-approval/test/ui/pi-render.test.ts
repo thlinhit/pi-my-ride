@@ -161,7 +161,7 @@ test("actual factory keeps unverified row placement on widget fallback", async (
     },
   } as unknown as ExtensionContext;
 
-  await handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId: "factory-first", input: { command: "echo first" } }, ctx);
+  await handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId: "factory-first", input: { command: "noop-cmd first" } }, ctx);
   assert.notEqual(renderer.current, undefined, "the verified production version registers the renderer");
   assert.equal(widgets.length > 0, true, "the first call falls back until its row is ready");
   assert.equal(widgets.some((call) => String((call as unknown[])[1]).includes("auto-approval")), true);
@@ -581,7 +581,7 @@ test("actual extension factory routes a ready native row through Pi's resolver c
       notify: () => {},
     },
   } as unknown as ExtensionContext;
-  await handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId: "factory-registration-call", input: { command: "echo registration" } }, ctx);
+  await handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId: "factory-registration-call", input: { command: "noop-cmd registration" } }, ctx);
   assert.equal(typeof resolver, "function");
   const fallbackCount = widgets.length;
 
@@ -601,12 +601,12 @@ test("actual extension factory routes a ready native row through Pi's resolver c
   const connectedRenderers = runner.resolveToolRenderers("bash", () => nativeDefinition as unknown as ToolRenderers)!;
   const toolCallId = "factory-connected-row";
   const row = new ToolExecutionComponent(
-    "bash", toolCallId, { command: "echo connected" }, {}, connectedRenderers as never,
+    "bash", toolCallId, { command: "noop-cmd connected" }, {}, connectedRenderers as never,
     { requestRender: () => { if (cancelOnRedraw && confirmations.length > 1) controller.abort(); } } as never, cwd,
   );
   render(row);
   cancelOnRedraw = true;
-  const outcome = await handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId, input: { command: "echo connected" } }, ctx);
+  const outcome = await handlers.get("tool_call")!({ type: "tool_call", toolName: "bash", toolCallId, input: { command: "noop-cmd connected" } }, ctx);
   assert.deepEqual(outcome, { block: true, reason: "auto-approval: confirmation failed" });
   assert.equal(confirmations.length, 2);
   assert.equal(widgets.length, fallbackCount, "the ready call does not fall back to a widget");

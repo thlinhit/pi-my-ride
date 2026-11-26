@@ -6,7 +6,7 @@ import type { ReviewResult } from "../src/index.ts";
 import { parsePermissionRule } from "../src/rules.ts";
 import type { PermissionRule } from "../src/rules.ts";
 
-const bashEvent = { toolName: "bash", toolCallId: "parity-call", input: { command: "danger; echo harmless" } };
+const bashEvent = { toolName: "bash", toolCallId: "parity-call", input: { command: "danger; noop-cmd harmless" } };
 function baseRule(level: PermissionRule["level"], scope: PermissionRule["scope"] = "global", specifier = "danger"): PermissionRule {
   const parsed = parsePermissionRule(`Bash(${specifier})`, level, `${scope}.json`, scope, "fixture");
   if (!parsed.ok) throw new Error(parsed.error);
@@ -44,7 +44,7 @@ async function runRoute(placement: "widget" | "toolRow", options: {
     reviewer: { reasoningEffort: "low", timeoutMs: 30_000 },
     reviewEvidence: { projectInstructions: false },
   };
-  const decision = await handleToolCall({ ...bashEvent, input: { command: options.command ?? "danger; echo harmless" } }, {
+  const decision = await handleToolCall({ ...bashEvent, input: { command: options.command ?? "danger; noop-cmd harmless" } }, {
     cwd: "/tmp",
     hasUI: true,
     signal: options.aborted ? AbortSignal.abort() : undefined,
@@ -70,8 +70,8 @@ test("direct gate calls preserve authorization decisions and inputs across place
     { name: "ask rule", options: { rules: [baseRule("ask")] }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
     { name: "manual confirmation denied", options: { rules: [baseRule("ask")], confirm: async () => false }, expectedReason: /user declined/i, expectedReports: ["approval-required", "blocked"], confirmations: 1, reviews: 0 },
     { name: "ordinary allow", options: { command: "danger", rules: [baseRule("allow")] }, expectedReports: ["approved"], confirmations: 0, reviews: 0 },
-    { name: "suspicious allow", options: { rules: [baseRule("allow", "global", "danger; echo harmless")] }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
-    { name: "untrusted project allow", options: { rules: [baseRule("allow", "project", "danger; echo harmless")], trusted: false }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
+    { name: "suspicious allow", options: { rules: [baseRule("allow", "global", "danger; noop-cmd harmless")] }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
+    { name: "untrusted project allow", options: { rules: [baseRule("allow", "project", "danger; noop-cmd harmless")], trusted: false }, expectedReports: ["approval-required", "approved"], confirmations: 1, reviews: 0 },
     { name: "review approve", options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "approve", reason: "safe" } }) }, expectedReports: ["guardian-running", "guardian-running", "approved"], confirmations: 0, reviews: 2 },
     { name: "review revise", options: { mode: "auto", review: async () => ({ ok: true, verdict: { decision: "revise", reason: "change target", constraint: "target", source: "user" } }) }, expectedReports: ["guardian-running", "revision-requested", "guardian-running", "revision-requested", "approval-required", "approved"], confirmations: 1, reviews: 2 },
     { name: "aborted call", options: { aborted: true }, expectedReason: /confirmation failed/, expectedReports: [], confirmations: 0, reviews: 0 },

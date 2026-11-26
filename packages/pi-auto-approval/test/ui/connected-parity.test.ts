@@ -33,14 +33,14 @@ type Scenario = {
 const scenarios: Scenario[] = [
   { name: "deny", config: { permissions: { deny: ["Bash(danger)"] } }, expectedBlock: /Blocked by auto-approval/, expectedStatuses: ["blocked"], expectedConfirmations: 0, expectedProviderCalls: 0 },
   { name: "ordinary allow", config: { permissions: { allow: ["Bash(danger)"] } }, command: "danger", expectedStatuses: ["approved"], expectedConfirmations: 0, expectedProviderCalls: 0 },
-  { name: "suspicious allow", config: { permissions: { allow: ["Bash(danger; echo harmless)"] } }, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "suspicious allow", config: { permissions: { allow: ["Bash(danger; noop-cmd harmless)"] } }, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "manual unmatched approval", config: {}, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "manual unmatched denial", config: {}, confirm: "no", expectedBlock: /user declined/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "manual unmatched confirmation error", config: {}, confirm: "error", expectedBlock: /confirmation failed/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "ask confirmation approved", config: { permissions: { ask: ["Bash(danger)"] } }, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "ask confirmation denied", config: { permissions: { ask: ["Bash(danger)"] } }, confirm: "no", expectedBlock: /user declined/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "ask confirmation error", config: { permissions: { ask: ["Bash(danger)"] } }, confirm: "error", expectedBlock: /confirmation failed/, expectedStatuses: ["approval-required", "blocked"], expectedConfirmations: 1, expectedProviderCalls: 0 },
-  { name: "untrusted project allow", config: { projectPermissions: { allow: ["Bash(danger; echo harmless)"] } }, trusted: false, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
+  { name: "untrusted project allow", config: { projectPermissions: { allow: ["Bash(danger; noop-cmd harmless)"] } }, trusted: false, expectedStatuses: ["approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 0 },
   { name: "review approve", config: { reviewMode: "auto" }, reply: '{"decision":"approve","reason":"safe"}', expectedStatuses: ["guardian-running", "approved"], expectedConfirmations: 0, expectedProviderCalls: 2 },
   { name: "review revise", config: { reviewMode: "auto" }, reply: '{"decision":"revise","reason":"change target","constraint":"target","source":"user"}', expectedStatuses: ["guardian-running", "revision-requested", "guardian-running", "revision-requested", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
   { name: "review ask_user", config: { reviewMode: "auto" }, reply: '{"decision":"ask_user","reason":"confirm target"}', expectedStatuses: ["guardian-running", "approval-required", "approved"], expectedConfirmations: 1, expectedProviderCalls: 2 },
@@ -129,12 +129,12 @@ async function runFactoryScenario(scenario: Scenario, placement: "widget" | "too
       };
       const runner = new ExtensionRunner([extension], createExtensionRuntime(), root, {} as never, {} as never);
       const renderers = runner.resolveToolRenderers("bash", () => nativeBash as unknown as ToolRenderers)!;
-      row = new ToolExecutionComponent("bash", callId, { command: scenario.command ?? "danger; echo harmless" }, {}, renderers as never, { requestRender: () => { if (row) rowFrames.push(row.render(100).join("\\n")); } } as never, root);
+      row = new ToolExecutionComponent("bash", callId, { command: scenario.command ?? "danger; noop-cmd harmless" }, {}, renderers as never, { requestRender: () => { if (row) rowFrames.push(row.render(100).join("\\n")); } } as never, root);
       row.render(100);
     }
     const widgetBaseline = widgets.length;
     const frameBaseline = rowFrames.length;
-    const outcome = await callTool({ type: "tool_call", toolName: "bash", toolCallId: callId, input: { command: scenario.command ?? "danger; echo harmless" } }, ctx);
+    const outcome = await callTool({ type: "tool_call", toolName: "bash", toolCallId: callId, input: { command: scenario.command ?? "danger; noop-cmd harmless" } }, ctx);
     if (scenario.expectedBlock) assert.match(String((outcome as { reason?: string } | undefined)?.reason), scenario.expectedBlock, scenario.name);
     else assert.equal(outcome, undefined, scenario.name);
     assert.equal(confirmations.length, scenario.expectedConfirmations, `${scenario.name}: actual factory confirmation count`);
@@ -286,7 +286,7 @@ async function createLifecycleHarness(
   widgets.length = 0;
   let rowId = 0;
   const rows: Array<{ row: ToolExecutionComponent; frames: string[] }> = [];
-  const call = async (command = "danger; echo harmless") => {
+  const call = async (command = "danger; noop-cmd harmless") => {
     const toolCallId = `lifecycle-${++rowId}`;
     let row: ToolExecutionComponent | undefined;
     const frames: string[] = [];
@@ -463,7 +463,7 @@ test("connected reviewer cancellation ignores a late approval and permits a fres
       assert.doesNotMatch(firstVisual, /approved|late/);
       assert.throws(() => assert.doesNotMatch(`${firstVisual}\\napproved [late]`, /approved|late/), assert.AssertionError, `${placement}: lifecycle assertion rejects a simulated late approval publication`);
       if (placement === "toolRow") {
-        assert.match(harness.rows[0]!.frames.at(-1)!, /danger; echo harmless/, `${placement}: cancellation is attributed to the ready tool call`);
+        assert.match(harness.rows[0]!.frames.at(-1)!, /danger; noop-cmd harmless/, `${placement}: cancellation is attributed to the ready tool call`);
         assert.deepEqual(harness.widgets.filter((item) => Array.isArray(item[1]) && item[1].some((line) => typeof line === "string" && line.trim())), [], `${placement}: ready row has no content-bearing widget fallback`);
       }
       assert.equal(harness.providerRequests.length, 1, `${placement}: abandoned approval cannot trigger another provider call`);
@@ -509,8 +509,8 @@ test("connected reviewer projects full and delta evidence, reuses lineage, and i
       for (const [index, raw] of first.raw.entries()) {
         const prompt = raw.prompt.messages.at(-1).content[0].text;
         const card = JSON.parse(prompt.split("<LATEST_PROPOSED_ACTION>\n")[1].split("\n</LATEST_PROPOSED_ACTION>")[0]);
-        assert.equal(card.command, index === 0 ? "danger" : "echo harmless");
-        assert.equal(card.component.originalCommand, "danger; echo harmless");
+        assert.equal(card.command, index === 0 ? "danger" : "noop-cmd harmless");
+        assert.equal(card.component.originalCommand, "danger; noop-cmd harmless");
         assert.equal(card.component.index, index + 1);
         assert.equal(card.component.count, 2);
         assert.equal(card.component.originalCommand.slice(card.component.start, card.component.end), card.command);
@@ -583,7 +583,7 @@ test("connected fresh evidence overflow confirms or blocks with the exact budget
         assert.equal(harness.providerRequests.length, 0, `${placement}/${approved}: oversized fresh prompt never calls the provider`);
         assert.equal(harness.confirmations.length, 1);
         assert.equal(harness.confirmations[0]![0], "Approve command?");
-        assert.match(String(harness.confirmations[0]![1]), /^Automatic review failed: compact review evidence exceeds the review model's safe context budget\n\ndanger; echo harmless$/);
+        assert.match(String(harness.confirmations[0]![1]), /^Automatic review failed: compact review evidence exceeds the review model's safe context budget\n\ndanger; noop-cmd harmless$/);
         assert.deepEqual(result.result, approved ? undefined : { block: true, reason: "Automatic review failed: compact review evidence exceeds the review model's safe context budget (user declined)" });
         assert.deepEqual(observedCallStates(placement, result), placement === "widget"
           ? ["reviewing", approved ? "approved" : "blocked"]
