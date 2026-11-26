@@ -38,11 +38,15 @@ test("ANSI-C quotes with plain escapes preserve exact source", () => {
 });
 
 test("ANSI-C quotes with other escapes require whole-command review", () => {
-  for (const sequence of ["\\x2drf", "\\u002f", "\\U0000002f", "\\057", "\\cA", "\\e", "\\r"]) {
+  for (const sequence of ["\\x2drf", "\\u002f", "\\U0000002f", "\\057", "\\cA", "\\e", "\\r", "\\a"]) {
     const result = analyzeShell(`printf $'${sequence}'`);
     assert.equal(result.supported, false, sequence);
     if (!result.supported) assert.equal(result.reviewable, true, sequence);
   }
+});
+
+test("ANSI-C quote ending in a lone backslash is unsupported", () => {
+  assert.equal(analyzeShell("printf $'abc\\").supported, false);
 });
 
 test("distinguishes reviewable syntax from invalid or parser-ambiguous input", () => {
