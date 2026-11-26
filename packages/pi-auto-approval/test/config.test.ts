@@ -50,6 +50,40 @@ test("complete settings save publishes one validated atomic snapshot and preserv
   } finally { t.cleanup(); }
 });
 
+test("settings saves preserve reviewer lists when keeping, replacing, or clearing the model", () => {
+  const t = temp();
+  try {
+    mkdirSync(t.global, { recursive: true });
+    const path = join(t.global, "auto-permissions.json");
+    const lists = {
+      environment: ["$defaults", "test workspace"],
+      allow: [],
+      softDeny: ["first restriction", "second restriction"],
+      hardDeny: ["strict restriction"],
+    };
+    writeFileSync(path, JSON.stringify({ reviewer: { ...lists, provider: "old", model: "old-id" } }));
+    const settings = { enabled: false, reviewMode: "manual" } as const;
+
+    for (const [model, expectedPair] of [
+      [undefined, { provider: "old", model: "old-id" }],
+      [
+        { provider: "new", id: "new-id" },
+        { provider: "new", model: "new-id" },
+      ],
+      [null, {}],
+    ] as const) {
+      assert.equal(saveGlobalSettings(t.global, settings, model).ok, true);
+      assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).reviewer, { ...lists, ...expectedPair });
+      const loaded = loadGlobalConfig(t.global);
+      assert.ok(loaded.ok);
+      const { environment, allow, softDeny, hardDeny } = loaded.reviewer;
+      assert.deepEqual({ environment, allow, softDeny, hardDeny }, lists);
+    }
+  } finally {
+    t.cleanup();
+  }
+});
+
 test("complete settings failures preserve all old bytes or absence and clean staging", () => {
   for (const exists of [true, false]) for (const failure of ["writeFileSync", "renameSync", "mkdirSync", "statSync", "chmodSync"] as const) {
     if (!exists && (failure === "statSync" || failure === "chmodSync")) continue;
