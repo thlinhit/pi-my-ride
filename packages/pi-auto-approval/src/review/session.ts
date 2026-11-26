@@ -131,7 +131,7 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
     if (estimateTokens(systemPrompt, messages) >= budget) {
       discard(); return { ok: false, error: BUDGET_EXCEEDED_ERROR };
     }
-    const sessionId = base?.sessionId ?? `ap-review-${randomUUID()}`;
+    let sessionId = base?.sessionId ?? `ap-review-${randomUUID()}`;
     let retryMessages: Message[] | undefined;
     while (true) {
       if (signal.aborted) throw new Error("review timed out or was cancelled");
@@ -171,21 +171,18 @@ async function reviewOnce(ctx: ReviewContext, state: ReviewerState, input: Revie
       if (signal.aborted) throw new Error("review timed out or was cancelled");
       if (!parsed.ok) {
         if (retryMessages) throw new Error(parsed.error);
-        retryMessages = [
-          ...messages,
-          msg,
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `${parsed.error}. Re-answer the same review with one JSON object containing decision, tier, and a nonempty reason. Valid decision/tier pairs: approve (allow, user_intent, none); block (hard_deny, soft_deny); revise (none, plus nonempty constraint and source fields).`,
-              },
-            ],
-            timestamp: Date.now(),
-          },
-        ];
-        if (estimateTokens(systemPrompt, retryMessages) >= budget) throw new Error(BUDGET_EXCEEDED_ERROR);
+        const correction = {
+          type: "text" as const,
+          text: `${parsed.error}. Re-answer the same review with one JSON object containing decision, tier, and a nonempty reason. Valid decision/tier pairs: approve (allow, user_intent, none); block (hard_deny, soft_deny); revise (none, plus nonempty constraint and source fields).`,
+        };
+        retryMessages = [...messages, msg, { role: "user", content: [correction], timestamp: Date.now() }];
+        if (estimateTokens(systemPrompt, retryMessages) >= budget) {
+          const freshUser = base ? makeUser(records, "full") : user;
+          messages = [freshUser];
+          retryMessages = [{ ...freshUser, content: [...freshUser.content, correction] }];
+          if (estimateTokens(systemPrompt, retryMessages) >= budget) throw new Error(BUDGET_EXCEEDED_ERROR);
+          sessionId = `ap-review-${randomUUID()}`;
+        }
         continue;
       }
       if (parsed.verdict.decision === "revise") discard();
