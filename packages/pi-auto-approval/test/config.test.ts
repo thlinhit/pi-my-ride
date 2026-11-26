@@ -166,19 +166,100 @@ test("removed defaultMode is rejected in global and project config", () => {
   assert.equal("defaultMode" in SEED_CONFIG.permissions, false);
 });
 
-test("project permissions merge after global rules; project settings are rejected", () => {
+for (const [field, raw] of [
+  ["enabled", { enabled: false }],
+  ["reviewMode", { reviewMode: "auto" }],
+  ["permissions.allow", { permissions: { allow: [rule] } }],
+  ["reviewer", { reviewer: {} }],
+  ["defaultMode", { permissions: { defaultMode: "manual" } }],
+] as const) {
+  test(`shared ${field} restriction directs users to the local file`, () => {
+    const t = temp();
+    try {
+      mkdirSync(join(t.cwd, ".pi", "pi-auto-approval"), { recursive: true });
+      writeFileSync(projectConfigPath(t.cwd), JSON.stringify(raw));
+      const loaded = loadConfig(t.cwd, t.global);
+      assert.ok(!loaded.ok);
+      assert.ok(loaded.error.includes(field));
+      assert.match(loaded.error, /move.*auto-permissions\.local\.json/i);
+    } finally {
+      t.cleanup();
+    }
+  });
+}
+
+test("global, shared and local rules load once in source order; project settings remain separate", () => {
   const t = temp();
   try {
-    mkdirSync(join(t.cwd, ".pi", "pi-auto-approval"), { recursive: true }); mkdirSync(t.global, { recursive: true });
-    writeFileSync(join(t.global, "auto-permissions.json"), JSON.stringify({ permissions: { ask: [rule] } }));
-    writeFileSync(projectConfigPath(t.cwd), JSON.stringify({ permissions: { ask: ["Bash(project)"] } }));
+    const projectDir = join(t.cwd, ".pi", "pi-auto-approval");
+    const global = join(t.global, "auto-permissions.json");
+    const shared = projectConfigPath(t.cwd);
+    const local = join(projectDir, "auto-permissions.local.json");
+    mkdirSync(projectDir, { recursive: true });
+    mkdirSync(t.global, { recursive: true });
+    writeFileSync(global, JSON.stringify({ permissions: { ask: [rule] } }));
+    writeFileSync(
+      shared,
+      JSON.stringify({ enabled: true, reviewMode: "manual", permissions: { ask: ["Bash(shared)"] } }),
+    );
+    writeFileSync(local, JSON.stringify({ enabled: false, permissions: { allow: ["Bash(local)"] } }));
     const loaded = loadConfig(t.cwd, t.global);
-    assert.equal(loaded.ok, true);
-    if (loaded.ok) assert.deepEqual(loaded.rules.map((r) => [r.label, r.scope]), [["Bash(cmd)", "global"], ["Bash(project)", "project"]]);
-    writeFileSync(projectConfigPath(t.cwd), JSON.stringify({ enabled: false }));
-    const invalid = loadConfig(t.cwd, t.global);
-    assert.equal(invalid.ok, false); if (!invalid.ok) assert.match(invalid.error, /project/);
-  } finally { t.cleanup(); }
+    assert.ok(loaded.ok);
+    assert.deepEqual(
+      loaded.rules.map((r) => [r.label, r.scope, r.source]),
+      [
+        ["Bash(cmd)", "global", global],
+        ["Bash(shared)", "project", shared],
+        ["Bash(local)", "project", local],
+      ],
+    );
+    assert.equal(loaded.global.reviewMode, "auto");
+    assert.deepEqual(loaded.project.shared, {
+      source: shared,
+      settings: { enabled: true, reviewMode: "manual" },
+      rules: [loaded.rules[1]],
+    });
+    assert.equal(loaded.project.local?.settings.enabled, false);
+    assert.equal(loaded.project.local?.settings.reviewMode, undefined);
+    writeFileSync(local, JSON.stringify({ enabled: "false" }));
+    assert.deepEqual(loadConfig(t.cwd, t.global), { ok: false, error: `${local}: enabled must be a boolean` });
+  } finally {
+    t.cleanup();
+  }
+});
+
+test("cwd at home does not duplicate global seed rules and still loads the local deny", () => {
+  const t = temp();
+  try {
+    const home = join(t.root, "home");
+    mkdirSync(t.global, { recursive: true });
+    writeFileSync(join(t.global, "auto-permissions.json"), JSON.stringify(SEED_CONFIG));
+    const global = loadGlobalConfig(t.global);
+    assert.ok(global.ok);
+    const loaded = loadConfig(home, t.global);
+    assert.ok(loaded.ok);
+    assert.equal(loaded.project.shared, undefined);
+    assert.deepEqual(loaded.rules, global.rules);
+    const local = join(t.global, "auto-permissions.local.json");
+    writeFileSync(local, JSON.stringify({ permissions: { deny: [rule] } }));
+    const homeWithLocal = loadConfig(home, t.global);
+    assert.ok(homeWithLocal.ok);
+    assert.deepEqual(homeWithLocal.rules, [...global.rules, ...(homeWithLocal.project.local?.rules ?? [])]);
+    assert.equal(homeWithLocal.project.local?.rules[0]?.level, "deny");
+    fs.symlinkSync(home, t.cwd);
+    const withLocal = loadConfig(t.cwd, t.global);
+    assert.ok(withLocal.ok);
+    assert.equal(withLocal.project.shared, undefined);
+    assert.equal(withLocal.project.local?.settings.enabled, undefined);
+    assert.deepEqual(withLocal.rules.slice(0, -1), global.rules);
+    const deny = withLocal.rules.at(-1);
+    assert.deepEqual(
+      [deny?.label, deny?.level, deny?.source],
+      [rule, "deny", join(t.cwd, ".pi", "pi-auto-approval", "auto-permissions.local.json")],
+    );
+  } finally {
+    t.cleanup();
+  }
 });
 
 test("save creates global config, preserves fields, refuses invalid targets, and rejects concurrent edits", async () => {

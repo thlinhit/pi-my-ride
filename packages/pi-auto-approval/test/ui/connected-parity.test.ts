@@ -70,7 +70,7 @@ async function runFactoryScenario(scenario: Scenario, placement: "widget" | "too
     writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify(global));
     if (scenario.config.projectPermissions) {
       mkdirSync(join(root, ".pi", "pi-auto-approval"), { recursive: true });
-      writeFileSync(join(root, ".pi", "pi-auto-approval", "auto-permissions.json"), JSON.stringify({ permissions: scenario.config.projectPermissions }));
+      writeFileSync(join(root, ".pi", "pi-auto-approval", "auto-permissions.local.json"), JSON.stringify({ permissions: scenario.config.projectPermissions }));
     }
   }
   const previous = process.env.HOME;

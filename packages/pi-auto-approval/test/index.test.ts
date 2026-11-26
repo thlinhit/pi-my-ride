@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
 import test, { afterEach, mock } from "node:test";
 import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import type { ConfigResult, PermissionRule, ReviewerConfig } from "../src/config.ts";
-import { parseConfig, SEED_CONFIG } from "../src/config.ts";
+import {
+  globalConfigDir,
+  loadConfig as loadFiles,
+  parseConfig,
+  projectConfigPath,
+  SEED_CONFIG,
+} from "../src/config.ts";
 import { parsePermissionRule } from "../src/rules.ts";
 import { BUDGET_EXCEEDED_ERROR } from "../src/review/protocol.ts";
 import type { ConfigLoader, GateContext, GateDeps, ReviewContext, ReviewInput } from "../src/index.ts";
@@ -662,6 +668,428 @@ test("untrusted project allow confirms; deny cannot bypass", async () => {
   });
   assert.equal(blocked?.reason, "Blocked by auto-approval (danger command, global.json)");
   assert.deepEqual(statuses, ["approval-required", "approved", "blocked"]);
+});
+
+function projectFixture(t: TestContext, shared: object, local: object, cwdIsHome = false) {
+  const home = mkdtempSync(join(tmpdir(), "approval-project-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const cwd = cwdIsHome ? home : join(home, "checkout");
+  const globalDir = globalConfigDir(home);
+  const projectDir = join(cwd, ".pi", "pi-auto-approval");
+  mkdirSync(globalDir, { recursive: true });
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(globalDir, "auto-permissions.json"),
+    JSON.stringify(cwdIsHome ? SEED_CONFIG : { reviewMode: "auto" }),
+  );
+  if (!cwdIsHome) writeFileSync(projectConfigPath(cwd), JSON.stringify(shared));
+  writeFileSync(join(projectDir, "auto-permissions.local.json"), JSON.stringify(local));
+  return { cwd, home, globalDir, load: (cwd: string) => loadFiles(cwd, globalDir) };
+}
+
+function useFakeHome(t: TestContext, home: string): void {
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+}
+
+test("symlinked local config target blocks headless and asks with UI despite Edit allow", async (t) => {
+  const { cwd, home, load } = projectFixture(t, {}, { permissions: { allow: ["Edit(**)"] } });
+  useFakeHome(t, home);
+  const localConfig = join(cwd, ".pi", "pi-auto-approval", "auto-permissions.local.json");
+  const path = join(home, "external-config.json");
+  renameSync(localConfig, path);
+  symlinkSync(path, localConfig);
+
+  const call = { toolName: "write", input: { path } };
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  const reason = `Changes auto-approval protected file ${path}`;
+  const headless = context({ cwd, hasUI: false });
+  assert.deepEqual(await handleToolCall(call, headless.ctx, load, { review }), { block: true, reason });
+  assert.equal(headless.calls.length, 0);
+  const interactive = context({ cwd });
+  assert.equal(await handleToolCall(call, interactive.ctx, load, { review }), undefined);
+  assert.equal(interactive.calls.length, 1);
+  assert.ok(String(interactive.calls[0]?.[1]).startsWith(`${reason}\n`));
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("dangling local config target blocks a headless Write despite Edit allow", async (t) => {
+  const { cwd, home, globalDir, load } = projectFixture(t, {}, {});
+  useFakeHome(t, home);
+  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({ permissions: { allow: ["Edit(**)"] } }));
+  const localConfig = join(cwd, ".pi", "pi-auto-approval", "auto-permissions.local.json");
+  const path = join(home, "missing-config.json");
+  rmSync(localConfig);
+  symlinkSync(path, localConfig);
+
+  const { ctx, calls } = context({ cwd, hasUI: false });
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  assert.deepEqual(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), {
+    block: true,
+    reason: `Changes auto-approval protected file ${path}`,
+  });
+  assert.equal(calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("unmatched protected Write asks once without review", async (t) => {
+  const { cwd, home, load } = projectFixture(t, {}, {});
+  useFakeHome(t, home);
+  const { ctx, calls } = context({ cwd });
+  const path = ".pi/pi-auto-approval/auto-permissions.json";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
+  assert.equal(calls.length, 1);
+  assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${join(cwd, path)}\n`));
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("Edit allow cannot auto-approve a protected Write with or without UI", async (t) => {
+  const { cwd, home, load } = projectFixture(t, {}, { permissions: { allow: ["Edit(./**)"] } });
+  useFakeHome(t, home);
+  const path = ".pi/pi-auto-approval/auto-permissions.json";
+  const call = { toolName: "write", input: { path } };
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  const reason = `Changes auto-approval protected file ${join(cwd, path)}`;
+  const interactive = context({ cwd });
+  assert.equal(await handleToolCall(call, interactive.ctx, load, { review }), undefined);
+  assert.equal(interactive.calls.length, 1);
+  assert.ok(String(interactive.calls[0]?.[1]).startsWith(`${reason}\n`));
+  const headless = context({ cwd, hasUI: false });
+  assert.deepEqual(await handleToolCall(call, headless.ctx, load, { review }), { block: true, reason });
+  assert.equal(headless.calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("global protected Writes ask through a symlink and on a different case spelling", async (t) => {
+  const { cwd, home, globalDir, load } = projectFixture(t, {}, {});
+  useFakeHome(t, home);
+  const alias = join(cwd, "settings");
+  symlinkSync(globalDir, alias, "dir");
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  for (const root of [alias, join(home, ".pi", "PI-AUTO-APPROVAL")]) {
+    const { ctx, calls } = context({ cwd });
+    const path = join(root, "new", "file.json");
+    assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
+    assert.equal(calls.length, 1);
+    assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${path}\n`));
+  }
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("case-variant project config Write asks even if the config directory does not exist", async (t) => {
+  const { cwd, home, load } = projectFixture(t, {}, {});
+  useFakeHome(t, home);
+  const path = ".PI/Pi-Auto-Approval/auto-permissions.json";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  for (const removeDir of [false, true]) {
+    // With no directory entry, realpath cannot correct the input casing, even on macOS.
+    if (removeDir) rmSync(join(cwd, ".pi", "pi-auto-approval"), { recursive: true });
+    const { ctx, calls } = context({ cwd });
+    assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
+    assert.equal(calls.length, 1);
+    assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${join(cwd, path)}\n`));
+  }
+  assert.equal(review.mock.callCount(), 0);
+});
+
+for (const tempRoot of ["/var/tmp", "/tmp"]) {
+  test(`protected Write matches ${tempRoot} and /private${tempRoot} spellings`, {
+    skip: process.platform !== "darwin",
+  }, async (t) => {
+    const home = mkdtempSync(join(tempRoot, "approval-home-"));
+    t.after(() => rmSync(home, { recursive: true, force: true }));
+    useFakeHome(t, home);
+    const globalDir = globalConfigDir(home);
+    mkdirSync(globalDir, { recursive: true });
+    const path = `/private${join(globalDir, "new.json")}`;
+    const { ctx, calls } = context({ cwd: join(home, "checkout") });
+    const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+      ok: true,
+      verdict: { decision: "approve", reason: "ok" },
+    }));
+    assert.equal(
+      await handleToolCall({ toolName: "write", input: { path } }, ctx, () => config([], "auto"), { review }),
+      undefined,
+    );
+    assert.equal(calls.length, 1);
+    assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${path}\n`));
+    assert.equal(review.mock.callCount(), 0);
+  });
+}
+
+test("an unresolved Edit target asks without review", async (t) => {
+  const { cwd, home, load } = projectFixture(t, {}, {});
+  useFakeHome(t, home);
+  const { ctx, calls } = context({ cwd });
+  const path = join(cwd, "loop");
+  symlinkSync(path, path);
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  assert.equal(await handleToolCall({ toolName: "edit", input: { path } }, ctx, load, { review }), undefined);
+  assert.equal(calls.length, 1);
+  assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${path}\n`));
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("an unresolved config file protects an otherwise allowed Edit", async (t) => {
+  const { cwd, home } = projectFixture(t, {}, {});
+  useFakeHome(t, home);
+  const localConfig = join(cwd, ".pi", "pi-auto-approval", "auto-permissions.local.json");
+  rmSync(localConfig);
+  symlinkSync(localConfig, localConfig);
+  const path = join(cwd, "normal.txt");
+  const { ctx, calls } = context({ cwd });
+  const allow = parsedRule("Edit(**)", "allow");
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  // Supply a valid policy snapshot to exercise resolution rather than the loader's error handling.
+  assert.equal(
+    await handleToolCall({ toolName: "edit", input: { path } }, ctx, () => config([allow], "auto"), { review }),
+    undefined,
+  );
+  assert.equal(calls.length, 1);
+  assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${path}\n`));
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("whole and component Bash denies win over protected paths without prompting", async (t) => {
+  const { ctx, calls } = context();
+  const protectedComponent = "cat .pi/pi-auto-approval/auto-permissions.json";
+  const command = `${protectedComponent} && obsidian create path=x`;
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  for (const denied of [command, "obsidian create path=x", protectedComponent]) {
+    const deny = parsedRule(`Bash(${denied})`);
+    const decision = await handleToolCall(event(command), ctx, () => config([deny], "auto"), { review });
+    assert.deepEqual(decision, { block: true, reason: `Blocked by auto-approval (${deny.label}, ${deny.source})` });
+  }
+  assert.equal(calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("protected Bash component and reviewer ask share one dialog", async (t) => {
+  const { ctx, calls } = context();
+  const protectedComponent = "cat .pi/pi-auto-approval/auto-permissions.json";
+  const unmatchedComponent = "obsidian create path=x";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "ask_user", reason: "confirm note creation" },
+  }));
+  const call = event(`${protectedComponent} && ${unmatchedComponent}`);
+  assert.equal(await handleToolCall(call, ctx, () => config([], "auto"), { review }), undefined);
+  assert.deepEqual(
+    review.mock.calls.map(({ arguments: [input] }) => input.command),
+    [unmatchedComponent],
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(
+    String(calls[0]?.[1]).split("\n\n")[0],
+    [
+      `Changes auto-approval protected file ${protectedComponent}`,
+      "Reviewer needs user approval: confirm note creation",
+    ].join("\n"),
+  );
+});
+
+test("headless compound stays blocked when the unmatched component is approved", async (t) => {
+  const { ctx, calls } = context({ hasUI: false });
+  const protectedComponent = "cat .pi/pi-auto-approval/auto-permissions.json";
+  const unmatchedComponent = "obsidian create path=x";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  const call = event(`${protectedComponent} && ${unmatchedComponent}`);
+  assert.deepEqual(await handleToolCall(call, ctx, () => config([], "auto"), { review }), {
+    block: true,
+    reason: `Changes auto-approval protected file ${protectedComponent}`,
+  });
+  assert.deepEqual(
+    review.mock.calls.map(({ arguments: [input] }) => input.command),
+    [unmatchedComponent],
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("Bash allow cannot approve a protected component", async (t) => {
+  const { ctx, calls } = context();
+  const command = "cat AUTO-PERMISSIONS.JSON";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  const rules = [parsedRule(`Bash(${command})`, "allow")];
+  assert.equal(await handleToolCall(event(command), ctx, () => config(rules, "auto"), { review }), undefined);
+  assert.equal(calls.length, 1);
+  assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${command}\n`));
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("unsupported Bash with protected text asks once without review", async (t) => {
+  const { ctx, calls } = context();
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  const commands = [
+    "echo '{}' > ~/.pi/pi-auto-approval/x",
+    "echo '{}' > ~/.pi/pi-auto-approval/auto-permissions.json",
+    "echo '{}' > AUTO-PERMISSIONS.JSON",
+    "cd ~/.pi/pi-auto-approval && echo > x",
+  ];
+  for (const [index, command] of commands.entries()) {
+    assert.equal(await handleToolCall(event(command), ctx, () => config([], "auto"), { review }), undefined);
+    assert.equal(calls.length, index + 1);
+    assert.ok(String(calls[index]?.[1]).startsWith(`Changes auto-approval protected file ${command}\n`));
+  }
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("protection off bypasses protected Write and Bash checks", async (t) => {
+  const { cwd, home } = projectFixture(t, {}, {});
+  useFakeHome(t, home);
+  const { ctx, calls } = context({ cwd });
+  const path = ".pi/pi-auto-approval/auto-permissions.json";
+  const load = () => ({ ...config([], "auto"), enabled: false });
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
+  assert.equal(await handleToolCall(event(`cat ${path}`), ctx, load, { review }), undefined);
+  assert.equal(calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+});
+
+for (const source of ["local", "shared"] as const) {
+  test(`trusted ${source} manual mode confirms unmatched calls with global auto`, async (t) => {
+    const manual = { reviewMode: "manual" };
+    const { cwd, load } = projectFixture(t, source === "shared" ? manual : {}, source === "local" ? manual : {});
+    const { ctx, calls } = context({ cwd });
+    let reviews = 0;
+    const deps = {
+      review: async () => {
+        reviews++;
+        return { ok: true as const, verdict: { decision: "approve" as const, reason: "ok" } };
+      },
+    };
+    assert.equal(await handleToolCall(event("unmatched-command"), ctx, load, deps), undefined);
+    assert.equal(calls.length, 1);
+    assert.match(
+      (await handleToolCall(event("unmatched-command"), { ...ctx, hasUI: false }, load, deps))!.reason,
+      /requires confirmation/i,
+    );
+    assert.equal(reviews, 0);
+  });
+}
+
+for (const { name, trusted, shared, local } of [
+  { name: "untrusted shared manual keeps global auto", trusted: false, shared: { reviewMode: "manual" }, local: {} },
+  { name: "untrusted local manual keeps global auto", trusted: false, shared: {}, local: { reviewMode: "manual" } },
+  {
+    name: "trusted local auto overrides shared manual",
+    trusted: true,
+    shared: { reviewMode: "manual" },
+    local: { reviewMode: "auto" },
+  },
+]) {
+  test(name, async (t) => {
+    const { cwd, load } = projectFixture(t, shared, local);
+    const { ctx } = context({ cwd, hasUI: false, isProjectTrusted: () => trusted });
+    let reviews = 0;
+    assert.equal(await handleToolCall(event("unmatched-command"), ctx, load, {
+      review: async () => {
+        reviews++;
+        return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+      },
+    }), undefined);
+    assert.equal(reviews, 1);
+  });
+}
+
+test("untrusted shared and local deny and ask rules apply without a D25 notice", async (t) => {
+  const { cwd, load } = projectFixture(
+    t,
+    { permissions: { deny: ["Bash(echo shared-deny)"], ask: ["Bash(echo shared-ask)"] } },
+    { permissions: { deny: ["Bash(echo local-deny)"], ask: ["Bash(echo local-ask)"] } },
+  );
+  const notices: string[] = [];
+  const { ctx } = context({ cwd, hasUI: false, isProjectTrusted: () => false });
+  ctx.ui.notify = (message) => { notices.push(message); };
+  for (const [source, file] of [
+    ["shared", "auto-permissions.json"],
+    ["local", "auto-permissions.local.json"],
+  ] as const) {
+    for (const [level, reason] of [
+      ["deny", "Blocked by auto-approval"],
+      ["ask", "Requires confirmation"],
+    ] as const) {
+      const decision = await handleToolCall(event(`echo ${source}-${level}`), ctx, load);
+      assert.ok(decision);
+      assert.ok(decision.reason.startsWith(reason));
+      assert.ok(decision.reason.endsWith(`${file})`));
+    }
+  }
+  assert.deepEqual(notices.filter((message) => message.startsWith("Ignored project settings from ")), []);
+});
+
+test("home gate sees seed rules once and honors untrusted home local deny", async (t) => {
+  const { cwd, load } = projectFixture(t, {}, { permissions: { deny: ["Bash(echo local-deny)"] } }, true);
+  const previousHome = process.env.HOME;
+  process.env.HOME = cwd;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+  assert.equal(globalConfigDir(), join(cwd, ".pi", "pi-auto-approval"));
+  const { ctx } = context({ cwd, hasUI: false, isProjectTrusted: () => false });
+  const seen: PermissionRule[] = [];
+  const call = event("echo ok && pwd");
+  assert.equal(
+    await handleToolCall(call, ctx, load, {
+      matcher: (candidate, _cwd, rules) => {
+        if (candidate.input === call.input) seen.push(...rules);
+        return undefined;
+      },
+    }),
+    undefined,
+  );
+  const seedRules = Object.values(SEED_CONFIG.permissions).flat().length;
+  assert.equal(seen.length, seedRules + 1);
+  assert.equal(seen.filter((rule) => rule.scope === "global").length, seedRules);
+  assert.match(
+    (await handleToolCall(event("echo local-deny"), ctx, load))!.reason,
+    /Blocked by auto-approval.*auto-permissions\.local\.json/,
+  );
 });
 
 test("status disabled hides reports without changing enforcement", async () => {
@@ -2233,9 +2661,9 @@ test("authorization routes enforce priority, attribution, trust and unsupported 
       assert.notEqual(await handleToolCall(event(`danger ${marker}`), { ...ctx, hasUI: false }, () => config([allow], mode), deps), undefined);
     }
     assert.equal(await handleToolCall(event(), ctx, () => config([rule("allow", "project"), allow], mode), deps), undefined);
-    assert.ok(notices.some((notice) => /Ignored.*project.json/.test(notice)));
+    assert.ok(notices.includes("Ignored project settings from project.json because the project is untrusted."));
     const ignored = await handleToolCall(event(), { ...ctx, hasUI: false }, () => config([rule("allow", "project")], "manual"), deps);
-    assert.match(ignored!.reason, /Ignored.*project.json/);
+    assert.match(ignored!.reason, /requires confirmation/i);
     trusted = true;
     assert.equal(await handleToolCall(event(), ctx, () => config([rule("allow", "project")], mode), deps), undefined);
     trusted = false;
