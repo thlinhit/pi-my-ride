@@ -21,6 +21,7 @@ export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "low";
 export const REVIEW_TIMEOUT_DEFAULT_MS = 30_000;
 export const REVIEW_TIMEOUT_MIN_MS = 1_000;
 export const REVIEW_TIMEOUT_MAX_MS = 300_000;
+export type ReviewerPolicy = { readonly environment: readonly string[]; readonly allow: readonly string[]; readonly softDeny: readonly string[]; readonly hardDeny: readonly string[] };
 export interface ReviewerConfig {
   readonly model?: { readonly provider: string; readonly id: string };
   readonly reasoningEffort: ReasoningEffort;
