@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -60,6 +60,68 @@ describe("permission grammar", () => {
       /where/,
     );
   });
+});
+
+test("ask matches the lexical and resolved paths through a symlink", (t) => {
+  const cwd = realpathSync.native(mkdtempSync(join(tmpdir(), "permissions-link-")));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  mkdirSync(join(cwd, "real"));
+  symlinkSync("real", join(cwd, "link"));
+  const edit = call("edit", { path: "./link/x.md" });
+
+  assert.equal(ruleMatches(parse("Edit(./real/**)", "ask"), edit, cwd), true);
+  assert.equal(ruleMatches(parse("Edit(./link/**)", "ask"), edit, cwd), true);
+});
+
+test("allow matches the symlink target but not the link directory", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "permissions-link-allow-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  mkdirSync(join(cwd, "real"));
+  symlinkSync("real", join(cwd, "link"));
+  const edit = call("edit", { path: "./link/x.md" });
+
+  assert.equal(ruleMatches(parse("Edit(./real/**)"), edit, cwd), true);
+  assert.equal(ruleMatches(parse("Edit(./link/**)"), edit, cwd), false);
+});
+
+test("allow stays case-sensitive and deny folds case even on a missing path", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "permissions-case-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const edit = call("edit", { path: "./DOCS/x.md" });
+
+  assert.equal(ruleMatches(parse("Edit(./docs/**)"), edit, cwd), false);
+  assert.equal(ruleMatches(parse("Edit(./docs/**)", "deny"), edit, cwd), true);
+});
+
+test("wildcard markers do not change case folding next to a wildcard", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "permissions-folded-wildcard-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+
+  assert.equal(ruleMatches(parse("Edit(./ΟΣ*)", "deny"), call("edit", { path: "./ος" }), cwd), true);
+  assert.equal(ruleMatches(parse("Edit(./[0]*)", "deny"), call("edit", { path: "./unrelated" }), cwd), false);
+});
+
+test("deny normalizes NFC and NFD spellings even on a missing path", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "permissions-unicode-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const write = call("write", { path: "./Cafe\u0301/x.md" });
+
+  assert.equal(ruleMatches(parse("Write(./Café/**)", "deny"), write, cwd), true);
+});
+
+test("path resolution errors match deny and ask but never allow", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "permissions-resolution-error-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  symlinkSync("loop", join(cwd, "loop"));
+  symlinkSync("missing/../real", join(cwd, "unresolvable"));
+  writeFileSync(join(cwd, "file"), "");
+
+  for (const path of ["./loop/x.md", "./file/x.md", "./unresolvable"]) {
+    const edit = call("edit", { path });
+    assert.equal(ruleMatches(parse("Edit(./other/**)", "deny"), edit, cwd), true);
+    assert.equal(ruleMatches(parse("Edit(./other/**)", "ask"), edit, cwd), true);
+    assert.equal(ruleMatches(parse("Edit(./**)"), edit, cwd), false);
+  }
 });
 
 describe("starter Read globs", () => {
@@ -333,7 +395,7 @@ describe("permission matching", () => {
   });
 
   test("trailing and repeated encoded stars stay literal and denied for native Read", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "permissions-trailing-star-"));
+    const cwd = realpathSync.native(mkdtempSync(join(tmpdir(), "permissions-trailing-star-")));
     try {
       for (const name of ["secret*", "secret**", "secret*.txt", "__PI_STAR__*"]) {
         const target = join(cwd, name);
@@ -359,7 +421,7 @@ describe("permission matching", () => {
   test("wildcard markers cannot overlap adjacent literal filename prefixes", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "permissions-marker-boundary-"));
     try {
-      for (const prefix of ["__PI_STAR_", "__PI_STAR__", "P", "PI", "PI0", "I0Z", "0Z", "Z", "PI0Z", "PI0ZPI1Z"]) {
+      for (const prefix of ["[", "[0", "0]", "]", "[0]", "[0][1]"]) {
         const target = join(cwd, `${prefix}secret.txt`);
         const sibling = join(cwd, "unrelated_PI_STAR__");
         writeFileSync(target, "intended denied target");
@@ -421,6 +483,7 @@ describe("permission matching", () => {
       const allow = parse("Read(*)", "allow");
       assert.equal(matchPermission(call("read", { path: requested }), cwd, [allow, deny], true), deny);
       assert.equal(ruleMatches(deny, call("read", { path: requested }), cwd), true);
+      assert.equal(ruleMatches(parse(`Read(${requested})`, "deny"), call("read", { path: requested }), cwd), true);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -430,9 +493,7 @@ describe("permission matching", () => {
     const cwd = mkdtempSync(join(tmpdir(), "permissions-read-combined-"));
     try {
       const requested = join(cwd, "Café's.txt");
-      const nfd = requested.normalize("NFD");
-      const curly = requested.replace(/'/g, "\u2019");
-      const combined = nfd.replace(/'/g, "\u2019");
+      const combined = requested.normalize("NFD").replace(/'/g, "\u2019");
       writeFileSync(combined, "combined fallback target");
       const result = await createReadTool(cwd).execute(
         "test-read-combined",
@@ -440,15 +501,8 @@ describe("permission matching", () => {
         new AbortController().signal,
       );
       assert.equal(JSON.stringify(result).includes("combined fallback target"), true);
-      if (existsSync(requested)) {
-        assert.equal(ruleMatches(parse("Read(./Café's.txt)"), call("read", { path: requested }), cwd), true);
-      } else if (existsSync(nfd)) {
-        assert.equal(ruleMatches(parse("Read(./Cafe\u0301's.txt)"), call("read", { path: requested }), cwd), true);
-      } else if (existsSync(curly)) {
-        assert.equal(ruleMatches(parse("Read(./Café’s.txt)"), call("read", { path: requested }), cwd), true);
-      } else {
-        assert.equal(ruleMatches(parse("Read(./Cafe\u0301’s.txt)"), call("read", { path: requested }), cwd), true);
-      }
+      const resolvedName = basename(realpathSync.native(combined));
+      assert.equal(ruleMatches(parse(`Read(./${resolvedName})`), call("read", { path: requested }), cwd), true);
       assert.equal(ruleMatches(parse("Edit(./Café's.txt)"), call("edit", { path: requested }), cwd), true);
       assert.equal(ruleMatches(parse("Edit(./Cafe\u0301’s.txt)"), call("write", { path: requested }), cwd), false);
     } finally {

@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RuleLevel } from "./config.ts";
+import { foldPath, resolvePathForPolicy } from "./paths.ts";
 
 export interface PermissionRule {
   readonly tool: string;
@@ -105,19 +106,20 @@ function bashMatches(specifier: string, command: string, scanSegments: boolean):
     .split(SHELL_SEGMENT_DELIMITER)
     .some((segment) => segment.trim() !== "" && matchesText(specifier, segment.trim(), false));
 }
-function filePatternMatches(specifier: string, actual: string, cwd: string): boolean {
+function filePatternMatches(specifier: string, actual: string, cwd: string, folded: boolean): boolean {
+  const compare = folded ? foldPath : (path: string) => path;
   const isUrl = specifier.startsWith("file://");
   const decoded = isUrl ? fileURLToPath(specifier) : specifier;
   const home = homedir();
   // Mark written wildcards before URL decoding or adding literal cwd/HOME characters.
-  // P occurs only at the start, so no marker prefix can overlap its suffix.
+  // An uncased marker preserves case folding, and its opening bracket cannot overlap its suffix.
   let nonce = 0;
-  let wildcard = `PI${nonce}Z`;
-  while ([specifier, decoded, cwd, home].some((value) => value.includes(wildcard))) wildcard = `PI${++nonce}Z`;
+  let wildcard = `[${nonce}]`;
+  while ([specifier, decoded, cwd, home].some((value) => value.includes(wildcard))) wildcard = `[${++nonce}]`;
   let configured = specifier.replaceAll("*", wildcard);
   if (isUrl) configured = fileURLToPath(configured);
   else if (configured.startsWith("~/")) configured = join(home, configured.slice(2));
-  return globRegex(resolve(cwd, configured), true, wildcard).test(actual);
+  return globRegex(compare(resolve(cwd, configured)), true, wildcard).test(compare(actual));
 }
 
 export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string, scanSegments = true): boolean {
@@ -130,8 +132,21 @@ export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string, s
   }
   if (["read", "edit", "write"].includes(rule.tool)) {
     if (!isObject(call.input) || typeof call.input.path !== "string") return false;
-    const actual = rule.tool === "read" ? resolveReadPath(call.input.path, cwd) : resolveToolPath(call.input.path, cwd);
-    return filePatternMatches(rule.specifier, actual, cwd);
+    const folded = rule.level !== "allow";
+    const lexical = resolveToolPath(call.input.path, cwd);
+    if (folded && filePatternMatches(rule.specifier, lexical, cwd, true)) return true;
+    const actual = rule.tool === "read" ? resolveReadPath(call.input.path, cwd) : lexical;
+    if (folded && actual !== lexical && filePatternMatches(rule.specifier, actual, cwd, true)) return true;
+    let resolved: string;
+    let resolvedCwd: string;
+    try {
+      resolved = resolvePathForPolicy(actual);
+      // Resolve the anchor for relative rules, not the rule's own path components.
+      resolvedCwd = resolvePathForPolicy(cwd);
+    } catch {
+      return folded; // With no reliable target, deny or ask rather than grant access.
+    }
+    return filePatternMatches(rule.specifier, resolved, resolvedCwd, folded);
   }
   return false;
 }
