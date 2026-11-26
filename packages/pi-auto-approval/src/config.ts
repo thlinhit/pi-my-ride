@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync, chmodSync, realpathSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -28,10 +28,25 @@ export interface ReviewerConfig {
   readonly extraInstructions?: string;
 }
 export const DEFAULT_REVIEWER: ReviewerConfig = { reasoningEffort: DEFAULT_REASONING_EFFORT, timeoutMs: REVIEW_TIMEOUT_DEFAULT_MS };
-export type ConfigResult =
-  | ({ readonly ok: true; readonly rules: readonly PermissionRule[]; readonly ui: ConfigUi; readonly reviewer: ReviewerConfig; readonly reviewEvidence: ReviewEvidenceConfig } & PermissionSettings)
-  | { readonly ok: false; readonly error: string };
+type GlobalConfig = {
+  readonly ok: true;
+  readonly rules: readonly PermissionRule[];
+  readonly ui: ConfigUi;
+  readonly reviewer: ReviewerConfig;
+  readonly reviewEvidence: ReviewEvidenceConfig;
+} & PermissionSettings;
+type ConfigError = { readonly ok: false; readonly error: string };
+export type ConfigResult = GlobalConfig | ConfigError;
+export type ProjectFile = {
+  source: string;
+  settings: { enabled?: boolean; reviewMode?: ReviewMode };
+  rules: readonly PermissionRule[];
+};
+type LoadedConfig =
+  | (GlobalConfig & { global: GlobalConfig; project: { shared?: ProjectFile; local?: ProjectFile } })
+  | ConfigError;
 export const CONFIG_FILENAME = "auto-permissions.json";
+const LOCAL_CONFIG_FILENAME = "auto-permissions.local.json";
 export const CONFIG_DIRNAME = "pi-auto-approval";
 export function globalConfigDir(home = homedir()): string { return join(home, ".pi", CONFIG_DIRNAME); }
 export function projectConfigPath(cwd: string): string { return join(cwd, ".pi", CONFIG_DIRNAME, CONFIG_FILENAME); }
@@ -78,29 +93,67 @@ function parseReviewer(raw: unknown, source: string, baseDir: string): Parsed<Re
     return { ok: true, value: { ...(obj.provider === undefined ? {} : { model: { provider: obj.provider as string, id: obj.model as string } }), reasoningEffort, timeoutMs, ...(extraInstructions === undefined ? {} : { extraInstructions }) } };
   }, DEFAULT_REVIEWER);
 }
-export function parseConfig(raw: unknown, source: string, baseDir = ".", scope: "global" | "project" = "global"): ConfigResult {
+export function parseConfig(raw: unknown, source: string, baseDir?: string, scope?: "global"): ConfigResult;
+export function parseConfig(
+  raw: unknown,
+  source: string,
+  baseDir: string,
+  scope: "project" | "shared",
+): Parsed<ProjectFile>;
+export function parseConfig(
+  raw: unknown,
+  source: string,
+  baseDir = ".",
+  scope: "global" | "project" | "shared" = "global",
+): ConfigResult | Parsed<ProjectFile> {
   if (!isObject(raw)) return fail(`${source}: root must be an object`);
-  const allowed = scope === "global" ? ["enabled", "reviewMode", "debug", "permissions", "reviewer", "reviewEvidence", "ui"] : ["permissions"];
+  const allowed =
+    scope === "global"
+      ? ["enabled", "reviewMode", "debug", "permissions", "reviewer", "reviewEvidence", "ui"]
+      : ["permissions", "enabled", "reviewMode"];
+  const moveToLocal = `; move it to ${LOCAL_CONFIG_FILENAME}`;
   const unknown = checkKeys(raw, allowed, source);
-  if (unknown) return fail(unknown);
+  if (unknown) return fail(scope === "shared" ? unknown + moveToLocal : unknown);
   if (raw.debug !== undefined && typeof raw.debug !== "boolean") return fail(`${source}: debug must be a boolean`);
-  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") return fail(`${source}: enabled must be a boolean`);
-  if (raw.reviewMode !== undefined && raw.reviewMode !== "manual" && raw.reviewMode !== "auto") return fail(`${source}: reviewMode must be "manual" or "auto"`);
+  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean")
+    return fail(`${source}: enabled must be a boolean`);
+  if (raw.reviewMode !== undefined && raw.reviewMode !== "manual" && raw.reviewMode !== "auto")
+    return fail(`${source}: reviewMode must be "manual" or "auto"`);
   const permissions = raw.permissions === undefined ? {} : raw.permissions;
   if (!isObject(permissions)) return fail(`${source}: permissions must be an object`);
   const permissionKeys = ["allow", "ask", "deny"];
   const permissionUnknown = checkKeys(permissions, permissionKeys, `${source}: permissions`);
-  if (permissionUnknown) return fail(permissionUnknown);
+  if (permissionUnknown) return fail(scope === "shared" ? permissionUnknown + moveToLocal : permissionUnknown);
+  if (scope === "shared") {
+    if (raw.enabled === false) return fail(`${source}: enabled: false is not allowed in the shared file${moveToLocal}`);
+    if (raw.reviewMode === "auto")
+      return fail(`${source}: reviewMode: "auto" is not allowed in the shared file${moveToLocal}`);
+    if (permissions.allow !== undefined)
+      return fail(`${source}: permissions.allow is not allowed in the shared file${moveToLocal}`);
+  }
   const rules: PermissionRule[] = [];
   for (const level of ["deny", "ask", "allow"] as const) {
     const entries = permissions[level];
-    if (entries !== undefined && !Array.isArray(entries)) return fail(`${source}: permissions.${level} must be an array`);
+    if (entries !== undefined && !Array.isArray(entries))
+      return fail(`${source}: permissions.${level} must be an array`);
     for (const [i, entry] of ((entries as unknown[] | undefined) ?? []).entries()) {
       if (!isNonBlank(entry)) return fail(`${source}: permissions.${level}[${i}] must be a non-empty string`);
-      const parsed = parsePermissionRule(entry, level, source, scope, `${source}: permissions.${level}[${i}]`);
+      const parsed = parsePermissionRule(
+        entry,
+        level,
+        source,
+        scope === "global" ? "global" : "project",
+        `${source}: permissions.${level}[${i}]`,
+      );
       if (!parsed.ok) return fail(parsed.error);
       rules.push(parsed.value);
     }
+  }
+  if (scope !== "global") {
+    const settings: ProjectFile["settings"] = {};
+    if (raw.enabled !== undefined) settings.enabled = raw.enabled;
+    if (raw.reviewMode !== undefined) settings.reviewMode = raw.reviewMode;
+    return { ok: true, value: { source, settings, rules } };
   }
   const reviewer = parseReviewer(raw.reviewer, source, baseDir);
   if (!reviewer.ok) return reviewer;
@@ -116,31 +169,71 @@ export function parseConfig(raw: unknown, source: string, baseDir = ".", scope: 
     return { ok: true, value: { status: obj.status !== false, placement } };
   }, { status: true, placement: "widget" });
   if (!ui.ok) return ui;
-  return { ok: true, debug: raw.debug === true, enabled: scope === "global" ? (raw.enabled as boolean | undefined ?? true) : true, reviewMode: scope === "global" ? (raw.reviewMode as ReviewMode | undefined ?? "auto") : "auto", rules, reviewer: reviewer.value, reviewEvidence: evidence.value, ui: ui.value };
+  return {
+    ok: true,
+    debug: raw.debug === true,
+    enabled: raw.enabled ?? true,
+    reviewMode: raw.reviewMode ?? "auto",
+    rules,
+    reviewer: reviewer.value,
+    reviewEvidence: evidence.value,
+    ui: ui.value,
+  };
 }
-function readConfig(path: string, scope: "global" | "project"): ConfigResult {
+function readConfig(path: string): Parsed<unknown> {
   let text: string;
-  try { text = readFileSync(path, "utf8"); } catch (err) {
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      if (scope === "global") return parseConfig(SEED_CONFIG, path, dirname(path), scope);
-      return { ok: true, debug: false, enabled: true, reviewMode: "auto", rules: [], ui: { status: true, placement: "widget" }, reviewer: DEFAULT_REVIEWER, reviewEvidence: DEFAULT_REVIEW_EVIDENCE };
-    }
-    return { ok: false, error: `${path}: cannot read config (${code ?? "unknown error"})` };
+    if (code === "ENOENT") return { ok: true, value: undefined };
+    return fail(`${path}: cannot read config (${code ?? "unknown error"})`);
   }
-  let raw: unknown;
-  try { raw = JSON.parse(text); } catch (err) { return { ok: false, error: `${path}: invalid JSON (${(err as Error).message})` }; }
-  return parseConfig(raw, path, dirname(path), scope);
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch (err) {
+    return fail(`${path}: invalid JSON (${(err as Error).message})`);
+  }
 }
-export function loadGlobalConfig(globalDir: string): ConfigResult { return readConfig(join(globalDir, CONFIG_FILENAME), "global"); }
-export function loadConfig(cwd: string, globalDir: string): ConfigResult {
-  const globalPath = join(globalDir, CONFIG_FILENAME);
-  const projectPath = projectConfigPath(cwd);
-  const global = readConfig(globalPath, "global");
+export function loadGlobalConfig(globalDir: string): ConfigResult {
+  const path = join(globalDir, CONFIG_FILENAME);
+  const raw = readConfig(path);
+  return raw.ok ? parseConfig(raw.value === undefined ? SEED_CONFIG : raw.value, path, globalDir) : raw;
+}
+function readProjectFile(path: string, scope: "shared" | "project"): Parsed<ProjectFile | undefined> {
+  const raw = readConfig(path);
+  if (!raw.ok) return raw;
+  if (raw.value === undefined) return { ok: true, value: undefined };
+  return parseConfig(raw.value, path, dirname(path), scope);
+}
+function sameConfigDirectory(projectDir: string, globalDir: string): boolean {
+  if (resolve(projectDir) === resolve(globalDir)) return true;
+  try {
+    return realpathSync.native(projectDir) === realpathSync.native(globalDir);
+  } catch {
+    return false;
+  }
+}
+export function loadConfig(cwd: string, globalDir: string): LoadedConfig {
+  const global = loadGlobalConfig(globalDir);
   if (!global.ok) return global;
-  const project = readConfig(projectPath, "project");
-  if (!project.ok) return project;
-  return { ...global, rules: [...global.rules, ...project.rules] };
+  const sharedPath = projectConfigPath(cwd);
+  const projectDir = dirname(sharedPath);
+  const project: { shared?: ProjectFile; local?: ProjectFile } = {};
+  if (!sameConfigDirectory(projectDir, globalDir)) {
+    const shared = readProjectFile(sharedPath, "shared");
+    if (!shared.ok) return shared;
+    if (shared.value) project.shared = shared.value;
+  }
+  const local = readProjectFile(join(projectDir, LOCAL_CONFIG_FILENAME), "project");
+  if (!local.ok) return local;
+  if (local.value) project.local = local.value;
+  return {
+    ...global,
+    global,
+    project,
+    rules: [...global.rules, ...(project.shared?.rules ?? []), ...(project.local?.rules ?? [])],
+  };
 }
 export function ensureGlobalConfig(globalDir: string): { created: boolean } | { created: false; error: string } {
   try { mkdirSync(globalDir, { recursive: true }); } catch (err) { return { created: false, error: (err as Error).message }; }
