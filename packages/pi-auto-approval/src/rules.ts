@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RuleLevel } from "./config.ts";
 import { foldPath, resolvePathForPolicy } from "./paths.ts";
+import { analyzeShell } from "./shell.ts";
 
 export interface PermissionRule {
   readonly tool: string;
@@ -158,15 +159,74 @@ export function allowWordsMatch(ruleWords: readonly string[], commandWords: read
   return ruleWords.slice(rule).every((word) => word === "*");
 }
 
-function matchesText(pattern: string, text: string, slashStar: boolean): boolean {
-  return globRegex(pattern, slashStar).test(text);
+const WRAPPER = /^(?:env|command|exec)[ \t]+/;
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const RAW_ENV_WORD = /^[A-Za-z_][A-Za-z0-9_]*=(?:[^\s'"\\;&|`()<>]|'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\\[\s\S])*[ \t]+/;
+
+function stripRawWrapper(command: string): string | undefined {
+  const text = command.trimStart();
+  const prefix = WRAPPER.exec(text)?.[0];
+  if (prefix === undefined) return;
+  let rest = text.slice(prefix.length);
+  if (prefix.startsWith("env")) {
+    for (let word = RAW_ENV_WORD.exec(rest); word; word = RAW_ENV_WORD.exec(rest)) {
+      rest = rest.slice(word[0].length);
+    }
+  }
+  return rest;
 }
-function bashMatches(specifier: string, command: string, scanSegments: boolean): boolean {
-  if (matchesText(specifier, command, false)) return true;
-  if (!scanSegments) return false;
-  return command
-    .split(SHELL_SEGMENT_DELIMITER)
-    .some((segment) => segment.trim() !== "" && matchesText(specifier, segment.trim(), false));
+
+function canonicalRuleWords(specifier: string): readonly string[] | undefined {
+  // Mask wildcards so the literal-only command decoder does not reject them as expansions.
+  let code = 0xe000;
+  while (code <= 0xf8ff && specifier.includes(String.fromCharCode(code))) code++;
+  if (code > 0xf8ff) return;
+  const marker = String.fromCharCode(code);
+  const analysis = analyzeShell(specifier.replaceAll("*", marker));
+  if (!analysis.supported || analysis.components.length !== 1) return;
+  return analysis.components[0]?.words.map((word) => word.replaceAll(marker, "*"));
+}
+
+function restrictionPattern(pattern: string, bare: string | undefined): (candidate: string) => boolean {
+  const full = globRegex(pattern, false);
+  const withoutArgs = bare === undefined ? undefined : globRegex(bare, false);
+  return (candidate) => full.test(candidate) || (withoutArgs?.test(candidate) ?? false);
+}
+
+function bashRestrictionMatches(
+  specifier: string,
+  command: string,
+  scanSegments: boolean,
+  words?: readonly string[],
+): boolean {
+  const matchesRaw = restrictionPattern(specifier, specifier.endsWith(" *") ? specifier.slice(0, -2) : undefined);
+  const matchRawCandidate = (candidate: string) => {
+    if (matchesRaw(candidate)) return true;
+    const unwrapped = stripRawWrapper(candidate);
+    return unwrapped !== undefined && matchesRaw(unwrapped);
+  };
+  if (matchRawCandidate(command)) return true;
+  if (
+    scanSegments &&
+    command.split(SHELL_SEGMENT_DELIMITER).some((segment) => segment.trim() !== "" && matchRawCandidate(segment.trim()))
+  )
+    return true;
+  if (words === undefined) return false;
+
+  const pattern = canonicalRuleWords(specifier);
+  if (!pattern) return false;
+  const matchesCanonical = restrictionPattern(
+    pattern.join(" "),
+    pattern.at(-1) === "*" && pattern.length > 1 ? pattern.slice(0, -1).join(" ") : undefined,
+  );
+  if (matchesCanonical(words.join(" "))) return true;
+  const [wrapper] = words;
+  if (wrapper !== "env" && wrapper !== "command" && wrapper !== "exec") return false;
+  let start = 1;
+  if (wrapper === "env") {
+    while (ENV_ASSIGNMENT.test(words[start] ?? "")) start++;
+  }
+  return start < words.length && matchesCanonical(words.slice(start).join(" "));
 }
 function filePatternMatches(
   specifier: string,
@@ -204,13 +264,22 @@ function filePatternMatches(
   return globRegex(compare(resolve(anchor, configured)), true, wildcard).test(compare(actual));
 }
 
-export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string, scanSegments = true): boolean {
+export function ruleMatches(
+  rule: PermissionRule,
+  call: ToolCall,
+  cwd: string,
+  scanSegments = true,
+  words?: readonly string[],
+): boolean {
   const tool = rule.tool === "edit" && call.toolName === "write" ? "edit" : call.toolName;
   if (tool !== rule.tool) return false;
   if (rule.specifier === undefined) return true;
   if (rule.tool === "bash") {
     if (!isObject(call.input) || typeof call.input.command !== "string") return false;
-    return bashMatches(rule.specifier, call.input.command, scanSegments && rule.level !== "allow");
+    if (rule.level !== "allow") return bashRestrictionMatches(rule.specifier, call.input.command, scanSegments, words);
+    if (words === undefined) return globRegex(rule.specifier, false).test(call.input.command);
+    const tokens = tokenizeAllowRule(rule.specifier);
+    return tokens.ok && allowWordsMatch(tokens.words, words);
   }
   if (["read", "edit", "write"].includes(rule.tool)) {
     if (!isObject(call.input) || typeof call.input.path !== "string") return false;
@@ -230,8 +299,14 @@ export function ruleMatches(rule: PermissionRule, call: ToolCall, cwd: string, s
   return false;
 }
 
-export function matchPermissionExact(call: ToolCall, cwd: string, rules: readonly PermissionRule[], projectTrusted: boolean): PermissionRule | undefined {
-  return matchPermission(call, cwd, rules, projectTrusted, false);
+export function matchPermissionExact(
+  call: ToolCall,
+  cwd: string,
+  rules: readonly PermissionRule[],
+  projectTrusted: boolean,
+  words?: readonly string[],
+): PermissionRule | undefined {
+  return matchPermission(call, cwd, rules, projectTrusted, false, words);
 }
 
 export function matchPermission(
@@ -240,11 +315,14 @@ export function matchPermission(
   rules: readonly PermissionRule[],
   projectTrusted: boolean,
   scanSegments = true,
+  words?: readonly string[],
 ): PermissionRule | undefined {
   for (const level of ["deny", "ask", "allow"] as const) {
     for (const scope of ["global", "project"] as const) {
       if (scope === "project" && level === "allow" && !projectTrusted) continue;
-      const match = rules.find((rule) => rule.level === level && rule.scope === scope && ruleMatches(rule, call, cwd, scanSegments));
+      const match = rules.find(
+        (rule) => rule.level === level && rule.scope === scope && ruleMatches(rule, call, cwd, scanSegments, words),
+      );
       if (match) return match;
     }
   }

@@ -296,6 +296,23 @@ describe("permission matching", () => {
     assert.equal(ruleMatches(exact, call("bash", { command: 1 }), "/tmp"), false);
   });
 
+  test("raw deny and ask normalize wrappers in scanned segments without unwrapping shell evaluation", () => {
+    for (const level of ["deny", "ask"] as const) {
+      const rule = parse("Bash(preview *)", level);
+      for (const command of [
+        'before >out; env FOO=1 BAR="value with spaces" preview draft',
+        "env FOO=1 preview",
+        "command preview",
+        "exec preview",
+      ]) {
+        assert.equal(ruleMatches(rule, call("bash", { command }), "/tmp"), true, command);
+      }
+      for (const command of ["bash -c 'preview draft'", "eval preview draft", "echo env preview draft"]) {
+        assert.equal(ruleMatches(rule, call("bash", { command }), "/tmp"), false, command);
+      }
+    }
+  });
+
   test("applies deny, ask, allow precedence, global-before-project, and project trust", () => {
     const globalAllow = parse("Bash(*)", "allow");
     const projectAllow = parse("Bash(*)", "allow", "project");
