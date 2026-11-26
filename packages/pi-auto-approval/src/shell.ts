@@ -4,6 +4,7 @@ import sh from "mvdan-sh";
 
 export interface ShellComponent {
   readonly command: string;
+  readonly words: readonly string[];
   readonly start: number;
   readonly end: number;
   readonly context: readonly ShellRelation[];
@@ -64,31 +65,44 @@ export function analyzeShell(source: string): ShellAnalysis {
       if (end <= start) throw new Error("invalid source range");
       return { start, end };
     };
-    const literal = (node: Node, quoted = false): void => {
+    const literal = (node: Node): string => {
       const type = syntax.NodeType(node);
       if (type === "SglQuoted") {
-        if (node.Dollar) {
-          const { start, end } = span(node);
-          const body = source.slice(start + 2, end - 1);
-          for (let i = 0; i < body.length; i++) {
-            if (body[i] === "\\" && !["n", "t", "\\", "'", '"'].includes(body.charAt(++i)))
-              throw new Error("unsupported ANSI-C escape");
-          }
-        }
-        return;
+        const { start, end } = span(node);
+        const body = source.slice(start + (node.Dollar ? 2 : 1), end - 1);
+        if (!node.Dollar) return body;
+        return body.replace(/\\(.)?/gs, (_, escaped = "") => {
+          if (!["n", "t", "\\", "'", '"'].includes(escaped)) throw new Error("unsupported ANSI-C escape");
+          return escaped === "n" ? "\n" : escaped === "t" ? "\t" : escaped;
+        });
       }
       if (type === "DblQuoted" && !node.Dollar) {
-        for (const part of node.Parts) literal(part, true);
-        return;
+        for (const part of node.Parts) {
+          if (syntax.NodeType(part) !== "Lit") throw new Error("unsupported word");
+          span(part);
+        }
+        // mvdan-sh may split double-quoted parts at a continuation, leaving the backslash in one span and the newline outside it.
+        const { start, end } = span(node);
+        return source
+          .slice(start + 1, end - 1)
+          .replace(/\\(["\\$`\n])/g, (_, escaped: string) => (escaped === "\n" ? "" : escaped));
       }
       if (type !== "Lit") throw new Error("unsupported word");
       const { start, end } = span(node);
       const raw = source.slice(start, end);
       // Validate literal word forms, not shell boundaries. Expansions need whole-command review.
-      if (!quoted) for (let i = 0; i < raw.length; i++) {
-        if (raw[i] === "\\") { i++; continue; }
-        if ("*?[]{}~$`".includes(raw[i]!)) throw new Error("unsupported literal expansion");
+      let value = "";
+      for (let i = 0; i < raw.length; i++) {
+        const char = raw.charAt(i);
+        if (char === "\\") {
+          const escaped = raw.charAt(++i);
+          if (escaped !== "\n") value += escaped;
+        } else {
+          if ("*?[]{}~$`".includes(char)) throw new Error("unsupported literal expansion");
+          value += char;
+        }
       }
+      return value;
     };
     const components: ShellComponent[] = [];
     const statement = (stmt: Node, context: readonly ShellRelation[]): void => {
@@ -106,11 +120,11 @@ export function analyzeShell(source: string): ShellAnalysis {
         return;
       }
       if (type !== "CallExpr" || cmd.Assigns.length || !cmd.Args.length) throw new Error("unsupported command");
-      for (const word of cmd.Args) {
+      const words = cmd.Args.map((word) => {
         if (syntax.NodeType(word) !== "Word") throw new Error("unknown word");
-        for (const part of word.Parts) literal(part);
-      }
-      components.push({ command: source.slice(bounds.start, bounds.end), ...bounds, context: relations });
+        return word.Parts.map((part) => literal(part)).join("");
+      });
+      components.push({ command: source.slice(bounds.start, bounds.end), words, ...bounds, context: relations });
     };
     tree.Stmts.forEach((stmt, i) => statement(stmt, [{ kind: "list", start: 0, end: source.length, index: i + 1, count: tree.Stmts.length }]));
     if (!components.length) throw new Error("no components");
