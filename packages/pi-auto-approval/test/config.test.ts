@@ -170,6 +170,8 @@ for (const [field, raw] of [
   ["enabled", { enabled: false }],
   ["reviewMode", { reviewMode: "auto" }],
   ["permissions.allow", { permissions: { allow: [rule] } }],
+  ["reviewer", { reviewer: {} }],
+  ["defaultMode", { permissions: { defaultMode: "manual" } }],
 ] as const) {
   test(`shared ${field} restriction directs users to the local file`, () => {
     const t = temp();
