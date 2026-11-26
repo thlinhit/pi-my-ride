@@ -1,24 +1,59 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { inspectShell } from "../src/harddeny.ts";
+import { analyzeShell } from "../src/shell.ts";
 
 const home = "/Users/éxample";
+const targetBases = [
+  "~",
+  "$HOME",
+  `\${HOME}`,
+  '"$HOME"',
+  "/Users/éxample",
+  "/bin",
+  "/boot",
+  "/dev",
+  "/etc",
+  "/lib",
+  "/lib64",
+  "/opt",
+  "/proc",
+  "/root",
+  "/sbin",
+  "/sys",
+  "/usr",
+  "/var",
+  "/System",
+  "/Library",
+  "/Applications",
+  "/Users",
+  "/home",
+];
+const targets = ["/", "/*", ...targetBases.flatMap((base) => [base, `${base}/`, `${base}/*`])];
+
+for (const flag of ["-r", "-R", "--recursive", "-rf", "-fR", "-Rf"]) {
+  test(`hard denies every protected rm target with ${flag}`, () => {
+    for (const target of targets) {
+      const command = `rm ${flag} ${target}`;
+      assert.ok(inspectShell(command, home)?.hardDeny, command);
+    }
+  });
+}
 
 for (const command of [
-  "rm -rf ~",
-  "rm -rf ~/",
-  "rm -rf ~/*",
-  "rm -rf /",
-  "rm -r /etc",
   "sudo rm -rf /usr",
-  'rm -rf "$HOME"',
-  `rm -rf \${HOME}`,
   `rm -rf '${home}/*'`,
   `echo é; rm -R ${home}`,
   "sudo env A=1 B='two words' command exec rm --recursive -- /System/",
   "if true; then rm -fr /*; fi",
   'echo "$(rm -R /var/*)"',
   "rm -rf ~ >/tmp/log",
+  String.raw`r\m -rf ~`,
+  "r\\\nm -rf ~",
+  String.raw`rm \-r\f ~`,
+  "rm -r\\\nf ~",
+  String.raw`s\udo e\nv A=1 comman\d ex\ec rm -rf /e\tc`,
+  'r"\\\nm" "-r\\\nf" /etc',
 ]) {
   test(`hard denies: ${command}`, () => {
     assert.ok(inspectShell(command, home)?.hardDeny);
@@ -49,23 +84,53 @@ for (const command of [
   });
 }
 
-test("collects raw output redirect targets even when rule matching is unsupported", () => {
-  assert.deepEqual(inspectShell("echo 'export PATH=x' >> ~/.zshrc; echo é 2> 'two words' 2>&1 </dev/null", home), {
-    sensitiveTargets: [
-      { path: "~/.zshrc", component: 0 },
-      { path: "'two words'", component: 1 },
-    ],
-  });
+test("collects decoded output redirect targets even when rule matching is unsupported", () => {
+  const quotedRedirect = 'echo x >> "~/.zshrc"';
+  const command = `echo 'export PATH=x' >> ~/.zshrc; echo é 2> 'two words' 2>&1 </dev/null; ${quotedRedirect}; echo x >> "$HOME/.zshrc"; echo x > two\\ words`;
+  assert.equal(analyzeShell(command).supported, false);
+  assert.equal(analyzeShell(quotedRedirect).supported, false);
+  assert.deepEqual(
+    inspectShell(command, home)?.sensitiveTargets.map(({ path }) => path),
+    ["~/.zshrc", "two words", "~/.zshrc", "$HOME/.zshrc", "two words"],
+  );
 });
 
-test("collects tee arguments without flags, in supported component order", () => {
-  assert.deepEqual(inspectShell("echo é && printf x | tee -a '.ssh/authorized_keys' -- -file; tee out", home), {
-    sensitiveTargets: [
-      { path: "'.ssh/authorized_keys'", component: 2 },
-      { path: "-file", component: 2 },
-      { path: "out", component: 3 },
+test("collects decoded tee arguments without flags and maps them to the analyzed components", () => {
+  const firstTee = "tee -a '~/.ssh/authorized_keys' -- -file";
+  const secondTee = "tee out";
+  const command = `echo é && printf x | ${firstTee}; ${secondTee}`;
+  const analysis = analyzeShell(command);
+  assert.ok(analysis.supported);
+  const result = inspectShell(command, home);
+  assert.ok(result);
+  assert.deepEqual(
+    result.sensitiveTargets.map(({ path, component }) => [path, analysis.components[component]?.command]),
+    [
+      ["~/.ssh/authorized_keys", firstTee],
+      ["-file", firstTee],
+      ["out", secondTee],
     ],
-  });
+  );
+});
+
+test("decodes escaped and continued tee command, flags, and target words", () => {
+  for (const executable of [String.raw`t\ee`, "t\\\nee"]) {
+    const command = `${executable} \\-a -\\\na two\\ words "a\\\nb" 'a\\b'`;
+    assert.deepEqual(
+      inspectShell(command, home)?.sensitiveTargets.map(({ path }) => path),
+      ["two words", "ab", "a\\b"],
+    );
+  }
+});
+
+test("decodes double-quoted and plain ANSI-C escapes without expanding words", () => {
+  const doubleQuoted = '"\\"\\\\\\$\\`\\q"';
+  const ansiQuoted = "$'a\\nb\\t\\\\\\'\\\"'";
+  const command = `tee ${doubleQuoted} ${ansiQuoted} "\${HOME}/.*" ~/.zshrc`;
+  assert.deepEqual(
+    inspectShell(command, home)?.sensitiveTargets.map(({ path }) => path),
+    ['"\\$`\\q', "a\nb\t\\'\"", `\${HOME}/.*`, "~/.zshrc"],
+  );
 });
 
 test("collects tee targets with unquoted tilde even when rule matching is unsupported", () => {
