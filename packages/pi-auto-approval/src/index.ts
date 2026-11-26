@@ -1,11 +1,12 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PermissionRule, SessionChoices } from "./config.ts";
-import { CONFIG_FILENAME, ensureGlobalConfig, globalConfigDir, loadConfig } from "./config.ts";
+import { CONFIG_FILENAME, ensureGlobalConfig, globalConfigDir, loadConfig, projectConfigPath } from "./config.ts";
 import { analyzeShell } from "./shell.ts";
 import { isReadOnlyComponent } from "./readonly.ts";
-import { matchPermission, matchPermissionExact } from "./rules.ts";
+import { matchPermission, matchPermissionExact, resolveToolPath } from "./rules.ts";
+import { foldPath, isPathInsideOrEqual, resolvePathForPolicy } from "./paths.ts";
 import { createPermissionsController, isTrustedProject } from "./permissions.ts";
 import { effectiveSettings, type PermissionConfig } from "./ui/footer.ts";
 import { recordHistory, type HistoryEntry, type HistoryResult } from "./history.ts";
@@ -64,13 +65,13 @@ function callExcerpt(toolName: string, input: unknown): string {
 }
 function safeNotify(ctx: GateContext, message: string): void { try { ctx.ui.notify(message); } catch {} }
 function isAborted(ctx: GateContext): boolean { return ctx.signal?.aborted === true; }
-function snapshotGate(ctx: GateContext, choices: SessionChoices, load?: ConfigLoader) {
+function snapshotGate(ctx: GateContext, choices: SessionChoices, load?: ConfigLoader, globalDir = globalConfigDir()) {
   let config: PermissionConfig | undefined;
   try {
     config = load?.(ctx.cwd);
   } catch {}
   const projectTrusted = isTrustedProject(ctx);
-  return { config, projectTrusted, settings: effectiveSettings(config, choices, projectTrusted) };
+  return { config, globalDir, projectTrusted, settings: effectiveSettings(config, choices, projectTrusted) };
 }
 
 function recordGateOutcome(
@@ -103,6 +104,32 @@ export async function handleToolCall(event: { toolName: string; input: unknown; 
 
 type GateSnapshot = ReturnType<typeof snapshotGate>;
 
+function protectedFileReason(
+  event: { toolName: string; input: unknown },
+  cwd: string,
+  globalDir: string,
+): string | undefined {
+  if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
+  const input = event.input as { path?: unknown } | null | undefined;
+  if (typeof input?.path !== "string") return undefined;
+  let path = input.path;
+  try {
+    path = resolveToolPath(path, cwd);
+    const target = foldPath(resolvePathForPolicy(path));
+    const roots = [globalDir, dirname(projectConfigPath(cwd))];
+    if (!roots.some((root) => isPathInsideOrEqual(target, foldPath(resolvePathForPolicy(root))))) return undefined;
+  } catch {
+    // An unresolved target or root can't prove that the write is outside the protected directories.
+  }
+  return `Changes auto-approval protected file ${path}`;
+}
+
+function protectedBashReason(command: string): string | undefined {
+  const text = command.toLowerCase();
+  if (text.includes("pi-auto-approval") || text.includes("auto-permissions"))
+    return `Changes auto-approval protected file ${command}`;
+}
+
 async function gateToolCall(
   event: { toolName: string; input: unknown },
   ctx: GateContext,
@@ -120,7 +147,7 @@ async function gateToolCall(
 async function decideToolCall(
   event: { toolName: string; input: unknown },
   ctx: GateContext,
-  { config, projectTrusted, settings }: GateSnapshot,
+  { config, globalDir, projectTrusted, settings }: GateSnapshot,
   deps: GateDeps,
   choices: SessionChoices,
   noticedFiles: Set<string>,
@@ -150,13 +177,50 @@ async function decideToolCall(
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   if (!settings.enabled) return undefined;
   const mode = settings.reviewMode;
-  const analysis = bash ? analyzeShell(command!) : undefined;
-  const matcher = deps.matcher ?? (bash ? matchPermissionExact : matchPermission);
-  let rule: PermissionRule | undefined;
+  const analysis = bash && command !== undefined ? analyzeShell(command) : undefined;
+  const scanMatcher = deps.matcher ?? matchPermission;
+  const exactMatcher = deps.matcher ?? matchPermissionExact;
+  const wholeMatcher = analysis?.supported ? exactMatcher : scanMatcher;
+  const components = analysis?.supported ? analysis.components : [];
+  const componentCall = (command: string) => ({ toolName: "bash", input: { command } });
+
+  // Built-in hard deny belongs here, before any configured rule.
+  const denyRules = config.rules.filter((rule) => rule.level === "deny");
+  let denied: PermissionRule | undefined;
   try {
-    rule = matcher({ toolName: event.toolName, input: event.input }, ctx.cwd, config.rules, projectTrusted);
-    if (bash && !analysis?.supported) rule = matchPermission(event, ctx.cwd, config.rules.filter(candidate => candidate.level !== "allow"), projectTrusted) ?? rule;
+    if (denyRules.length) {
+      denied = wholeMatcher(event, ctx.cwd, denyRules, projectTrusted);
+      for (const component of components) {
+        if (denied) break;
+        denied = exactMatcher(componentCall(component.command), ctx.cwd, denyRules, projectTrusted);
+      }
+    }
   } catch { return block("auto-approval: matcher error"); }
+
+  let protectedReason: string | undefined;
+  let componentReasons: (string | undefined)[] = [];
+  let componentRules: (PermissionRule | undefined)[] = [];
+  let rule = denied;
+  if (!denied) {
+    protectedReason =
+      bash && command !== undefined && !analysis?.supported
+        ? protectedBashReason(command)
+        : protectedFileReason(event, ctx.cwd, globalDir);
+    componentReasons = components.map((component) => protectedBashReason(component.command));
+    if (!protectedReason) {
+      const remainingRules = config.rules.filter((rule) => rule.level !== "deny");
+      try {
+        rule = wholeMatcher(event, ctx.cwd, remainingRules, projectTrusted);
+        componentRules = components.map((component, index) =>
+          componentReasons[index]
+            ? undefined
+            : exactMatcher(componentCall(component.command), ctx.cwd, remainingRules, projectTrusted),
+        );
+      } catch {
+        return block("auto-approval: matcher error");
+      }
+    }
+  }
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   const label = rule?.label ?? (bash ? "Unmatched Bash command" : `Unmatched ${event.toolName} call`);
   const reviewerConfig = choices.reviewerModel === undefined ? config.reviewer : { ...config.reviewer, model: choices.reviewerModel ?? undefined };
@@ -192,26 +256,19 @@ async function decideToolCall(
     report("blocked");
     return block(`Blocked by auto-approval ${attribution}`);
   }
+  if (protectedReason) return confirm(protectedReason);
   if (analysis && !analysis.supported && !analysis.reviewable)
     return confirm(`${analysis.reason} requires confirmation`);
   if (bash && analysis?.supported) {
     const reasons: string[] = rule?.level === "ask" ? [`Requires confirmation ${attribution}`] : [];
-    let componentRules: (PermissionRule | undefined)[];
-    try {
-      componentRules = analysis.components.map((component) =>
-        matcher({ toolName: "bash", input: { command: component.command } }, ctx.cwd, config.rules, projectTrusted),
-      );
-    } catch {
-      return block("auto-approval: matcher error");
-    }
-    const denied = componentRules.find((candidate) => candidate?.level === "deny");
-    if (denied) {
-      report("blocked");
-      return block(`Blocked by auto-approval (${denied.label}, ${denied.source})`);
-    }
     for (let index = 0; index < analysis.components.length; index++) {
       if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
       const component = analysis.components[index]!;
+      const reason = componentReasons[index];
+      if (reason) {
+        reasons.push(reason);
+        continue;
+      }
       const componentRule = componentRules[index];
       if (componentRule?.level === "allow") {
         if (settings.debug) safeNotify(ctx, `Allowed by rule (${componentRule.label}, ${componentRule.source})`);
@@ -309,7 +366,7 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
       notify: (message, type) => ctx.ui.notify(message, type),
     } };
     const choices = permissions.snapshot();
-    const snapshot = snapshotGate(adapted, choices, (cwd) => loadConfig(cwd, globalDir));
+    const snapshot = snapshotGate(adapted, choices, (cwd) => loadConfig(cwd, globalDir), globalDir);
     permissions.refreshFooter(ctx, snapshot);
     const finalize = (outcome: GateOutcome): void => {
       recordGateOutcome(

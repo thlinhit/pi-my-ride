@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
@@ -684,8 +684,162 @@ function projectFixture(t: TestContext, shared: object, local: object, cwdIsHome
   );
   if (!cwdIsHome) writeFileSync(projectConfigPath(cwd), JSON.stringify(shared));
   writeFileSync(join(projectDir, "auto-permissions.local.json"), JSON.stringify(local));
-  return { cwd, load: (cwd: string) => loadFiles(cwd, globalDir) };
+  return { cwd, home, globalDir, load: (cwd: string) => loadFiles(cwd, globalDir) };
 }
+
+test("unmatched protected Write asks once without review", async (t) => {
+  const { cwd, load } = projectFixture(t, {}, {});
+  const { ctx, calls } = context({ cwd });
+  const path = ".pi/pi-auto-approval/auto-permissions.json";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
+  assert.equal(calls.length, 1);
+  assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${join(cwd, path)}\n`));
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("Edit allow cannot auto-approve a protected Write with or without UI", async (t) => {
+  const { cwd, load } = projectFixture(t, {}, { permissions: { allow: ["Edit(./**)"] } });
+  const path = ".pi/pi-auto-approval/auto-permissions.json";
+  const call = { toolName: "write", input: { path } };
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  const reason = `Changes auto-approval protected file ${join(cwd, path)}`;
+  const interactive = context({ cwd });
+  assert.equal(await handleToolCall(call, interactive.ctx, load, { review }), undefined);
+  assert.equal(interactive.calls.length, 1);
+  assert.ok(String(interactive.calls[0]?.[1]).startsWith(`${reason}\n`));
+  const headless = context({ cwd, hasUI: false });
+  assert.deepEqual(await handleToolCall(call, headless.ctx, load, { review }), { block: true, reason });
+  assert.equal(headless.calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("global protected Writes ask through a symlink and on a different case spelling", async (t) => {
+  const { cwd, home, globalDir, load } = projectFixture(t, {}, {});
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+  const alias = join(cwd, "settings");
+  symlinkSync(globalDir, alias, "dir");
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  for (const root of [alias, join(home, ".pi", "PI-AUTO-APPROVAL")]) {
+    const { ctx, calls } = context({ cwd });
+    const path = join(root, "new", "file.json");
+    assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
+    assert.equal(calls.length, 1);
+    assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${path}\n`));
+  }
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("an unresolved Edit target asks without review", async (t) => {
+  const { cwd, load } = projectFixture(t, {}, {});
+  const { ctx, calls } = context({ cwd });
+  const path = join(cwd, "loop");
+  symlinkSync(path, path);
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  assert.equal(await handleToolCall({ toolName: "edit", input: { path } }, ctx, load, { review }), undefined);
+  assert.equal(calls.length, 1);
+  assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${path}\n`));
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("whole and component Bash denies win over protected paths without prompting", async (t) => {
+  const { ctx, calls } = context();
+  const command = "cat .pi/pi-auto-approval/auto-permissions.json && obsidian create path=x";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  for (const denied of [command, "obsidian create path=x"]) {
+    const deny = parsedRule(`Bash(${denied})`);
+    const decision = await handleToolCall(event(command), ctx, () => config([deny], "auto"), { review });
+    assert.deepEqual(decision, { block: true, reason: `Blocked by auto-approval (${deny.label}, ${deny.source})` });
+  }
+  assert.equal(calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("protected Bash component and reviewer ask share one dialog", async (t) => {
+  const { ctx, calls } = context();
+  const protectedComponent = "cat .pi/pi-auto-approval/auto-permissions.json";
+  const unmatchedComponent = "obsidian create path=x";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "ask_user", reason: "confirm note creation" },
+  }));
+  const call = event(`${protectedComponent} && ${unmatchedComponent}`);
+  assert.equal(await handleToolCall(call, ctx, () => config([], "auto"), { review }), undefined);
+  assert.deepEqual(
+    review.mock.calls.map(({ arguments: [input] }) => input.command),
+    [unmatchedComponent],
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(
+    String(calls[0]?.[1]).split("\n\n")[0],
+    [
+      `Changes auto-approval protected file ${protectedComponent}`,
+      "Reviewer needs user approval: confirm note creation",
+    ].join("\n"),
+  );
+});
+
+test("Bash allow cannot approve a protected component", async (t) => {
+  const { ctx, calls } = context();
+  const command = "cat AUTO-PERMISSIONS.JSON";
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  const rules = [parsedRule(`Bash(${command})`, "allow")];
+  assert.equal(await handleToolCall(event(command), ctx, () => config(rules, "auto"), { review }), undefined);
+  assert.equal(calls.length, 1);
+  assert.ok(String(calls[0]?.[1]).startsWith(`Changes auto-approval protected file ${command}\n`));
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("unsupported Bash with protected text asks once without review", async (t) => {
+  const { ctx, calls } = context();
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  for (const command of ["echo '{}' > ~/.pi/pi-auto-approval/x", "echo '{}' > AUTO-PERMISSIONS.JSON"]) {
+    assert.equal(await handleToolCall(event(command), ctx, () => config([], "auto"), { review }), undefined);
+    assert.ok(String(calls.at(-1)?.[1]).startsWith(`Changes auto-approval protected file ${command}\n`));
+  }
+  assert.equal(calls.length, 2);
+  assert.equal(review.mock.callCount(), 0);
+});
+
+test("protection off bypasses protected Write and Bash checks", async (t) => {
+  const { ctx, calls } = context();
+  const path = ".pi/pi-auto-approval/auto-permissions.json";
+  const load = () => ({ ...config([], "auto"), enabled: false });
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  assert.equal(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), undefined);
+  assert.equal(await handleToolCall(event(`cat ${path}`), ctx, load, { review }), undefined);
+  assert.equal(calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+});
 
 for (const source of ["local", "shared"] as const) {
   test(`trusted ${source} manual mode confirms unmatched calls with global auto`, async (t) => {
@@ -769,20 +923,20 @@ test("home gate sees seed rules once and honors untrusted home local deny", asyn
   });
   assert.equal(globalConfigDir(), join(cwd, ".pi", "pi-auto-approval"));
   const { ctx } = context({ cwd, hasUI: false, isProjectTrusted: () => false });
-  let matches = 0;
+  const seen: PermissionRule[] = [];
+  const call = event("echo ok && pwd");
   assert.equal(
-    await handleToolCall(event("echo ok"), ctx, load, {
-      matcher: (_call, _cwd, rules) => {
-        matches++;
-        const seedRules = Object.values(SEED_CONFIG.permissions).flat().length;
-        assert.equal(rules.length, seedRules + 1);
-        assert.equal(rules.filter((rule) => rule.scope === "global").length, seedRules);
+    await handleToolCall(call, ctx, load, {
+      matcher: (candidate, _cwd, rules) => {
+        if (candidate.input === call.input) seen.push(...rules);
         return undefined;
       },
     }),
     undefined,
   );
-  assert.ok(matches > 0);
+  const seedRules = Object.values(SEED_CONFIG.permissions).flat().length;
+  assert.equal(seen.length, seedRules + 1);
+  assert.equal(seen.filter((rule) => rule.scope === "global").length, seedRules);
   assert.match(
     (await handleToolCall(event("echo local-deny"), ctx, load))!.reason,
     /Blocked by auto-approval.*auto-permissions\.local\.json/,
