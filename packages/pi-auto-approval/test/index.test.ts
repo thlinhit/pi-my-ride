@@ -6,7 +6,13 @@ import type { TestContext } from "node:test";
 import test, { afterEach, mock } from "node:test";
 import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import type { ConfigResult, PermissionRule, ReviewerConfig } from "../src/config.ts";
-import { parseConfig, SEED_CONFIG } from "../src/config.ts";
+import {
+  globalConfigDir,
+  loadConfig as loadFiles,
+  parseConfig,
+  projectConfigPath,
+  SEED_CONFIG,
+} from "../src/config.ts";
 import { parsePermissionRule } from "../src/rules.ts";
 import { BUDGET_EXCEEDED_ERROR } from "../src/review/protocol.ts";
 import type { ConfigLoader, GateContext, GateDeps, ReviewContext, ReviewInput } from "../src/index.ts";
@@ -662,6 +668,98 @@ test("untrusted project allow confirms; deny cannot bypass", async () => {
   });
   assert.equal(blocked?.reason, "Blocked by auto-approval (danger command, global.json)");
   assert.deepEqual(statuses, ["approval-required", "approved", "blocked"]);
+});
+
+function projectFixture(t: TestContext, shared: object, local: object, cwdIsHome = false) {
+  const home = mkdtempSync(join(tmpdir(), "approval-project-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const cwd = cwdIsHome ? home : join(home, "checkout");
+  const globalDir = globalConfigDir(home);
+  const projectDir = join(cwd, ".pi", "pi-auto-approval");
+  mkdirSync(globalDir, { recursive: true });
+  mkdirSync(projectDir, { recursive: true });
+  writeFileSync(
+    join(globalDir, "auto-permissions.json"),
+    JSON.stringify(cwdIsHome ? SEED_CONFIG : { reviewMode: "auto" }),
+  );
+  if (!cwdIsHome) writeFileSync(projectConfigPath(cwd), JSON.stringify(shared));
+  writeFileSync(join(projectDir, "auto-permissions.local.json"), JSON.stringify(local));
+  return { cwd, load: (cwd: string) => loadFiles(cwd, globalDir) };
+}
+
+for (const source of ["local", "shared"] as const) {
+  test(`trusted ${source} manual mode confirms unmatched calls with global auto`, async (t) => {
+    const manual = { reviewMode: "manual" };
+    const { cwd, load } = projectFixture(t, source === "shared" ? manual : {}, source === "local" ? manual : {});
+    const { ctx, calls } = context({ cwd });
+    let reviews = 0;
+    const deps = {
+      review: async () => {
+        reviews++;
+        return { ok: true as const, verdict: { decision: "approve" as const, reason: "ok" } };
+      },
+    };
+    assert.equal(await handleToolCall(event("unmatched-command"), ctx, load, deps), undefined);
+    assert.equal(calls.length, 1);
+    assert.match(
+      (await handleToolCall(event("unmatched-command"), { ...ctx, hasUI: false }, load, deps))!.reason,
+      /requires confirmation/i,
+    );
+    assert.equal(reviews, 0);
+  });
+}
+
+test("untrusted shared and local deny and ask rules still apply", async (t) => {
+  const { cwd, load } = projectFixture(
+    t,
+    { permissions: { deny: ["Bash(echo shared-deny)"], ask: ["Bash(echo shared-ask)"] } },
+    { permissions: { deny: ["Bash(echo local-deny)"], ask: ["Bash(echo local-ask)"] } },
+  );
+  const { ctx } = context({ cwd, hasUI: false, isProjectTrusted: () => false });
+  for (const [source, file] of [
+    ["shared", "auto-permissions.json"],
+    ["local", "auto-permissions.local.json"],
+  ] as const) {
+    for (const [level, reason] of [
+      ["deny", "Blocked by auto-approval"],
+      ["ask", "Requires confirmation"],
+    ] as const) {
+      const decision = await handleToolCall(event(`echo ${source}-${level}`), ctx, load);
+      assert.ok(decision);
+      assert.ok(decision.reason.startsWith(reason));
+      assert.ok(decision.reason.endsWith(`${file})`));
+    }
+  }
+});
+
+test("home gate sees seed rules once and honors untrusted home local deny", async (t) => {
+  const { cwd, load } = projectFixture(t, {}, { permissions: { deny: ["Bash(echo local-deny)"] } }, true);
+  const previousHome = process.env.HOME;
+  process.env.HOME = cwd;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+  });
+  assert.equal(globalConfigDir(), join(cwd, ".pi", "pi-auto-approval"));
+  const { ctx } = context({ cwd, hasUI: false, isProjectTrusted: () => false });
+  let matches = 0;
+  assert.equal(
+    await handleToolCall(event("echo ok"), ctx, load, {
+      matcher: (_call, _cwd, rules) => {
+        matches++;
+        const seedRules = Object.values(SEED_CONFIG.permissions).flat().length;
+        assert.equal(rules.length, seedRules + 1);
+        assert.equal(rules.filter((rule) => rule.scope === "global").length, seedRules);
+        return undefined;
+      },
+    }),
+    undefined,
+  );
+  assert.ok(matches > 0);
+  assert.match(
+    (await handleToolCall(event("echo local-deny"), ctx, load))!.reason,
+    /Blocked by auto-approval.*auto-permissions\.local\.json/,
+  );
 });
 
 test("status disabled hides reports without changing enforcement", async () => {
@@ -2233,9 +2331,9 @@ test("authorization routes enforce priority, attribution, trust and unsupported 
       assert.notEqual(await handleToolCall(event(`danger ${marker}`), { ...ctx, hasUI: false }, () => config([allow], mode), deps), undefined);
     }
     assert.equal(await handleToolCall(event(), ctx, () => config([rule("allow", "project"), allow], mode), deps), undefined);
-    assert.ok(notices.some((notice) => /Ignored.*project.json/.test(notice)));
+    assert.ok(notices.includes("Ignored project settings from project.json because the project is untrusted."));
     const ignored = await handleToolCall(event(), { ...ctx, hasUI: false }, () => config([rule("allow", "project")], "manual"), deps);
-    assert.match(ignored!.reason, /Ignored.*project.json/);
+    assert.match(ignored!.reason, /requires confirmation/i);
     trusted = true;
     assert.equal(await handleToolCall(event(), ctx, () => config([rule("allow", "project")], mode), deps), undefined);
     trusted = false;

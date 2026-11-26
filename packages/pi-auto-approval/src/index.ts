@@ -1,12 +1,13 @@
 import { join } from "node:path";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ConfigResult, PermissionRule, SessionChoices } from "./config.ts";
+import type { PermissionRule, SessionChoices } from "./config.ts";
 import { CONFIG_FILENAME, ensureGlobalConfig, globalConfigDir, loadConfig } from "./config.ts";
 import { analyzeShell } from "./shell.ts";
 import { isReadOnlyComponent } from "./readonly.ts";
 import { matchPermission, matchPermissionExact } from "./rules.ts";
-import { createPermissionsController } from "./permissions.ts";
+import { createPermissionsController, isTrustedProject } from "./permissions.ts";
+import { effectiveSettings, type PermissionConfig } from "./ui/footer.ts";
 import { recordHistory, type HistoryEntry, type HistoryResult } from "./history.ts";
 import { createReviewDisplay } from "./ui/display.ts";
 import type { ConfigUi } from "./config.ts";
@@ -23,7 +24,7 @@ export interface GateContext {
   isProjectTrusted(): boolean;
   readonly ui: { confirm(title: string, message: string, opts?: { signal?: AbortSignal }): Promise<boolean>; notify(message: string, type?: "info" | "warning" | "error"): void };
 }
-export type ConfigLoader = (cwd: string) => ConfigResult;
+export type ConfigLoader = (cwd: string) => PermissionConfig;
 export interface GateReport {
   readonly state: ReviewState;
   readonly label: string;
@@ -44,7 +45,8 @@ export type GateStatus = ReviewState;
 export type GateDecision = { block: true; reason: string } | undefined;
 const CONFIRMATION_FAILED = "auto-approval: confirmation failed";
 const block = (reason: string): { block: true; reason: string } => ({ block: true, reason });
-const NOT_GATED = Symbol("not gated");
+type GateOutcome = { kind: "not-gated" } | { kind: "decided"; decision: GateDecision; log: boolean };
+const NOT_GATED: GateOutcome = { kind: "not-gated" };
 const PATH_TOOLS = new Set(["read", "edit", "write"]);
 function historyCommandOf(toolName: string, input: unknown): string {
   const value = input !== null && typeof input === "object" ? (input as Record<string, unknown>)[PATH_TOOLS.has(toolName) ? "path" : "command"] : undefined;
@@ -62,98 +64,162 @@ function callExcerpt(toolName: string, input: unknown): string {
 }
 function safeNotify(ctx: GateContext, message: string): void { try { ctx.ui.notify(message); } catch {} }
 function isAborted(ctx: GateContext): boolean { return ctx.signal?.aborted === true; }
-function protectionOff(cwd: string, load: ConfigLoader, choices: SessionChoices): boolean {
-  if (choices.enabled === false) return true;
+function snapshotGate(ctx: GateContext, choices: SessionChoices, load?: ConfigLoader) {
+  let config: PermissionConfig | undefined;
   try {
-    const config = load(cwd);
-    return config.ok && (choices.enabled ?? config.enabled) === false;
-  } catch {
-    return false;
-  }
+    config = load?.(ctx.cwd);
+  } catch {}
+  const projectTrusted = isTrustedProject(ctx);
+  return { config, projectTrusted, settings: effectiveSettings(config, choices, projectTrusted) };
 }
-function recordGateOutcome(event: { toolName: string; input: unknown }, cwd: string, load: ConfigLoader, choices: SessionChoices, decision: GateDecision, record: (entry: HistoryEntry) => HistoryResult, warn: (message: string) => void): void {
-  if (protectionOff(cwd, load, choices)) return;
+
+function recordGateOutcome(
+  event: { toolName: string; input: unknown },
+  outcome: GateOutcome,
+  record: (entry: HistoryEntry) => HistoryResult,
+  warn: (message: string) => void,
+): void {
+  if (outcome.kind !== "decided" || !outcome.log) return;
   let result: HistoryResult;
-  try { result = record({ tool: event.toolName, command: historyCommandOf(event.toolName, event.input), decision: decision ? "blocked" : "approved" }); }
-  catch (error) { result = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+  try {
+    result = record({
+      tool: event.toolName,
+      command: historyCommandOf(event.toolName, event.input),
+      decision: outcome.decision ? "blocked" : "approved",
+    });
+  } catch (error) {
+    result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
   if (!result.ok) warn(`Could not record auto-approval history: ${result.error}`);
 }
 function safeWarn(ctx: GateContext, message: string): void { try { ctx.ui.notify(message, "warning"); } catch {} }
 
 export async function handleToolCall(event: { toolName: string; input: unknown; toolCallId?: string }, ctx: GateContext, load: ConfigLoader, deps: GateDeps = {}, choices: SessionChoices = {}): Promise<GateDecision> {
-  const decision = await gateToolCall(event, ctx, load, deps, choices);
-  if (decision === NOT_GATED) return undefined;
-  if (deps.history) recordGateOutcome(event, ctx.cwd, load, choices, decision, deps.history, (message) => safeWarn(ctx, message));
-  return decision;
+  const snapshot = snapshotGate(ctx, choices, choices.enabled === false ? undefined : load);
+  const outcome = await gateToolCall(event, ctx, snapshot, deps, choices, new Set());
+  if (deps.history) recordGateOutcome(event, outcome, deps.history, (message) => safeWarn(ctx, message));
+  return outcome.kind === "decided" ? outcome.decision : undefined;
 }
 
-async function gateToolCall(event: { toolName: string; input: unknown; toolCallId?: string }, ctx: GateContext, load: ConfigLoader, deps: GateDeps, choices: SessionChoices): Promise<GateDecision | typeof NOT_GATED> {
+type GateSnapshot = ReturnType<typeof snapshotGate>;
+
+async function gateToolCall(
+  event: { toolName: string; input: unknown },
+  ctx: GateContext,
+  snapshot: GateSnapshot,
+  deps: GateDeps,
+  choices: SessionChoices,
+  noticedFiles: Set<string>,
+): Promise<GateOutcome> {
+  const decision = await decideToolCall(event, ctx, snapshot, deps, choices, noticedFiles);
+  return !snapshot.settings.enabled && decision === undefined
+    ? NOT_GATED
+    : { kind: "decided", decision, log: snapshot.settings.enabled };
+}
+
+async function decideToolCall(
+  event: { toolName: string; input: unknown },
+  ctx: GateContext,
+  { config, projectTrusted, settings }: GateSnapshot,
+  deps: GateDeps,
+  choices: SessionChoices,
+  noticedFiles: Set<string>,
+): Promise<GateDecision> {
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   const bash = event.toolName === "bash";
   const command = bashCommandOf(event.input);
   if (bash && command === undefined) return block("auto-approval: invalid bash input");
-  if (choices.enabled === false) return isAborted(ctx) ? block(CONFIRMATION_FAILED) : NOT_GATED;
-  let config: ConfigResult;
-  try { config = load(ctx.cwd); } catch { return block("auto-approval: config load failed"); }
+  if (choices.enabled === false) return undefined;
+  if (!config) return block("auto-approval: config load failed");
   if (!config.ok) return block(`auto-approval: invalid config - ${config.error}. Fix it to run tools.`);
-  const enabled = choices.enabled ?? config.enabled;
-  const mode = choices.reviewMode ?? config.reviewMode;
-  if (!enabled) return isAborted(ctx) ? block(CONFIRMATION_FAILED) : NOT_GATED;
-  let projectTrusted = false;
-  try { projectTrusted = ctx.isProjectTrusted(); } catch {}
+  if (!projectTrusted) {
+    const ignoredFiles = new Set<string>();
+    for (const file of [config.project?.shared, config.project?.local]) {
+      if (file && (file.settings.enabled !== undefined || file.settings.reviewMode !== undefined))
+        ignoredFiles.add(file.source);
+    }
+    for (const rule of config.rules) {
+      if (rule.scope === "project" && rule.level === "allow") ignoredFiles.add(rule.source);
+    }
+    for (const file of ignoredFiles) {
+      if (noticedFiles.has(file)) continue;
+      noticedFiles.add(file);
+      safeNotify(ctx, `Ignored project settings from ${file} because the project is untrusted.`);
+    }
+  }
+  if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
+  if (!settings.enabled) return undefined;
+  const mode = settings.reviewMode;
   const analysis = bash ? analyzeShell(command!) : undefined;
   const matcher = deps.matcher ?? (bash ? matchPermissionExact : matchPermission);
-  let ignored: PermissionRule[] = [];
   let rule: PermissionRule | undefined;
   try {
-    if (!projectTrusted) ignored = config.rules.filter((candidate) => candidate.scope === "project" && candidate.level === "allow" && [event, ...(analysis?.supported ? analysis.components.map(component => ({ toolName: "bash", input: { command: component.command } })) : [])].some(call => matcher(call, ctx.cwd, [candidate], true) !== undefined));
     rule = matcher({ toolName: event.toolName, input: event.input }, ctx.cwd, config.rules, projectTrusted);
     if (bash && !analysis?.supported) rule = matchPermission(event, ctx.cwd, config.rules.filter(candidate => candidate.level !== "allow"), projectTrusted) ?? rule;
   } catch { return block("auto-approval: matcher error"); }
-  const ignoredNote = ignored.length ? `Ignored project allow rule(s) from ${[...new Set(ignored.map((r) => r.source))].join(", ")} because the project is untrusted.` : "";
-  if (ignoredNote) safeNotify(ctx, ignoredNote);
   if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
   const label = rule?.label ?? (bash ? "Unmatched Bash command" : `Unmatched ${event.toolName} call`);
   const reviewerConfig = choices.reviewerModel === undefined ? config.reviewer : { ...config.reviewer, model: choices.reviewerModel ?? undefined };
   const reviewer = reviewerConfig.model ? `${reviewerConfig.model.provider}/${reviewerConfig.model.id}` : deps.reviewer;
   const report = (state: ReviewState, detail?: string) => {
-    if (!ctx.hasUI || !(choices.debug ?? config.debug) || !config.ui.status || !deps.status || isAborted(ctx)) return;
+    if (!ctx.hasUI || !settings.debug || !config.ui.status || !deps.status || isAborted(ctx)) return;
     try { deps.status({ state, label, ...(rule?.source ? { source: rule.source } : {}), ...(state === "guardian-running" && reviewer ? { reviewer } : {}), ...(detail ? { detail } : {}), ui: config.ui }); } catch {}
   };
   const attribution = rule ? `(${rule.label}, ${rule.source})` : "";
   const confirm = async (reason: string): Promise<GateDecision> => {
-    if (!ctx.hasUI) return block(`${reason}${ignoredNote ? ` ${ignoredNote}` : ""}`);
+    if (!ctx.hasUI) return block(reason);
     if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
     report("approval-required");
     if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
     try {
-      const approved = await ctx.ui.confirm(`Approve command?${rule ? ` [${rule.label}]` : ""}`, `${reason}\n\n${bash ? command : callExcerpt(event.toolName, event.input)}`, { signal: ctx.signal });
-      if (isAborted(ctx) || approved !== true) { report("blocked", isAborted(ctx) ? "Cancelled" : undefined); return block(`${reason}${isAborted(ctx) ? " (review cancelled)" : " (user declined)"}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+      const approved = await ctx.ui.confirm(
+        `Approve command?${rule ? ` [${rule.label}]` : ""}`,
+        `${reason}\n\n${bash ? command : callExcerpt(event.toolName, event.input)}`,
+        { signal: ctx.signal },
+      );
+      if (isAborted(ctx) || approved !== true) {
+        report("blocked", isAborted(ctx) ? "Cancelled" : undefined);
+        return block(`${reason}${isAborted(ctx) ? " (review cancelled)" : " (user declined)"}`);
+      }
       report("approved");
       return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
-    } catch { report("blocked"); return block(`${reason} (confirmation failed)${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+    } catch {
+      report("blocked");
+      return block(`${reason} (confirmation failed)`);
+    }
   };
-  if (rule?.level === "deny") { report("blocked"); return block(`Blocked by auto-approval ${attribution}${ignoredNote ? ` ${ignoredNote}` : ""}`); }
-  if (analysis && !analysis.supported && !analysis.reviewable) return confirm(`${analysis.reason} requires confirmation`);
+  if (rule?.level === "deny") {
+    report("blocked");
+    return block(`Blocked by auto-approval ${attribution}`);
+  }
+  if (analysis && !analysis.supported && !analysis.reviewable)
+    return confirm(`${analysis.reason} requires confirmation`);
   if (bash && analysis?.supported) {
     const reasons: string[] = rule?.level === "ask" ? [`Requires confirmation ${attribution}`] : [];
     let componentRules: (PermissionRule | undefined)[];
     try {
-      componentRules = analysis.components.map(component => matcher({ toolName: "bash", input: { command: component.command } }, ctx.cwd, config.rules, projectTrusted));
-    } catch { return block("auto-approval: matcher error"); }
-    const denied = componentRules.find(candidate => candidate?.level === "deny");
-    if (denied) { report("blocked"); return block(`Blocked by auto-approval (${denied.label}, ${denied.source})${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+      componentRules = analysis.components.map((component) =>
+        matcher({ toolName: "bash", input: { command: component.command } }, ctx.cwd, config.rules, projectTrusted),
+      );
+    } catch {
+      return block("auto-approval: matcher error");
+    }
+    const denied = componentRules.find((candidate) => candidate?.level === "deny");
+    if (denied) {
+      report("blocked");
+      return block(`Blocked by auto-approval (${denied.label}, ${denied.source})`);
+    }
     for (let index = 0; index < analysis.components.length; index++) {
       if (isAborted(ctx)) return block(CONFIRMATION_FAILED);
       const component = analysis.components[index]!;
       const componentRule = componentRules[index];
       if (componentRule?.level === "allow") {
-        if (choices.debug ?? config.debug) safeNotify(ctx, `Allowed by rule (${componentRule.label}, ${componentRule.source})`);
+        if (settings.debug) safeNotify(ctx, `Allowed by rule (${componentRule.label}, ${componentRule.source})`);
         continue;
       }
       if (componentRule?.level === "ask") { reasons.push(`Requires confirmation (${componentRule.label}, ${componentRule.source})`); continue; }
       if (isReadOnlyComponent(component.command)) {
-        if (choices.debug ?? config.debug) safeNotify(ctx, "Allowed as read-only command");
+        if (settings.debug) safeNotify(ctx, "Allowed as read-only command");
         continue;
       }
       if (mode === "manual") { reasons.push(`${label} requires confirmation`); continue; }
@@ -165,7 +231,10 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
       } catch { result = { ok: false, error: "reviewer unavailable" }; }
       if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
       if (!result.ok) {
-        if (result.cancelled) { report("blocked", "Cancelled"); return block(`Review cancelled${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+        if (result.cancelled) {
+          report("blocked", "Cancelled");
+          return block("Review cancelled");
+        }
         reasons.push(`Automatic review failed: ${result.error}`);
         continue;
       }
@@ -183,7 +252,7 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
   }
   if (rule?.level === "ask") return confirm(`Requires confirmation ${attribution}`);
   if (rule?.level === "allow" && !bash) {
-    if (choices.debug ?? config.debug) safeNotify(ctx, `Allowed by rule (${rule.label}, ${rule.source})`);
+    if (settings.debug) safeNotify(ctx, `Allowed by rule (${rule.label}, ${rule.source})`);
     report("approved");
     return isAborted(ctx) ? block(CONFIRMATION_FAILED) : undefined;
   }
@@ -196,7 +265,10 @@ async function gateToolCall(event: { toolName: string; input: unknown; toolCallI
   catch { result = { ok: false, error: "reviewer unavailable" }; }
   if (isAborted(ctx)) { report("blocked", "Cancelled"); return block(CONFIRMATION_FAILED); }
   if (!result.ok) {
-    if (result.cancelled) { report("blocked", "Cancelled"); return block(`Review cancelled${ignoredNote ? ` ${ignoredNote}` : ""}`); }
+    if (result.cancelled) {
+      report("blocked", "Cancelled");
+      return block("Review cancelled");
+    }
     return confirm(`Automatic review failed: ${result.error}`);
   }
   const { decision, reason } = result.verdict;
@@ -218,6 +290,7 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
   const permissions = createPermissionsController(globalDir, cancelPending, (ctx) => display.reset(ctx));
   let approvalDialogOpened = false;
   let historyWarned = false;
+  const noticedFiles = new Set<string>();
   let callId = 0;
   pi.registerCommand("permissions", { description: "Configure tool protection and review mode", handler: (args, ctx) => permissions.menu(args, ctx) });
   pi.on("tool_call", async (event, ctx) => {
@@ -235,47 +308,57 @@ export default function autoApproval(pi: ExtensionAPI, verifiedVersions?: readon
       },
       notify: (message, type) => ctx.ui.notify(message, type),
     } };
-    permissions.refreshFooter(ctx);
     const choices = permissions.snapshot();
-    const load = (cwd: string) => loadConfig(cwd, globalDir);
-    let recorded = false;
-    const finalize = (decision: GateDecision): void => {
-      if (recorded) return;
-      recorded = true;
-      recordGateOutcome(event, ctx.cwd, load, choices, decision, (entry) => recordHistory(ctx.cwd, entry), (message) => {
-        if (historyWarned) return;
-        historyWarned = true;
-        safeWarn(adapted, message);
-      });
+    const snapshot = snapshotGate(adapted, choices, (cwd) => loadConfig(cwd, globalDir));
+    permissions.refreshFooter(ctx, snapshot);
+    const finalize = (outcome: GateOutcome): void => {
+      recordGateOutcome(
+        event,
+        outcome,
+        (entry) => recordHistory(ctx.cwd, entry),
+        (message) => {
+          if (historyWarned) return;
+          historyWarned = true;
+          safeWarn(adapted, message);
+        },
+      );
     };
     let lastReport: GateReport | undefined;
     let abortListener: (() => void) | undefined;
-    const aborted = new Promise<GateDecision>((resolve) => {
+    const aborted = new Promise<GateOutcome>((resolve) => {
       abortListener = () => {
         if (lastReport) display.show(ctx, lastReport.ui, { ...lastReport, state: "blocked", detail: "Cancelled", toolCallId: callToolId }, widgetKey, displayGeneration);
-        resolve(block(CONFIRMATION_FAILED));
+        resolve({ kind: "decided", decision: block(CONFIRMATION_FAILED), log: snapshot.settings.enabled });
       };
       signal.addEventListener("abort", abortListener, { once: true });
       if (signal.aborted) abortListener();
     });
-    const pending = handleToolCall(event, adapted, load, {
-      reviewer: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
-      review: createPiReviewer(ctx as unknown as ReviewContext, reviewerState),
-      status: (report) => {
-        lastReport = report;
-        display.show(ctx, report.ui, { ...report, toolCallId: callToolId }, widgetKey, displayGeneration);
+    const pending = gateToolCall(
+      event,
+      adapted,
+      snapshot,
+      {
+        reviewer: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
+        review: createPiReviewer(ctx as unknown as ReviewContext, reviewerState),
+        status: (report) => {
+          lastReport = report;
+          display.show(ctx, report.ui, { ...report, toolCallId: callToolId }, widgetKey, displayGeneration);
+        },
       },
-    }, choices);
+      choices,
+      noticedFiles,
+    );
     try {
-      const decision = await Promise.race([pending, aborted]);
-      finalize(decision);
-      return decision;
+      const outcome = await Promise.race([pending, aborted]);
+      finalize(outcome);
+      return outcome.kind === "decided" ? outcome.decision : undefined;
     }
     finally { if (abortListener) signal.removeEventListener("abort", abortListener); controllers.delete(controller); void pending.catch(() => {}); }
   });
   pi.on("tool_execution_end", (event) => { if (event.toolName === "bash") display.dropInvalidator(event.toolCallId); });
   pi.on("session_start", (_event, ctx) => {
     cancelPending();
+    noticedFiles.clear();
     const seeded = ensureGlobalConfig(globalDir);
     if ("error" in seeded) ctx.ui.notify(`Could not create default config ${join(globalDir, CONFIG_FILENAME)}: ${seeded.error}`, "warning");
     permissions.reset(ctx);

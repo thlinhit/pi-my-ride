@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { AssistantMessage, AssistantMessageEventStream, Context, CredentialStore } from "@earendil-works/pi-ai";
@@ -885,6 +885,90 @@ test("real off with an already-aborted signal blocks without writing history", a
     assert.equal(result?.block, true);
     assert.equal(existsSync(historyPathOf(host.cwd)), false);
   } finally { await host.close(); }
+});
+
+for (const enabled of [false, true]) {
+  test(`trusted local enabled=${enabled} overrides global for approval, abort, and history`, async () => {
+    const host = await createHost();
+    try {
+      writeFileSync(join(host.globalDir, "auto-permissions.json"), JSON.stringify({ enabled: !enabled }));
+      const dir = dirname(projectConfigPath(host.cwd));
+      mkdirSync(dir, { recursive: true });
+      const local = join(dir, "auto-permissions.local.json");
+      writeFileSync(local, JSON.stringify({ enabled }));
+      const handler = (await host.load()).handlers.get("tool_call")![0]!;
+      const call = {
+        type: "tool_call",
+        toolName: "bash",
+        toolCallId: "project-enabled",
+        input: { command: "echo ok" },
+      } as const;
+      const ctx = { ...(host.context(false) as object), isProjectTrusted: () => true } as never;
+      assert.equal(await handler(call, ctx), undefined);
+      const controller = new AbortController();
+      controller.abort();
+      const abortedCtx = { ...(ctx as object), signal: controller.signal } as never;
+      assert.equal(((await handler(call, abortedCtx)) as Block)?.block, true);
+      const winners = ["approved", "blocked"];
+      for (const hops of [1, 2]) {
+        writeFileSync(local, JSON.stringify({ enabled }));
+        const late = new AbortController();
+        const raceContext = {
+          ...contextWithStatus(host, late.signal, () => {
+            writeFileSync(local, JSON.stringify({ enabled: !enabled }));
+            abortAfterMicrotasks(late, hops)();
+          }),
+          isProjectTrusted: () => true,
+        } as never;
+        const result = (await handler(call, raceContext)) as Block;
+        assert.equal(Boolean(result), hops === 1);
+        winners.push(result?.block ? "blocked" : "approved");
+      }
+      if (enabled)
+        assert.deepEqual(
+          historyRowsIn(host.cwd).map((row) => row.decision),
+          winners,
+        );
+      else assert.equal(existsSync(historyPathOf(host.cwd)), false);
+    } finally {
+      await host.close();
+    }
+  });
+}
+
+test("untrusted project settings and allow rules are ignored with one notice per file per session", async () => {
+  const host = await createHost();
+  try {
+    writeFileSync(
+      join(host.globalDir, "auto-permissions.json"),
+      JSON.stringify({ enabled: true, reviewMode: "manual" }),
+    );
+    const shared = projectConfigPath(host.cwd);
+    const local = join(dirname(shared), "auto-permissions.local.json");
+    mkdirSync(dirname(shared), { recursive: true });
+    writeFileSync(shared, '{"reviewMode":"manual"}');
+    writeFileSync(local, '{"enabled":false,"permissions":{"allow":["Bash(noop-cmd first)"]}}');
+    const extension = await host.load();
+    const handler = extension.handlers.get("tool_call")![0]!;
+    const call = {
+      type: "tool_call",
+      toolName: "bash",
+      toolCallId: "untrusted",
+      input: { command: "noop-cmd first" },
+    } as const;
+    const ctx = host.context(false);
+    const notices = () => host.messages.filter((message) => message.includes("because the project is untrusted."));
+    const expected = [shared, local].map(
+      (file) => `info:Ignored project settings from ${file} because the project is untrusted.`,
+    );
+    for (let i = 0; i < 2; i++) assert.match(((await handler(call, ctx)) as Block)!.reason, /requires confirmation/i);
+    assert.deepEqual(notices(), expected);
+    await extension.handlers.get("session_start")![0]!({ type: "session_start" }, ctx);
+    assert.match(((await handler(call, ctx)) as Block)!.reason, /requires confirmation/i);
+    assert.deepEqual(notices(), [...expected, ...expected]);
+  } finally {
+    await host.close();
+  }
 });
 
 const OFF_LATE_OUTCOMES = [

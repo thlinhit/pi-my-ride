@@ -1,16 +1,28 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, loadGlobalConfig, saveGlobalSettings } from "./config.ts";
 import type { ConfigResult, PermissionSettings, ReviewerConfig, SessionChoices } from "./config.ts";
-import { footerText } from "./ui/footer.ts";
+import { effectiveSettings, footerText, type PermissionConfig } from "./ui/footer.ts";
 import { permissionsMenu, type MenuResult } from "./ui/permissions-menu.ts";
 
 const USE_ACTIVE_MODEL = "Use active model";
+
+export function isTrustedProject(ctx: Pick<ExtensionContext, "isProjectTrusted">): boolean {
+  try {
+    return ctx.isProjectTrusted();
+  } catch {
+    return false;
+  }
+}
+
 export interface PermissionsController {
   snapshot(): SessionChoices;
   menu(args: string, ctx: ExtensionCommandContext): Promise<void>;
   reset(ctx: ExtensionContext): void;
   close(): void;
-  refreshFooter(ctx: ExtensionContext): void;
+  refreshFooter(
+    ctx: ExtensionContext,
+    snapshot?: { config: PermissionConfig | undefined; settings: PermissionSettings },
+  ): void;
 }
 export function createPermissionsController(globalDir: string, cancelPending: () => void, clearDisplay: (ctx: ExtensionContext) => void = () => {}): PermissionsController {
   let choices: SessionChoices = {};
@@ -18,7 +30,6 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
   let generation = 0;
   let dismiss: (() => void) | undefined;
   const notify = (ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info") => { try { ctx.ui.notify(message, type); } catch {} };
-  const settings = (saved: ConfigResult): PermissionSettings => ({ enabled: choices.enabled ?? (saved.ok ? saved.enabled : true), reviewMode: choices.reviewMode ?? (saved.ok ? saved.reviewMode : "manual"), debug: choices.debug ?? (saved.ok ? saved.debug : false) });
   const reviewer = (saved: ConfigResult) => choices.reviewerModel === undefined ? (saved.ok ? saved.reviewer.model : undefined) : choices.reviewerModel ?? undefined;
   const reviewerLabel = (ctx: ExtensionContext, saved: ConfigResult) => {
     const model = reviewer(saved);
@@ -41,10 +52,12 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
     if (model === undefined) { notify(ctx, `Unknown reviewer model: ${selected}`, "warning"); return; }
     choices = { ...choices, reviewerModel: model };
   };
-  const refreshFooter = (ctx: ExtensionContext): void => {
+  const refreshFooter: PermissionsController["refreshFooter"] = (ctx, snapshot): void => {
     try {
       if (ctx.mode !== "tui" && ctx.mode !== "rpc") return;
-      ctx.ui.setStatus("auto-approval", footerText(loadConfig(ctx.cwd, globalDir), choices));
+      const config = snapshot ? snapshot.config : loadConfig(ctx.cwd, globalDir);
+      const settings = snapshot?.settings ?? effectiveSettings(config, choices, isTrustedProject(ctx));
+      ctx.ui.setStatus("auto-approval", footerText(config, choices, settings));
     } catch {}
   };
   return {
@@ -61,7 +74,7 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
         while (openedAt === generation) {
           const combined = loadConfig(ctx.cwd, globalDir);
           const saved = combined.ok ? combined : loadGlobalConfig(globalDir);
-          const current = settings(saved);
+          const current = effectiveSettings(saved, choices, isTrustedProject(ctx));
           const labels = [`Permission: ${current.enabled ? "on" : "off"}`, `Review mode: ${current.reviewMode}`, `Reviewer model: ${reviewerLabel(ctx, saved)}`, `Debug: ${current.debug ? "on" : "off"}`];
           let result: MenuResult;
           try {
@@ -76,8 +89,10 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
           if (result.action === "activate" && index === 2) { await chooseReviewerModel(ctx, openedAt); if (openedAt === generation) refreshFooter(ctx); continue; }
           // Compare effective protection/mode using one fresh saved snapshot at action time.
           const actionConfig = loadConfig(ctx.cwd, globalDir);
-          const global = actionConfig.ok ? actionConfig : loadGlobalConfig(globalDir);
-          const before = settings(global);
+          const global = actionConfig.ok ? actionConfig.global : loadGlobalConfig(globalDir);
+          const savedConfig = actionConfig.ok ? actionConfig : global;
+          const trusted = isTrustedProject(ctx);
+          const before = effectiveSettings(savedConfig, choices, trusted);
           const beforeChoices = choices;
           if (result.action === "save") {
             if (!global.ok) { notify(ctx, `Could not save settings to ${globalDir}/auto-permissions.json: ${global.error}`, "error"); continue; }
@@ -90,7 +105,7 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
             else if (index === 0) choices = { ...choices, enabled: !before.enabled };
             else if (index === 1) choices = { ...choices, reviewMode: before.reviewMode === "auto" ? "manual" : "auto" };
             else if (index === 3) { choices = { ...choices, debug: !before.debug }; if (before.debug) clearDisplay(ctx); }
-            const after = settings(global);
+            const after = effectiveSettings(savedConfig, choices, trusted);
             const changed = beforeChoices.enabled !== choices.enabled || beforeChoices.reviewMode !== choices.reviewMode;
             if (actionConfig.ok ? before.enabled !== after.enabled || before.reviewMode !== after.reviewMode : changed) cancelPending();
             const invalid = !actionConfig.ok && choices.enabled !== false;
@@ -104,7 +119,14 @@ export function createPermissionsController(globalDir: string, cancelPending: ()
     reset(ctx) {
       choices = {}; clearDisplay(ctx); close(); cancelPending();
       const result = loadConfig(ctx.cwd, globalDir);
-      notify(ctx, result.ok ? `Protection ${result.enabled ? "on" : "off"} · ${result.reviewMode}` : `Saved config is invalid: ${result.error}`, result.ok ? "info" : "error");
+      const current = effectiveSettings(result, choices, isTrustedProject(ctx));
+      notify(
+        ctx,
+        result.ok
+          ? `Protection ${current.enabled ? "on" : "off"} · ${current.reviewMode}`
+          : `Saved config is invalid: ${result.error}`,
+        result.ok ? "info" : "error",
+      );
       refreshFooter(ctx);
     },
   };

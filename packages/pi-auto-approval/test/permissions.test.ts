@@ -3,13 +3,14 @@ import fs from "node:fs";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { createPermissionsController } from "../src/permissions.ts";
-import { loadGlobalConfig, projectConfigPath } from "../src/config.ts";
+import { loadConfig, loadGlobalConfig, projectConfigPath } from "../src/config.ts";
+import { handleToolCall } from "../src/index.ts";
 import { menuDriver } from "./permissions-menu-harness.ts";
 
-function harness() {
+function harness(projectTrusted = false) {
   const root = mkdtempSync(join(tmpdir(), "permissions-menu-"));
   const globalDir = join(root, "global"), cwd = join(root, "project"); mkdirSync(globalDir);
   const path = join(globalDir, "auto-permissions.json");
@@ -17,15 +18,57 @@ function harness() {
   const driver = menuDriver(); const messages: string[] = []; const selects: { title: string; options: string[]; resolve: (value: string | undefined) => void }[] = [];
   let cancels = 0, clears = 0;
   const registry = { getAvailable: () => [{ provider: "p/a", id: "b" }, { provider: "p", id: "a/b" }] };
-  const ctx = { cwd, hasUI: true, mode: "tui", model: { provider: "active", id: "live" }, modelRegistry: registry, ui: {
-    custom: driver.custom, select: (title: string, options: string[]) => { assert.equal(driver.mounted, undefined, "screen disposed before picker"); return new Promise<string | undefined>(resolve => selects.push({ title, options, resolve })); },
-    notify: (message: string) => messages.push(message), setStatus() {},
-  } } as never;
-  const controller = createPermissionsController(globalDir, () => { cancels++; }, () => { clears++; });
+  const statuses: (string | undefined)[] = [];
+  const ctx = {
+    cwd,
+    hasUI: true,
+    mode: "tui",
+    isProjectTrusted: () => projectTrusted,
+    model: { provider: "active", id: "live" },
+    modelRegistry: registry,
+    ui: {
+      custom: driver.custom,
+      select: (title: string, options: string[]) => {
+        assert.equal(driver.mounted, undefined, "screen disposed before picker");
+        return new Promise<string | undefined>((resolve) => selects.push({ title, options, resolve }));
+      },
+      notify: (message: string) => messages.push(message),
+      setStatus: (_key: string, value: string | undefined) => statuses.push(value),
+    },
+  } as never;
+  const controller = createPermissionsController(
+    globalDir,
+    () => {
+      cancels++;
+    },
+    () => {
+      clears++;
+    },
+  );
   let count = 0;
-  return { root, globalDir, cwd, path, driver, messages, selects, registry, ctx, controller, cancels: () => cancels, clears: () => clears,
-    open: () => controller.menu("", ctx), next: async () => driver.next(count++),
-    async picker() { driver.row(2); for (let i = 0; i < 30; i++) await Promise.resolve(); const picker = selects.at(-1); assert.ok(picker); return picker; },
+  return {
+    root,
+    globalDir,
+    cwd,
+    path,
+    driver,
+    messages,
+    statuses,
+    selects,
+    registry,
+    ctx,
+    controller,
+    cancels: () => cancels,
+    clears: () => clears,
+    open: () => controller.menu("", ctx),
+    next: async () => driver.next(count++),
+    async picker() {
+      driver.row(2);
+      for (let i = 0; i < 30; i++) await Promise.resolve();
+      const picker = selects.at(-1);
+      assert.ok(picker);
+      return picker;
+    },
     close: () => rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -49,6 +92,55 @@ test("persistent four-row toggles, explicit save/reset, selection retention and 
     assert.deepEqual(h.controller.snapshot(), {}); assert.equal(readFileSync(h.path, "utf8"), bytes); assert.equal(h.cancels(), 2); assert.equal(settled, false); assert.equal(h.clears(), 1);
     h.driver.key("\u0003"); await pending;
   } finally { h.close(); }
+});
+
+test("menu and footer show trusted settings and session choices beat both files at the gate", async () => {
+  const h = harness(true);
+  try {
+    const shared = projectConfigPath(h.cwd);
+    mkdirSync(dirname(shared), { recursive: true });
+    writeFileSync(shared, '{"enabled":true,"reviewMode":"manual"}');
+    writeFileSync(join(dirname(shared), "auto-permissions.local.json"), '{"enabled":false,"reviewMode":"manual"}');
+    h.controller.refreshFooter(h.ctx);
+    assert.equal(h.statuses.at(-1), "🛡️ off");
+    const pending = h.open();
+    const first = (await h.next()).render(160).join("\n");
+    assert.match(first, /Permission: off/);
+    assert.match(first, /Review mode: manual/);
+    h.driver.row(0);
+    await h.next();
+    assert.equal(h.statuses.at(-1), "🛡️ manual");
+    h.driver.row(1);
+    const last = (await h.next()).render(160).join("\n");
+    assert.match(last, /Permission: on/);
+    assert.match(last, /Review mode: auto/);
+    assert.equal(h.statuses.at(-1), "🛡️ auto");
+    h.driver.key("\u001b");
+    await pending;
+    let reviews = 0;
+    const result = await handleToolCall(
+      { toolName: "bash", input: { command: "unmatched-command" } },
+      {
+        cwd: h.cwd,
+        hasUI: false,
+        signal: undefined,
+        isProjectTrusted: () => true,
+        ui: { confirm: async () => false, notify: () => {} },
+      },
+      (cwd) => loadConfig(cwd, h.globalDir),
+      {
+        review: async () => {
+          reviews++;
+          return { ok: true, verdict: { decision: "approve", reason: "ok" } };
+        },
+      },
+      h.controller.snapshot(),
+    );
+    assert.equal(result, undefined);
+    assert.equal(reviews, 1);
+  } finally {
+    h.close();
+  }
 });
 
 test("all binary rows toggle twice; closing keeps unsaved choices", async () => {
