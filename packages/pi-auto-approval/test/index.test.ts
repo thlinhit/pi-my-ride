@@ -720,6 +720,28 @@ test("symlinked local config target blocks headless and asks with UI despite Edi
   assert.equal(review.mock.callCount(), 0);
 });
 
+test("dangling local config target blocks a headless Write despite Edit allow", async (t) => {
+  const { cwd, home, globalDir, load } = projectFixture(t, {}, {});
+  useFakeHome(t, home);
+  writeFileSync(join(globalDir, "auto-permissions.json"), JSON.stringify({ permissions: { allow: ["Edit(**)"] } }));
+  const localConfig = join(cwd, ".pi", "pi-auto-approval", "auto-permissions.local.json");
+  const path = join(home, "missing-config.json");
+  rmSync(localConfig);
+  symlinkSync(path, localConfig);
+
+  const { ctx, calls } = context({ cwd, hasUI: false });
+  const review = t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", reason: "ok" },
+  }));
+  assert.deepEqual(await handleToolCall({ toolName: "write", input: { path } }, ctx, load, { review }), {
+    block: true,
+    reason: `Changes auto-approval protected file ${path}`,
+  });
+  assert.equal(calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+});
+
 test("unmatched protected Write asks once without review", async (t) => {
   const { cwd, home, load } = projectFixture(t, {}, {});
   useFakeHome(t, home);

@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -122,9 +122,10 @@ function protectedFileReason(
     const roots = [globalDir, projectDir];
     if (!roots.some((root) => isPathInsideOrEqual(target, foldPath(resolvePathForPolicy(root))))) {
       const files = [join(globalDir, CONFIG_FILENAME), sharedConfig, join(projectDir, "auto-permissions.local.json")];
+      // A dangling link still names the config that would be loaded after a write.
       if (
         !files.some(
-          (file) => statSync(file, { throwIfNoEntry: false }) && target === foldPath(resolvePathForPolicy(file)),
+          (file) => lstatSync(file, { throwIfNoEntry: false }) && target === foldPath(resolvePathForPolicy(file)),
         )
       )
         return undefined;
