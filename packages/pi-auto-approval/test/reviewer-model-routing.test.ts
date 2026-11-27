@@ -1063,7 +1063,7 @@ test("existing invalid or legacy global policy is never repaired and still block
   }
 });
 
-const HISTORY_KEYS = ["command", "decision", "time", "tool"];
+const HISTORY_KEYS = ["by", "command", "decision", "time", "tool"];
 const historyPathOf = (cwd: string) => join(cwd, ".pi", "pi-auto-approval", "history.jsonl");
 const historyRowsIn = (cwd: string): Array<Record<string, unknown>> =>
   readFileSync(historyPathOf(cwd), "utf8")
@@ -1072,7 +1072,7 @@ const historyRowsIn = (cwd: string): Array<Record<string, unknown>> =>
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 const afterTick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-test("real confirmed bash persists four redacted keys only, never the raw token or reasons", async () => {
+test("real confirmed bash persists five keys with user attribution, redacted, never the raw token or reasons", async () => {
   const host = await createHost();
   try {
     writeFileSync(
@@ -1089,6 +1089,7 @@ test("real confirmed bash persists four redacted keys only, never the raw token 
     assert.deepEqual(Object.keys(row).sort(), HISTORY_KEYS);
     assert.equal(row.tool, "bash");
     assert.equal(row.decision, "approved");
+    assert.equal(row.by, "user");
     assert.match(String(row.command), /REDACTED/);
     assert.doesNotMatch(String(row.command), /abc123/);
     const raw = readFileSync(historyPathOf(host.cwd), "utf8");
