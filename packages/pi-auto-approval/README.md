@@ -193,7 +193,7 @@ Read-only components are `cd`, `pwd`, `ls`, `cat`, `nl`, `head`, `tail`, `wc`, `
 
 - `~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.config/fish/config.fish`, `~/.ssh/authorized_keys`
 
-Write and Edit match the resolved path: symlinks are followed, then the path is compared case-folded and Unicode-normalized (NFC). Bash matches the target of a `>` or `>>` redirect and the arguments of `tee`. A leading `~` or `$HOME` means the home folder. Reads such as `cat ~/.zshrc` or `grep PATH ~/.zshrc` don't ask. Like the guard check, this is best effort for Bash: `cd` and other variables can get around it.
+Write and Edit match the resolved path: symlinks are followed, then the path is compared case-folded and Unicode-normalized (NFC). Bash matches the target of any output redirect (`>`, `>>`, `>|`, `&>`, `&>>`, and `>&` with a file target, including fd-prefixed forms such as `2>`) and the arguments of `tee`. A leading `~` or `$HOME` means the home folder. Reads such as `cat ~/.zshrc` or `grep PATH ~/.zshrc` don't ask. Like the guard check, this is best effort for Bash: `cd` and other variables can get around it.
 
 Every block returned to the agent reads:
 
@@ -230,6 +230,7 @@ Known misses. These calls are not hard-denied and go through the normal flow:
 
 - No `cd` tracking: `cd / && rm -rf *` is not matched.
 - Only `rm`: `find ~ -delete` and `python -c "shutil.rmtree(...)"` are not matched.
+- Wrappers with options: `sudo -u root rm -rf /`, `env -i rm -rf ~`, and `command -p rm -rf ~` are not stripped, so they are not matched.
 - Installer pipelines: a `curl … | sh` that edits `.zshrc` itself. The gate never sees that write.
 
 ## History
