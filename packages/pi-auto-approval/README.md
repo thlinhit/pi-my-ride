@@ -212,7 +212,7 @@ The protection footer shows `🛡️ guardian: off`, `🛡️ guardian: auto`, o
 Each gated tool call appends one JSON line to `<cwd>/.pi/pi-auto-approval/history.jsonl`. The directory is created if needed.
 
 ```json
-{"time":"2026-10-16T09:30:00.000Z","tool":"bash","command":"git push origin main","decision":"blocked","by":"headless","reason":"Requires confirmation (Bash(git push *), project)"}
+{"time":"2026-10-16T09:30:00.000Z","tool":"bash","command":"git push origin main","decision":"blocked","by":"headless","reason":"Blocked by auto-approval (no UI): Requires confirmation (Bash(git push *), /work/app/.pi/pi-auto-approval/auto-permissions.json)\nThe tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script)."}
 ```
 
 - `time`: ISO 8601 timestamp in UTC, taken when the record is written.
@@ -220,15 +220,15 @@ Each gated tool call appends one JSON line to `<cwd>/.pi/pi-auto-approval/histor
 - `command`: for `bash`, the command text after redaction. For `read`, `edit`, and `write`, the `path` argument as the tool received it, unresolved. For other tools, the string `command` input if present, otherwise `""`.
 - `decision`: `"approved"` when the gate let the call proceed, through an allow rule, an approval, or a reviewer approval. `"blocked"` when the gate stopped it. This is the gate result only. It does not show whether the tool then succeeded or failed.
 - `by`: what decided the call. It is one of:
-  - `config`: the config was invalid.
+  - `config`: the config couldn't be loaded or was invalid, or the gate couldn't check the call (malformed Bash input, a rule-matching error).
   - `deny-rule`, `allow-rule`: a matching rule.
   - `read-only`: a read-only component passed without review.
   - `protected-path`: guard config was touched.
   - `reviewer`: the reviewer approved or blocked.
   - `user`: you answered a dialog.
   - `headless`: a confirmation had no UI, so it was blocked. Protected-path confirmations record `protected-path` instead.
-  - `cancelled`: the call was aborted.
-- `reason` (optional): the reason returned to the agent for a block, or the reviewer's reason for a reviewer approval. Absent otherwise.
+  - `cancelled`: the call was aborted, or the confirmation dialog failed before you answered.
+- `reason` (optional): for a block, the full block message returned to the agent; for a reviewer approval, the reviewer's reason. Absent otherwise. Secrets are redacted the same way as in `command`.
 
 A block takes the `by` of the step that blocked it: deny rule, protected path, reviewer `hard_deny`, or config. A confirmation with no UI records `headless`, except a protected-path confirmation, which records `protected-path`. A dialog result is `user`, whether you approve or decline. An abort is `cancelled`. An approval with no dialog takes the strongest step any component used, in this order: `reviewer`, then `allow-rule`, then `read-only`.
 
