@@ -176,8 +176,8 @@ Old rule objects with `pattern`, `label`, `level`, `flags`, or `message` are not
 Each tool call is checked in this order:
 
 1. **Session protection off**: bypasses config validation and gating.
-2. **Built-in hard deny**: a recursive `rm` of root, home, or a listed system folder is blocked with no dialog. Nothing else can override it. See [Built-in hard deny](#built-in-hard-deny).
-3. **Config error**: blocked, see above. Otherwise, effective `enabled: false` bypasses gating unless the session explicitly turns protection on. See [Precedence and trust](#precedence-and-trust).
+2. **Config error**: blocked, see above. Otherwise, effective `enabled: false` bypasses gating unless the session explicitly turns protection on. See [Precedence and trust](#precedence-and-trust).
+3. **Built-in hard deny**: a recursive `rm` of root, home, or a listed system folder is blocked with no dialog. Nothing else can override it. See [Built-in hard deny](#built-in-hard-deny).
 4. **Deny match**: a deny rule that matches the whole command or any of its components blocks the call. No review.
 5. **Supported Bash**: check each component. Component allows pass. Ask rules, soft denies, revisions, and failed reviews are collected. Each unmatched component uses `reviewMode` below, except read-only components, which pass without review in either mode. A reviewer `hard_deny` blocks the call at once. Reviews run serially in source order. A reviewer revision offers one-shot confirmation of the original action; cancellation stops immediately. A whole-command ask rule adds its reason to the same confirmation. If nothing blocked, all collected reasons produce one confirmation showing the full original command. No components are executed by the gate.
 6. **Unsupported Bash**: deny and ask rules are checked with a conservative scan of each command segment. A deny match blocks. An ask match requires confirmation without review. Otherwise, valid unsupported Bash goes to the reviewer in auto mode, and asks in manual mode. Malformed input always asks. Allow rules never skip review.
