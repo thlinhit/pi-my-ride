@@ -3527,13 +3527,18 @@ async function settle(ticks = 10): Promise<void> {
 }
 
 test("terminal history records allow, deny, and confirmation outcomes once with tool, command, and decision", async () => {
-  const allowed = historyLog();
+  const allowedCwd = mkdtempSync(join(tmpdir(), "auto-approval-allow-"));
   assert.equal(
     await handleToolCall(event("danger now"), context().ctx, () => config(ruleSet("allow")), {
-      history: allowed.history,
+      history: (entry) => recordHistory(allowedCwd, entry),
     }),
     undefined,
   );
+  const rawAllowed = readFileSync(join(allowedCwd, ".pi", "pi-auto-approval", "history.jsonl"), "utf8");
+  assert.equal(rawAllowed.includes('"reason"'), false);
+  assert.deepEqual(fieldsOf(historyRowsOf(allowedCwd)), [
+    { tool: "bash", command: "danger now", decision: "approved", by: "allow-rule" },
+  ]);
   const denied = historyLog();
   assert.equal(
     (
@@ -3565,9 +3570,6 @@ test("terminal history records allow, deny, and confirmation outcomes once with 
     )?.block,
     true,
   );
-  assert.deepEqual(fieldsOf(allowed.entries), [
-    { tool: "bash", command: "danger now", decision: "approved", by: "allow-rule" },
-  ]);
   assert.deepEqual(fieldsOf(denied.entries), [
     { tool: "bash", command: "danger now", decision: "blocked", by: "deny-rule" },
   ]);
@@ -3885,4 +3887,25 @@ test("gate approvals record the strongest step: reviewer with its reason, allow-
       reason: "Second is safe.",
     },
   ]);
+});
+
+test("headless protected-path confirmation records by protected-path and the reason returned to the agent", async () => {
+  const log = historyLog();
+  const decision = await handleToolCall(
+    { toolName: "write", input: { path: ".pi/pi-auto-approval/auto-permissions.json", content: "{}" } },
+    context({ hasUI: false }).ctx,
+    () => config([], "auto"),
+    { history: log.history },
+  );
+  assert.equal(decision?.block, true);
+  assert.deepEqual(fieldsOf(log.entries), [
+    {
+      tool: "write",
+      command: ".pi/pi-auto-approval/auto-permissions.json",
+      decision: "blocked",
+      by: "protected-path",
+    },
+  ]);
+  assert.equal((log.entries[0] as { reason: string }).reason, decision?.reason);
+  assert.match(decision!.reason, /Blocked by auto-approval \(protected path\): Changes auto-approval protected file/);
 });

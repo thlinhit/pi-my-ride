@@ -83,7 +83,7 @@ type Verdict = { readonly decision: GateDecision; readonly by: HistoryBy; readon
 const passed = (by: HistoryBy, reason?: string): Verdict => ({
   decision: undefined,
   by,
-  ...(reason === undefined ? {} : { reason }),
+  ...(reason ? { reason } : {}),
 });
 const stop = (by: HistoryBy, source: BlockSource, reason: string): Verdict => {
   const decision = blocked(source, reason);
