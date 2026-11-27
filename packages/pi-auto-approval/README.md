@@ -232,6 +232,7 @@ Known misses. These calls are not hard-denied and go through the normal flow:
 - Only `rm`: `find ~ -delete` and `python -c "shutil.rmtree(...)"` are not matched.
 - Wrappers with options: `sudo -u root rm -rf /`, `env -i rm -rf ~`, and `command -p rm -rf ~` are not stripped, so they are not matched.
 - Installer pipelines: a `curl … | sh` that edits `.zshrc` itself. The gate never sees that write.
+- Other writers: for sensitive files, Bash matches only redirects and `tee`. Writes through other commands (`cp`, `mv`, `ln`, `dd of=`, `sed -i`, `install`) and `~user/` paths are not matched, so they go through the normal flow.
 
 ## History
 
