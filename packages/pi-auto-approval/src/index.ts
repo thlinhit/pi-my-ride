@@ -1,4 +1,5 @@
 import { lstatSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -11,6 +12,7 @@ import {
   projectConfigPath,
   resolveReviewerPolicy,
 } from "./config.ts";
+import { inspectShell } from "./harddeny.ts";
 import { analyzeShell } from "./shell.ts";
 import { isReadOnlyComponent } from "./readonly.ts";
 import { matchPermission, matchPermissionExact, resolveToolPath } from "./rules.ts";
@@ -64,6 +66,7 @@ const CONFIRMATION_FAILED = "auto-approval: confirmation failed";
 const MAX_BASH_APPROVAL_BYTES = 65_536;
 const block = (reason: string): { block: true; reason: string } => ({ block: true, reason });
 const blockSources = {
+  hardDeny: "hard deny",
   denyRule: "deny rule",
   protectedPath: "protected path",
   reviewer: "reviewer",
@@ -207,6 +210,44 @@ function protectedBashReason(command: string): string | undefined {
     return `Changes auto-approval protected file ${command}`;
 }
 
+const SENSITIVE_FILES = [
+  ".zshrc",
+  ".zprofile",
+  ".zshenv",
+  ".bashrc",
+  ".bash_profile",
+  ".profile",
+  ".config/fish/config.fish",
+  ".ssh/authorized_keys",
+];
+
+function sensitiveReason(input: string, cwd: string): string | undefined {
+  const path = resolveToolPath(input, cwd);
+  try {
+    const target = foldPath(resolvePathForPolicy(path));
+    const sensitive = SENSITIVE_FILES.some((file) => target === foldPath(resolvePathForPolicy(join(homedir(), file))));
+    return sensitive ? `Changes sensitive file ${path}` : undefined;
+  } catch {
+    // If a path cannot be resolved, ask rather than assume the write is safe.
+    return `Changes sensitive file ${path}`;
+  }
+}
+
+function sensitiveTargetReason(target: string, cwd: string): string | undefined {
+  // A leading ~ or $HOME means the home directory; over-matching is safe.
+  return sensitiveReason(
+    target.replace(/^(?:~(?=\/|$)|\$HOME|\$\{HOME\})/, () => homedir()),
+    cwd,
+  );
+}
+
+function sensitiveFileReason(event: { toolName: string; input: unknown }, cwd: string): string | undefined {
+  if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
+  const input = event.input as { path?: unknown } | null | undefined;
+  if (typeof input?.path !== "string") return undefined;
+  return sensitiveReason(input.path, cwd);
+}
+
 async function gateToolCall(
   event: { toolName: string; input: unknown },
   ctx: GateContext,
@@ -254,6 +295,11 @@ async function decideToolCall(
   }
   if (isAborted(ctx)) return cancelled(CONFIRMATION_FAILED);
   if (!settings.enabled) return passed("config");
+  // Built-in hard deny runs first: no rule, verdict or dialog overrides it.
+  const inspected = bash && command !== undefined ? inspectShell(command, homedir()) : undefined;
+  if (inspected?.hardDeny) return stop("hard-deny", "hardDeny", inspected.hardDeny);
+  const sensitiveReasonOf = (targets: readonly { path: string }[]) =>
+    targets.map((target) => sensitiveTargetReason(target.path, ctx.cwd)).find(Boolean);
   const mode = settings.reviewMode;
   const overBashApprovalLimit = bash && command !== undefined && Buffer.byteLength(command) > MAX_BASH_APPROVAL_BYTES;
   const analysis = bash && command !== undefined ? analyzeShell(command) : undefined;
@@ -285,9 +331,13 @@ async function decideToolCall(
   if (!denied) {
     protectedReason =
       bash && command !== undefined && !analysis?.supported
-        ? protectedBashReason(command)
-        : protectedFileReason(event, ctx.cwd, globalDir);
-    componentReasons = components.map((component) => protectedBashReason(component.command));
+        ? (protectedBashReason(command) ?? sensitiveReasonOf(inspected?.sensitiveTargets ?? []))
+        : (protectedFileReason(event, ctx.cwd, globalDir) ?? sensitiveFileReason(event, ctx.cwd));
+    componentReasons = components.map(
+      (component, index) =>
+        protectedBashReason(component.command) ??
+        sensitiveReasonOf(inspected?.sensitiveTargets.filter((target) => target.component === index) ?? []),
+    );
     if (!protectedReason) {
       const remainingRules = config.rules.filter(
         (rule) => rule.level === "ask" || (rule.level === "allow" && !overBashApprovalLimit),

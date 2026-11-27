@@ -3909,3 +3909,195 @@ test("headless protected-path confirmation records by protected-path and the rea
   assert.equal((log.entries[0] as { reason: string }).reason, decision?.reason);
   assert.match(decision!.reason, /Blocked by auto-approval \(protected path\): Changes auto-approval protected file/);
 });
+
+function hardDenyFixture(t: TestContext) {
+  const home = mkdtempSync(join(tmpdir(), "approval-hard-deny-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  useFakeHome(t, home);
+  return home;
+}
+const approvingReview = (t: TestContext) =>
+  t.mock.fn<NonNullable<GateDeps["review"]>>(async () => ({
+    ok: true,
+    verdict: { decision: "approve", tier: "none", reason: "ok" },
+  }));
+const hardDenyReason = (reason: string) => blockReason("hard deny", reason);
+
+test("hard deny blocks recursive rm of home with a UI and no dialog", async (t) => {
+  const home = hardDenyFixture(t);
+  const { ctx, calls } = context({ cwd: home });
+  const review = approvingReview(t);
+  const history: unknown[] = [];
+  const decision = await handleToolCall(event("rm -rf ~"), ctx, () => config([], "auto"), {
+    review,
+    history: (entry) => {
+      history.push(entry);
+      return { ok: true };
+    },
+  });
+  assert.deepEqual(decision, { block: true, reason: hardDenyReason("Recursive rm targets ~") });
+  assert.equal(calls.length, 0);
+  assert.equal(review.mock.callCount(), 0);
+  assert.equal((history[0] as { by: string }).by, "hard-deny");
+});
+
+test("hard deny ignores an allow rule for rm", async (t) => {
+  const home = hardDenyFixture(t);
+  const { ctx, calls } = context({ cwd: home });
+  const allow = parsedRule("Bash(rm *)", "allow");
+  const decision = await handleToolCall(event(`rm -rf ${home}`), ctx, () => config([allow], "auto"));
+  assert.deepEqual(decision, { block: true, reason: hardDenyReason(`Recursive rm targets ${home}`) });
+  assert.equal(calls.length, 0);
+});
+
+test("hard deny runs before a protected component in a compound", async (t) => {
+  const home = hardDenyFixture(t);
+  const { ctx, calls } = context({ cwd: home });
+  const command = "rm -rf ~ ; cat ~/.pi/pi-auto-approval/auto-permissions.json";
+  const decision = await handleToolCall(event(command), ctx, () => config([], "auto"), {
+    review: approvingReview(t),
+  });
+  assert.deepEqual(decision, { block: true, reason: hardDenyReason("Recursive rm targets ~") });
+  assert.equal(calls.length, 0);
+});
+
+test("hard deny matches the scenario table", async (t) => {
+  const home = hardDenyFixture(t);
+  for (const command of [
+    "rm -rf ~/",
+    "rm -rf ~/*",
+    "rm -rf /",
+    "rm -r /etc",
+    "sudo rm -rf /usr",
+    'rm -rf "$HOME"',
+    "rm -rf ${HOME}",
+    "env A=1 rm -rfv /var",
+  ]) {
+    const { ctx, calls } = context({ cwd: home });
+    const decision = await handleToolCall(event(command), ctx, () => config([], "auto"), {
+      review: approvingReview(t),
+    });
+    assert.equal(decision?.block, true, command);
+    assert.ok(decision?.reason.startsWith("Blocked by auto-approval (hard deny)"), command);
+    assert.equal(calls.length, 0, command);
+  }
+});
+
+test("scenario rows that are not hard denied reach the normal flow", async (t) => {
+  const home = hardDenyFixture(t);
+  for (const command of [
+    "rm -rf ~/projects/app/node_modules",
+    "rm -rf ~/.cache",
+    "rm -rf /tmp/build",
+    'rm -rf "$TMPDIR/x"',
+    "rm -rf /app",
+    'obsidian create content="Never run rm -rf ~"',
+    "cat ~/.zshrc",
+    "grep PATH ~/.zshrc",
+  ]) {
+    const { ctx, calls } = context({ cwd: home });
+    const review = approvingReview(t);
+    const decision = await handleToolCall(event(command), ctx, () => config([], "auto"), { review });
+    assert.equal(decision, undefined, command);
+    assert.equal(calls.length, 0, command);
+  }
+});
+
+test("scenario rows the gate misses still reach review", async (t) => {
+  const home = hardDenyFixture(t);
+  for (const command of ["cd / && rm -rf *", "find ~ -delete", 'python -c "import shutil; shutil.rmtree(0)"']) {
+    const { ctx, calls } = context({ cwd: home });
+    const review = approvingReview(t);
+    assert.equal(await handleToolCall(event(command), ctx, () => config([], "auto"), { review }), undefined, command);
+    assert.ok(review.mock.callCount() > 0, command);
+    assert.equal(calls.length, 0, command);
+  }
+});
+
+test("protection off does not gate hard deny commands", async (t) => {
+  const home = hardDenyFixture(t);
+  const { ctx, calls } = context({ cwd: home });
+  const review = approvingReview(t);
+  const load = () => ({ ...config([], "auto"), enabled: false });
+  assert.equal(await handleToolCall(event("rm -rf ~"), ctx, load, { review }), undefined);
+  assert.equal(review.mock.callCount(), 0);
+  assert.equal(calls.length, 0);
+});
+
+test("always-ask sensitive rows block headless and ask with a UI", async (t) => {
+  const home = hardDenyFixture(t);
+  const rows: { toolName?: string; command?: string; input?: unknown; reason: string }[] = [
+    { command: "echo 'export PATH=x' >> ~/.zshrc", reason: `Changes sensitive file ${join(home, ".zshrc")}` },
+    {
+      toolName: "edit",
+      input: { path: "~/.zshrc", edits: [] },
+      reason: `Changes sensitive file ${join(home, ".zshrc")}`,
+    },
+    {
+      toolName: "write",
+      input: { path: "~/.ssh/authorized_keys", content: "x" },
+      reason: `Changes sensitive file ${join(home, ".ssh", "authorized_keys")}`,
+    },
+    {
+      command: "tee -a ~/.ssh/authorized_keys",
+      reason: `Changes sensitive file ${join(home, ".ssh", "authorized_keys")}`,
+    },
+  ];
+  for (const row of rows) {
+    const call = row.command === undefined ? { toolName: row.toolName!, input: row.input } : event(row.command);
+    const review = approvingReview(t);
+    const headless = context({ cwd: home, hasUI: false });
+    assert.deepEqual(
+      await handleToolCall(call, headless.ctx, () => config([], "auto"), { review }),
+      {
+        block: true,
+        reason: blockReason("protected path", row.reason),
+      },
+      JSON.stringify(call),
+    );
+    assert.equal(headless.calls.length, 0);
+    const interactive = context({ cwd: home });
+    assert.equal(await handleToolCall(call, interactive.ctx, () => config([], "auto"), { review }), undefined);
+    assert.equal(interactive.calls.length, 1);
+    assert.equal(review.mock.callCount(), 0);
+  }
+});
+
+test("tee sensitive target shares one dialog with the rest of a compound", async (t) => {
+  const home = hardDenyFixture(t);
+  const { ctx, calls } = context({ cwd: home });
+  const review = approvingReview(t);
+  assert.equal(
+    await handleToolCall(event("tee -a ~/.ssh/authorized_keys && echo ok"), ctx, () => config([], "auto"), { review }),
+    undefined,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(
+    String(calls[0]?.[1]).split("\n\n")[0],
+    `Changes sensitive file ${join(home, ".ssh", "authorized_keys")}`,
+  );
+});
+
+test("read-only sensitive commands do not ask", async (t) => {
+  const home = hardDenyFixture(t);
+  const { ctx, calls } = context({ cwd: home });
+  for (const command of ["cat ~/.zshrc", "grep PATH ~/.zshrc"]) {
+    assert.equal(
+      await handleToolCall(event(command), ctx, () => config([], "auto"), { review: approvingReview(t) }),
+      undefined,
+    );
+  }
+  assert.equal(calls.length, 0);
+});
+
+test("a $HOME redirect target asks like ~", async (t) => {
+  const home = hardDenyFixture(t);
+  const { ctx, calls } = context({ cwd: home });
+  const headless = context({ cwd: home, hasUI: false });
+  assert.deepEqual(await handleToolCall(event("echo x > $HOME/.zshrc"), headless.ctx, () => config([], "auto")), {
+    block: true,
+    reason: blockReason("protected path", `Changes sensitive file ${join(home, ".zshrc")}`),
+  });
+  assert.equal(await handleToolCall(event("echo x > $HOME/.zshrc"), ctx, () => config([], "auto")), undefined);
+  assert.equal(calls.length, 1);
+});
