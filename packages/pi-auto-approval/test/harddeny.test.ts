@@ -142,3 +142,14 @@ test("collects tee targets with unquoted tilde even when rule matching is unsupp
 test("returns undefined on parse failure", () => {
   assert.equal(inspectShell("echo '", home), undefined);
 });
+
+test("collects file-writing redirect forms and skips fd duplication", () => {
+  assert.deepEqual(
+    inspectShell(
+      "echo x >| ~/.zshrc; echo x &> ~/.zshrc; echo x &>> ~/.zshrc; echo x >&~/.zshrc",
+      home,
+    )?.sensitiveTargets.map(({ path }) => path),
+    ["~/.zshrc", "~/.zshrc", "~/.zshrc", "~/.zshrc"],
+  );
+  assert.deepEqual(inspectShell("echo x 2>&1; echo x >&2; echo x >&-", home), { sensitiveTargets: [] });
+});

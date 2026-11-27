@@ -3923,6 +3923,51 @@ const approvingReview = (t: TestContext) =>
   }));
 const hardDenyReason = (reason: string) => blockReason("hard deny", reason);
 
+test("invalid config blocks hard deny commands as config with zero dialogs", async (t) => {
+  const home = hardDenyFixture(t);
+  const { ctx, calls } = context({ cwd: home });
+  const history: { by: string }[] = [];
+  const decision = await handleToolCall(event("rm -rf ~"), ctx, () => ({ ok: false, error: "bad file" }), {
+    history: (entry) => {
+      history.push(entry);
+      return { ok: true };
+    },
+  });
+  assert.equal(
+    decision?.reason,
+    blockReason("config", "auto-approval: invalid config - bad file. Fix it to run tools."),
+  );
+  assert.equal(calls.length, 0);
+  assert.equal(history[0]?.by, "config");
+});
+
+test("hard deny reports blocked to the status widget", async () => {
+  const { ctx } = context();
+  const statuses: { state: string; label: string }[] = [];
+  const decision = await handleToolCall(event("rm -rf ~"), ctx, () => config([], "auto"), {
+    status: (report) => {
+      statuses.push(report);
+    },
+  });
+  assert.equal(decision?.block, true);
+  assert.deepEqual(
+    statuses.map(({ state, label }) => ({ state, label })),
+    [{ state: "blocked", label: "hard deny" }],
+  );
+});
+
+test("echo x >| ~/.zshrc is a protected Bash write", async (t) => {
+  const home = hardDenyFixture(t);
+  const headless = context({ cwd: home, hasUI: false });
+  assert.deepEqual(await handleToolCall(event("echo x >| ~/.zshrc"), headless.ctx, () => config([], "auto")), {
+    block: true,
+    reason: blockReason("protected path", `Changes sensitive file ${join(home, ".zshrc")}`),
+  });
+  const interactive = context({ cwd: home });
+  assert.equal(await handleToolCall(event("echo x >| ~/.zshrc"), interactive.ctx, () => config([], "auto")), undefined);
+  assert.equal(interactive.calls.length, 1);
+});
+
 test("hard deny blocks recursive rm of home with a UI and no dialog", async (t) => {
   const home = hardDenyFixture(t);
   const { ctx, calls } = context({ cwd: home });
@@ -3970,6 +4015,7 @@ test("hard deny matches the scenario table", async (t) => {
     "rm -r /etc",
     "sudo rm -rf /usr",
     'rm -rf "$HOME"',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell text
     "rm -rf ${HOME}",
     "env A=1 rm -rfv /var",
   ]) {
@@ -4001,6 +4047,13 @@ test("scenario rows that are not hard denied reach the normal flow", async (t) =
     assert.equal(decision, undefined, command);
     assert.equal(calls.length, 0, command);
   }
+  const review = approvingReview(t);
+  const { ctx } = context({ cwd: home });
+  assert.equal(
+    await handleToolCall(event("rm -rf ~/projects/app/node_modules"), ctx, () => config([], "auto"), { review }),
+    undefined,
+  );
+  assert.equal(review.mock.callCount(), 1);
 });
 
 test("scenario rows the gate misses still reach review", async (t) => {

@@ -297,7 +297,14 @@ async function decideToolCall(
   if (!settings.enabled) return passed("config");
   // Built-in hard deny runs first: no rule, verdict or dialog overrides it.
   const inspected = bash && command !== undefined ? inspectShell(command, homedir()) : undefined;
-  if (inspected?.hardDeny) return stop("hard-deny", "hardDeny", inspected.hardDeny);
+  if (inspected?.hardDeny) {
+    if (ctx.hasUI && settings.debug && config.ui.status && deps.status) {
+      try {
+        deps.status({ state: "blocked", label: blockSources.hardDeny, ui: config.ui });
+      } catch {}
+    }
+    return stop("hard-deny", "hardDeny", inspected.hardDeny);
+  }
   const sensitiveReasonOf = (targets: readonly { path: string }[]) =>
     targets.map((target) => sensitiveTargetReason(target.path, ctx.cwd)).find(Boolean);
   const mode = settings.reviewMode;
@@ -309,7 +316,6 @@ async function decideToolCall(
   const components = analysis?.supported ? analysis.components : [];
   const componentCall = (command: string) => ({ toolName: "bash", input: { command } });
 
-  // Built-in hard deny belongs here, before any configured rule.
   const denyRules = config.rules.filter((rule) => rule.level === "deny");
   let denied: PermissionRule | undefined;
   try {

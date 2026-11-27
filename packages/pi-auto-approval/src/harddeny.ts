@@ -74,7 +74,10 @@ export function inspectShell(
       const offset = node.OpPos.Offset();
       const op = source.toString("utf8", offset, offset + 2);
       // Unsupported calls use walk order; redirects use the last visited call index (or zero).
-      if (/^>(?![&|])/.test(op)) sensitiveTargets.push({ path: unquote(node.Word), component: Math.max(0, component) });
+      // `>&` with a file word writes to a file; `>&1`, `>&2` and `>&-` don't.
+      const fileDup = op === ">&" && !/^(\d+|-)$/.test(unquote(node.Word));
+      if (/^(?:&>|>[>|]?)(?!&)/.test(op) || fileDup)
+        sensitiveTargets.push({ path: unquote(node.Word), component: Math.max(0, component) });
     }
     if (type !== "CallExpr") return true;
 
