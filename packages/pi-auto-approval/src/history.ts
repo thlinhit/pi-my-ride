@@ -1,10 +1,25 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+export type HistoryBy =
+  | "config"
+  | "deny-rule"
+  | "ask-rule"
+  | "allow-rule"
+  | "read-only"
+  | "protected-path"
+  | "hard-deny"
+  | "reviewer"
+  | "user"
+  | "headless"
+  | "cancelled";
+
 export interface HistoryEntry {
   readonly tool: string;
   readonly command: string;
   readonly decision: "approved" | "blocked";
+  readonly by: HistoryBy;
+  readonly reason?: string;
 }
 
 export type HistoryResult = { readonly ok: true } | { readonly ok: false; readonly error: string };
@@ -162,8 +177,10 @@ export function recordHistory(
   deps: { redact?: (text: string) => string; now?: () => Date } = {},
 ): HistoryResult {
   let command: string;
+  let reason: string | undefined;
   try {
     command = (deps.redact ?? redactSecrets)(entry.command);
+    reason = entry.reason === undefined ? undefined : (deps.redact ?? redactSecrets)(entry.reason);
   } catch {
     return { ok: false, error: "History redaction failed" };
   }
@@ -178,6 +195,8 @@ export function recordHistory(
         tool: entry.tool,
         command,
         decision: entry.decision,
+        by: entry.by,
+        ...(reason === undefined ? {} : { reason }),
       })}\n`,
     );
     return { ok: true };

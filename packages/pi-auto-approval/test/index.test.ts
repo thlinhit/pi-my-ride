@@ -6,6 +6,7 @@ import type { TestContext } from "node:test";
 import test, { afterEach, mock } from "node:test";
 import { buildSessionProjection } from "@earendil-works/pi-coding-agent";
 import type { ConfigResult, PermissionRule, ReviewerConfig } from "../src/config.ts";
+import { recordHistory } from "../src/history.ts";
 import {
   globalConfigDir,
   loadConfig as loadFiles,
@@ -3512,7 +3513,9 @@ const historyFields = (row: Record<string, unknown>) => ({
   tool: row.tool,
   command: row.command,
   decision: row.decision,
+  by: row.by,
 });
+const fieldsOf = (entries: unknown[]) => entries.map((entry) => historyFields(entry as Record<string, unknown>));
 function historyRowsOf(cwd: string): Array<Record<string, unknown>> {
   return readFileSync(join(cwd, ".pi", "pi-auto-approval", "history.jsonl"), "utf8")
     .trimEnd()
@@ -3524,13 +3527,18 @@ async function settle(ticks = 10): Promise<void> {
 }
 
 test("terminal history records allow, deny, and confirmation outcomes once with tool, command, and decision", async () => {
-  const allowed = historyLog();
+  const allowedCwd = mkdtempSync(join(tmpdir(), "auto-approval-allow-"));
   assert.equal(
     await handleToolCall(event("danger now"), context().ctx, () => config(ruleSet("allow")), {
-      history: allowed.history,
+      history: (entry) => recordHistory(allowedCwd, entry),
     }),
     undefined,
   );
+  const rawAllowed = readFileSync(join(allowedCwd, ".pi", "pi-auto-approval", "history.jsonl"), "utf8");
+  assert.equal(rawAllowed.includes('"reason"'), false);
+  assert.deepEqual(fieldsOf(historyRowsOf(allowedCwd)), [
+    { tool: "bash", command: "danger now", decision: "approved", by: "allow-rule" },
+  ]);
   const denied = historyLog();
   assert.equal(
     (
@@ -3562,10 +3570,17 @@ test("terminal history records allow, deny, and confirmation outcomes once with 
     )?.block,
     true,
   );
-  assert.deepEqual(allowed.entries, [{ tool: "bash", command: "danger now", decision: "approved" }]);
-  assert.deepEqual(denied.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
-  assert.deepEqual(accepted.entries, [{ tool: "bash", command: "danger now", decision: "approved" }]);
-  assert.deepEqual(declined.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
+  assert.deepEqual(fieldsOf(denied.entries), [
+    { tool: "bash", command: "danger now", decision: "blocked", by: "deny-rule" },
+  ]);
+  assert.match(String((denied.entries[0] as { reason?: unknown }).reason), /Blocked by auto-approval \(deny rule\)/);
+  assert.deepEqual(fieldsOf(accepted.entries), [
+    { tool: "bash", command: "danger now", decision: "approved", by: "user" },
+  ]);
+  assert.deepEqual(fieldsOf(declined.entries), [
+    { tool: "bash", command: "danger now", decision: "blocked", by: "user" },
+  ]);
+  assert.match(String((declined.entries[0] as { reason?: unknown }).reason), /user declined/);
 });
 
 test("terminal history covers AI approve, revise, no-UI blocks, and failed confirmation", async () => {
@@ -3619,10 +3634,18 @@ test("terminal history covers AI approve, revise, no-UI blocks, and failed confi
     )?.block,
     true,
   );
-  assert.deepEqual(approved.entries, [{ tool: "bash", command: "noop-cmd first", decision: "approved" }]);
-  assert.deepEqual(revised.entries, [{ tool: "bash", command: "noop-cmd first", decision: "blocked" }]);
-  assert.deepEqual(noUi.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
-  assert.deepEqual(failed.entries, [{ tool: "bash", command: "danger now", decision: "blocked" }]);
+  assert.deepEqual(fieldsOf(approved.entries), [
+    { tool: "bash", command: "noop-cmd first", decision: "approved", by: "reviewer" },
+  ]);
+  assert.deepEqual(fieldsOf(revised.entries), [
+    { tool: "bash", command: "noop-cmd first", decision: "blocked", by: "headless" },
+  ]);
+  assert.deepEqual(fieldsOf(noUi.entries), [
+    { tool: "bash", command: "danger now", decision: "blocked", by: "headless" },
+  ]);
+  assert.deepEqual(fieldsOf(failed.entries), [
+    { tool: "bash", command: "danger now", decision: "blocked", by: "cancelled" },
+  ]);
 });
 
 test("terminal history uses only path for file tools, command for powershell, and empty command otherwise", async () => {
@@ -3653,10 +3676,10 @@ test("terminal history uses only path for file tools, command for powershell, an
     options,
   );
   assert.deepEqual(log.entries, [
-    { tool: "write", command: "out.txt", decision: "approved" },
-    { tool: "read", command: "notes.txt", decision: "approved" },
-    { tool: "powershell", command: "Write-Output hello", decision: "approved" },
-    { tool: "grep", command: "", decision: "approved" },
+    { tool: "write", command: "out.txt", decision: "approved", by: "reviewer", reason: "Safe." },
+    { tool: "read", command: "notes.txt", decision: "approved", by: "reviewer", reason: "Safe." },
+    { tool: "powershell", command: "Write-Output hello", decision: "approved", by: "reviewer", reason: "Safe." },
+    { tool: "grep", command: "", decision: "approved", by: "reviewer", reason: "Safe." },
   ]);
 });
 
@@ -3745,5 +3768,144 @@ test("outer abort with pending confirmation records exactly one blocked entry, i
   await settle();
   const rows = historyRowsOf(harness.cwd);
   assert.equal(rows.length, 1);
-  assert.deepEqual(historyFields(rows[0]!), { tool: "bash", command: "danger now", decision: "blocked" });
+  assert.deepEqual(historyFields(rows[0]!), {
+    tool: "bash",
+    command: "danger now",
+    decision: "blocked",
+    by: "cancelled",
+  });
+});
+
+test("gate blocks record the deciding step and the agent's reason, redacted on disk", async () => {
+  const headless = historyLog();
+  const headlessDecision = await handleToolCall(
+    event("danger now"),
+    context({ hasUI: false }).ctx,
+    () => config(ruleSet("ask")),
+    {
+      history: headless.history,
+    },
+  );
+  assert.equal(headlessDecision?.block, true);
+  assert.deepEqual(fieldsOf(headless.entries), [
+    { tool: "bash", command: "danger now", decision: "blocked", by: "headless" },
+  ]);
+  assert.match(String((headless.entries[0] as { reason?: unknown }).reason), /Requires confirmation/);
+
+  const hardDeny = historyLog();
+  const hardDecision = await handleToolCall(event("noop-cmd first"), context().ctx, () => config([], "auto"), {
+    review: async () =>
+      ({
+        ok: true,
+        verdict: { decision: "block", tier: "hard_deny", reason: "Leaks --token secret-value" },
+      }) as never,
+    history: hardDeny.history,
+  });
+  assert.equal(hardDecision?.block, true);
+  assert.deepEqual(fieldsOf(hardDeny.entries), [
+    { tool: "bash", command: "noop-cmd first", decision: "blocked", by: "reviewer" },
+  ]);
+  assert.equal((hardDeny.entries[0] as { reason: string }).reason, hardDecision?.reason);
+  assert.match(hardDecision!.reason, /Leaks --token/);
+
+  const invalid = historyLog();
+  assert.equal(
+    (
+      await handleToolCall(event("noop-cmd first"), context().ctx, () => ({ ok: false, error: "bad field" }) as never, {
+        history: invalid.history,
+      })
+    )?.block,
+    true,
+  );
+  assert.deepEqual(fieldsOf(invalid.entries), [
+    { tool: "bash", command: "noop-cmd first", decision: "blocked", by: "config" },
+  ]);
+  assert.match(String((invalid.entries[0] as { reason?: unknown }).reason), /invalid config - bad field/);
+
+  const cwd = mkdtempSync(join(tmpdir(), "auto-approval-redact-"));
+  await handleToolCall(event("noop-cmd first"), context().ctx, () => config([], "auto"), {
+    review: async () =>
+      ({
+        ok: true,
+        verdict: { decision: "block", tier: "hard_deny", reason: "Leaks --token secret-value" },
+      }) as never,
+    history: (entry) => recordHistory(cwd, entry),
+  });
+  const rows = historyRowsOf(cwd);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.by, "reviewer");
+  assert.match(String(rows[0]!.reason), /Leaks --token/);
+  assert.equal(JSON.stringify(rows).includes("secret-value"), false);
+});
+
+test("gate approvals record the strongest step: reviewer with its reason, allow-rule, or read-only", async () => {
+  const reviewed = historyLog();
+  assert.equal(
+    await handleToolCall(event("noop-cmd first"), context().ctx, () => config([], "auto"), {
+      review: async () =>
+        ({ ok: true, verdict: { decision: "approve", tier: "none", reason: "Plain build." } }) as never,
+      history: reviewed.history,
+    }),
+    undefined,
+  );
+  assert.deepEqual(reviewed.entries, [
+    { tool: "bash", command: "noop-cmd first", decision: "approved", by: "reviewer", reason: "Plain build." },
+  ]);
+
+  const readOnly = historyLog();
+  let reviews = 0;
+  assert.equal(
+    await handleToolCall(event("ls"), context().ctx, () => config([], "auto"), {
+      review: async () => {
+        reviews++;
+        return { ok: true, verdict: { decision: "approve", tier: "none", reason: "unused" } } as never;
+      },
+      history: readOnly.history,
+    }),
+    undefined,
+  );
+  assert.equal(reviews, 0);
+  assert.deepEqual(readOnly.entries, [{ tool: "bash", command: "ls", decision: "approved", by: "read-only" }]);
+
+  const compound = historyLog();
+  assert.equal(
+    await handleToolCall(event("danger one && noop-cmd two"), context().ctx, () => config(ruleSet("allow"), "auto"), {
+      review: async (input) =>
+        input.command === "noop-cmd two"
+          ? ({ ok: true, verdict: { decision: "approve", tier: "none", reason: "Second is safe." } } as never)
+          : ({ ok: true, verdict: { decision: "approve", tier: "none", reason: "unused" } } as never),
+      history: compound.history,
+    }),
+    undefined,
+  );
+  assert.deepEqual(compound.entries, [
+    {
+      tool: "bash",
+      command: "danger one && noop-cmd two",
+      decision: "approved",
+      by: "reviewer",
+      reason: "Second is safe.",
+    },
+  ]);
+});
+
+test("headless protected-path confirmation records by protected-path and the reason returned to the agent", async () => {
+  const log = historyLog();
+  const decision = await handleToolCall(
+    { toolName: "write", input: { path: ".pi/pi-auto-approval/auto-permissions.json", content: "{}" } },
+    context({ hasUI: false }).ctx,
+    () => config([], "auto"),
+    { history: log.history },
+  );
+  assert.equal(decision?.block, true);
+  assert.deepEqual(fieldsOf(log.entries), [
+    {
+      tool: "write",
+      command: ".pi/pi-auto-approval/auto-permissions.json",
+      decision: "blocked",
+      by: "protected-path",
+    },
+  ]);
+  assert.equal((log.entries[0] as { reason: string }).reason, decision?.reason);
+  assert.match(decision!.reason, /Blocked by auto-approval \(protected path\): Changes auto-approval protected file/);
 });
