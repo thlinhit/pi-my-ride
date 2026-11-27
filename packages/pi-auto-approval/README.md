@@ -177,16 +177,23 @@ Each tool call is checked in this order:
 
 1. **Session protection off**: bypasses config validation and gating.
 2. **Config error**: blocked, see above. Otherwise, effective `enabled: false` bypasses gating unless the session explicitly turns protection on. See [Precedence and trust](#precedence-and-trust).
-3. **Deny match**: a deny rule that matches the whole command or any of its components blocks the call. No review.
-4. **Supported Bash**: check each component. Component allows pass. Ask rules, soft denies, revisions, and failed reviews are collected. Each unmatched component uses `reviewMode` below, except read-only components, which pass without review in either mode. A reviewer `hard_deny` blocks the call at once. Reviews run serially in source order. A reviewer revision offers one-shot confirmation of the original action; cancellation stops immediately. A whole-command ask rule adds its reason to the same confirmation. If nothing blocked, all collected reasons produce one confirmation showing the full original command. No components are executed by the gate.
-5. **Unsupported Bash**: deny and ask rules are checked with a conservative scan of each command segment. A deny match blocks. An ask match requires confirmation without review. Otherwise, valid unsupported Bash goes to the reviewer in auto mode, and asks in manual mode. Malformed input always asks. Allow rules never skip review.
-6. **Other tools**: ask requires confirmation without review; allow runs without review. For unmatched calls, and unmatched supported Bash components that are not read-only, `reviewMode` decides.
+3. **Built-in hard deny**: a recursive `rm` of root, home, or a listed system folder is blocked with no dialog. Nothing else can override it. See [Built-in hard deny](#built-in-hard-deny).
+4. **Deny match**: a deny rule that matches the whole command or any of its components blocks the call. No review.
+5. **Supported Bash**: check each component. Component allows pass. Ask rules, soft denies, revisions, and failed reviews are collected. Each unmatched component uses `reviewMode` below, except read-only components, which pass without review in either mode. A reviewer `hard_deny` blocks the call at once. Reviews run serially in source order. A reviewer revision offers one-shot confirmation of the original action; cancellation stops immediately. A whole-command ask rule adds its reason to the same confirmation. If nothing blocked, all collected reasons produce one confirmation showing the full original command. No components are executed by the gate.
+6. **Unsupported Bash**: deny and ask rules are checked with a conservative scan of each command segment. A deny match blocks. An ask match requires confirmation without review. Otherwise, valid unsupported Bash goes to the reviewer in auto mode, and asks in manual mode. Malformed input always asks. Allow rules never skip review.
+7. **Other tools**: ask requires confirmation without review; allow runs without review. For unmatched calls, and unmatched supported Bash components that are not read-only, `reviewMode` decides.
    - `manual`: confirmation required. No reviewer call.
-   - `auto`: the reviewer decides, using the [reviewer policy](#reviewer-policy). Approve runs the call. Hard deny blocks it with no dialog. Soft deny and revise ask you. Reviewer errors and timeouts ask you.
+   - `auto`: the reviewer decides, using the [reviewer policy](#reviewer-policy). Approve runs the call. A reviewer hard deny blocks it with no dialog. Soft deny and revise ask you. Reviewer errors and timeouts ask you.
 
 Read-only components are `cd`, `pwd`, `ls`, `cat`, `nl`, `head`, `tail`, `wc`, `grep`, `echo`, `rg` (without `--pre`), `find` (without write actions), `sed -n` with a print-only script, and `date` with no arguments or one `+FORMAT` argument. Commands with redirections or other shell operators are never read-only.
 
 **Guard config is always asked.** A Write or Edit to a path inside the global config folder, or inside `<cwd>/.pi/pi-auto-approval/`, always asks. Paths are resolved through symlinks, then compared case-folded and Unicode-normalized (NFC). No allow rule, read-only check, or reviewer verdict skips this dialog, and the reviewer is not asked about it. A Bash command whose text contains `pi-auto-approval` or `auto-permissions`, ignoring case, asks too. In a supported compound, only that component is treated this way, and it is not sent to the reviewer. The other components are checked as usual. This check is best effort: `cd` and variables can get around it. Without a UI, every such call is blocked. The reason shown is `Changes auto-approval protected file <path>`. If a deny rule also matches the same call, the call is blocked with no dialog.
+
+**Sensitive files are always asked too.** A Write or Edit to one of these files, or a Bash command that writes one of them, asks with the reason `Changes sensitive file <path>`. Without a UI, the call is blocked with the `protected path` source:
+
+- `~/.zshrc`, `~/.zprofile`, `~/.zshenv`, `~/.bashrc`, `~/.bash_profile`, `~/.profile`, `~/.config/fish/config.fish`, `~/.ssh/authorized_keys`
+
+Write and Edit match the resolved path: symlinks are followed, then the path is compared case-folded and Unicode-normalized (NFC). Bash matches the target of any output redirect (`>`, `>>`, `>|`, `&>`, `&>>`, and `>&` with a file target, including fd-prefixed forms such as `2>`) and the arguments of `tee`. A leading `~` or `$HOME` means the home folder. Reads such as `cat ~/.zshrc` or `grep PATH ~/.zshrc` don't ask. Like the guard check, this is best effort for Bash: `cd` and other variables can get around it.
 
 Every block returned to the agent reads:
 
@@ -195,7 +202,7 @@ Blocked by auto-approval (<source>): <reason>
 The tool did not run. Do not claim it succeeded. You may take a different approach that stays within policy, but do not retry this action another way (other syntax, another tool, or a script).
 ```
 
-The source is `deny rule`, `protected path`, `reviewer`, `no UI`, `user`, `config`, `error`, or `cancelled`.
+The source is `deny rule`, `protected path`, `hard deny`, `reviewer`, `no UI`, `user`, `config`, `error`, or `cancelled`.
 
 Already-cancelled calls and malformed Bash input fail closed before the protection-off checks. Any confirmation blocks when no UI is available. Confirmations for unmatched calls read `Unmatched Bash command` or `Unmatched <tool> call`.
 
@@ -206,6 +213,26 @@ For supported Bash, the reviewer sees the current component, full original comma
 Use `/permissions` in the interactive TUI (not RPC, print or JSON mode). Four current-value rows stay open: **Permission**, **Review mode**, **Reviewer model**, **Debug**. Up/Down navigates; Enter toggles or opens the reviewer picker. Picker selection or cancellation returns to the same row. Changes are session-local until **Ctrl+G — Save globally** atomically saves all four values. **Ctrl+R — Reset session changes** clears all overrides and reloads configuration without writing; project rules and validation still apply. Save and reset preserve row selection. Escape/Ctrl+C exits without saving or undoing changes. All session starts (`startup`, `reload`, `new`, `resume`, `fork`) discard unsaved overrides. Save writes only global configuration, preserves unrelated fields, and refuses invalid or concurrently changed targets. A failed save retains session choices and previous saved bytes. External edits to config files take effect on the next tool call. A protection or review-mode change cancels and blocks pending attempts. Explicit session-level protection off bypasses config validation and this extension's gating. Turning it back on restores validation.
 
 The protection footer shows `🛡️ guardian: off`, `🛡️ guardian: auto`, or `🛡️ guardian: manual`. Setting `ui.status: false` hides valid-config status. Invalid configuration shows `⚠ protection config error · tools blocked`, unless protection is explicitly disabled for the session, which shows `🛡️ guardian: off`.
+
+### Built-in hard deny
+
+The built-in hard deny is fixed in code. While protection is on, it runs first, before deny rules, protected paths, read-only detection and the reviewer. No rule, reviewer verdict or dialog overrides it, and no setting turns it off on its own. Turning the whole guard off (`enabled: false` or `/permissions`) skips it too. A match blocks with no dialog and the `hard deny` source.
+
+It checks every simple command in a Bash command that parses, including unsupported syntax. Leading `sudo`, `env` (with `NAME=value` words), `command` and `exec` are removed first. It matches `rm` with a recursive flag (`-r`, `-R`, `--recursive`, or a short flag that contains `r` or `R`, such as `-rf`) and one target word, taken literally with no expansion:
+
+- root: `/`, `/*`
+- home: `~`, `~/`, `~/*`, `$HOME`, `${HOME}`, and the literal home folder, each also with a trailing `/` or `/*`
+- system folders: `/bin`, `/boot`, `/dev`, `/etc`, `/lib`, `/lib64`, `/opt`, `/proc`, `/root`, `/sbin`, `/sys`, `/usr`, `/var`, `/System`, `/Library`, `/Applications`, `/Users`, `/home`, each as itself, with a trailing `/`, or with `/*`
+
+It doesn't match deeper paths (`~/.cache`, `/var/folders/x`, `/tmp/build`), top-level folders not on the list (`/app`, `/workspace`), or quoted text passed to another command, such as `obsidian create content="never run rm -rf ~"`.
+
+Known misses. These calls are neither hard-denied nor caught by the sensitive-file check, so they go through the normal flow:
+
+- No `cd` tracking: `cd / && rm -rf *` is not matched.
+- Only `rm`: `find ~ -delete` and `python -c "shutil.rmtree(...)"` are not matched.
+- Wrappers with options: `sudo -u root rm -rf /`, `env -i rm -rf ~`, and `command -p rm -rf ~` are not stripped, so they are not matched.
+- Installer pipelines: a `curl … | sh` that edits `.zshrc` itself. The gate never sees that write.
+- Other writers: for sensitive files, Bash matches only redirects and `tee`. Writes through other commands (`cp`, `mv`, `ln`, `dd of=`, `sed -i`, `install`) and `~user/` paths are not matched, so they go through the normal flow.
 
 ## History
 
@@ -222,15 +249,16 @@ Each gated tool call appends one JSON line to `<cwd>/.pi/pi-auto-approval/histor
 - `by`: what decided the call. It is one of:
   - `config`: the config couldn't be loaded or was invalid, or the gate couldn't check the call (malformed Bash input, a rule-matching error).
   - `deny-rule`, `allow-rule`: a matching rule.
+  - `hard-deny`: the built-in hard deny blocked the call.
   - `read-only`: a read-only component passed without review.
-  - `protected-path`: guard config was touched.
+  - `protected-path`: guard config or a sensitive file was touched.
   - `reviewer`: the reviewer approved or blocked.
   - `user`: you answered a dialog.
   - `headless`: a confirmation had no UI, so it was blocked. Protected-path confirmations record `protected-path` instead.
   - `cancelled`: the call was aborted, or the confirmation dialog failed before you answered.
 - `reason` (optional): for a block, the full block message returned to the agent; for a reviewer approval, the reviewer's reason. Absent otherwise. Secrets are redacted the same way as in `command`.
 
-A block takes the `by` of the step that blocked it: deny rule, protected path, reviewer `hard_deny`, or config. A confirmation with no UI records `headless`, except a protected-path confirmation, which records `protected-path`. A dialog result is `user`, whether you approve or decline. An abort is `cancelled`. An approval with no dialog takes the strongest step any component used, in this order: `reviewer`, then `allow-rule`, then `read-only`.
+A block takes the `by` of the step that blocked it: deny rule, protected path, built-in hard deny, reviewer `hard_deny`, or config. A confirmation with no UI records `headless`, except a protected-path confirmation, which records `protected-path`. A dialog result is `user`, whether you approve or decline. An abort is `cancelled`. An approval with no dialog takes the strongest step any component used, in this order: `reviewer`, then `allow-rule`, then `read-only`.
 
 History holds no reviewer transcripts, provider records, or displayed text. Only the `reason` fields carry reviewer or rule text.
 
