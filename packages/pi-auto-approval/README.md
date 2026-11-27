@@ -226,7 +226,7 @@ It checks every simple command in a Bash command that parses, including unsuppor
 
 It doesn't match deeper paths (`~/.cache`, `/var/folders/x`, `/tmp/build`), top-level folders not on the list (`/app`, `/workspace`), or quoted text passed to another command, such as `obsidian create content="never run rm -rf ~"`.
 
-Known misses. These calls are not hard-denied and go through the normal flow:
+Known misses. These calls are neither hard-denied nor caught by the sensitive-file check, so they go through the normal flow:
 
 - No `cd` tracking: `cd / && rm -rf *` is not matched.
 - Only `rm`: `find ~ -delete` and `python -c "shutil.rmtree(...)"` are not matched.
