@@ -93,21 +93,57 @@ test("writes exact JSONL fields with ISO time and appends entries in a created d
   const time = new Date("2026-01-02T03:04:05.000Z");
   assert.equal(HISTORY_RELATIVE_PATH, join(".pi", "pi-auto-approval", "history.jsonl"));
   assert.deepEqual(
-    recordHistory(cwd, { tool: "bash", command: "echo token=abc", decision: "approved" }, { now: () => time }),
+    recordHistory(
+      cwd,
+      { tool: "bash", command: "echo token=abc", decision: "approved", by: "user" },
+      { now: () => time },
+    ),
     { ok: true },
   );
-  assert.deepEqual(recordHistory(cwd, { tool: "read", command: ".env", decision: "blocked" }, { now: () => time }), {
-    ok: true,
-  });
+  assert.deepEqual(
+    recordHistory(cwd, { tool: "read", command: ".env", decision: "blocked", by: "user" }, { now: () => time }),
+    {
+      ok: true,
+    },
+  );
   const lines = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8")
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
   assert.equal(lines.length, 2);
-  assert.deepEqual(Object.keys(lines[0]).sort(), ["command", "decision", "time", "tool"]);
+  assert.deepEqual(Object.keys(lines[0]).sort(), ["by", "command", "decision", "time", "tool"]);
   assert.equal(lines[0].time, time.toISOString());
   assert.equal(lines[0].command.includes("abc"), false);
-  assert.deepEqual(lines[1], { time: time.toISOString(), tool: "read", command: ".env", decision: "blocked" });
+  assert.deepEqual(lines[1], {
+    time: time.toISOString(),
+    tool: "read",
+    command: ".env",
+    decision: "blocked",
+    by: "user",
+  });
+});
+
+test("writes by and reason in the spec's field order and redacts the reason like the command", () => {
+  const cwd = tempDir();
+  const time = new Date("2026-01-02T03:04:05.000Z");
+  recordHistory(
+    cwd,
+    {
+      tool: "bash",
+      command: "curl --token=abc",
+      decision: "blocked",
+      by: "headless",
+      reason: "Blocked by auto-approval (no UI): API_TOKEN=plain-reason-secret",
+    },
+    { now: () => time },
+  );
+  const [line] = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8").trimEnd().split("\n");
+  assert.equal(line!.startsWith(`{"time":"${time.toISOString()}","tool":"bash","command":`), true);
+  const row = JSON.parse(line!) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(row), ["time", "tool", "command", "decision", "by", "reason"]);
+  assert.equal(row.by, "headless");
+  assert.equal(row.reason, "Blocked by auto-approval (no UI): API_TOKEN=[REDACTED]");
+  assert.equal(line!.includes("plain-reason-secret"), false);
 });
 
 test("redaction failure leaves absent history absent and existing history unchanged", () => {
@@ -117,7 +153,7 @@ test("redaction failure leaves absent history absent and existing history unchan
   };
   const absent = recordHistory(
     cwd,
-    { tool: "bash", command: "raw-secret", decision: "approved" },
+    { tool: "bash", command: "raw-secret", decision: "approved", by: "user" },
     { redact: redactor },
   );
   assert.deepEqual(absent, { ok: false, error: "History redaction failed" });
@@ -128,7 +164,7 @@ test("redaction failure leaves absent history absent and existing history unchan
   writeFileSync(history, "existing bytes\n");
   const existing = recordHistory(
     cwd,
-    { tool: "bash", command: "raw-secret", decision: "blocked" },
+    { tool: "bash", command: "raw-secret", decision: "blocked", by: "user" },
     { redact: redactor },
   );
   assert.deepEqual(existing, { ok: false, error: "History redaction failed" });
@@ -141,6 +177,7 @@ test("recordHistory never writes mixed sensitive assignment values", () => {
     tool: "bash",
     command: "NODE_ENV=production API_TOKEN=plain-sensitive-value npm start",
     decision: "approved",
+    by: "user",
   });
   assert.deepEqual(result, { ok: true });
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
@@ -152,7 +189,7 @@ test("JSONL redacts complete unquoted values for bare and prefixed sensitive ass
   const cwd = tempDir();
   const command =
     "TOKEN=alpha beta gamma PASSWORD=delta epsilon zeta SECRET=eta theta iota API_KEY=kappa lambda mu CREDENTIAL=nu xi omicron";
-  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
   assert.ok(!saved.includes("alpha beta gamma"));
   assert.ok(!saved.includes("beta gamma"));
@@ -180,9 +217,12 @@ test("redacts quoted delimiter values and nested sensitive CLI assignments", () 
   }
 
   const cwd = tempDir();
-  assert.deepEqual(recordHistory(cwd, { tool: "bash", command: commands.join(" && "), decision: "approved" }), {
-    ok: true,
-  });
+  assert.deepEqual(
+    recordHistory(cwd, { tool: "bash", command: commands.join(" && "), decision: "approved", by: "user" }),
+    {
+      ok: true,
+    },
+  );
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
   assert.ok(!saved.includes("trailing-secret"));
   assert.ok(!saved.includes("private-value"));
@@ -228,7 +268,7 @@ test("redacts suffixed names and complete composed assignment spans", () => {
 
   const cwd = tempDir();
   const command = commands.join(" && ");
-  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
   for (const fragment of secretFragments) {
     if (command.includes(fragment)) assert.ok(!saved.includes(fragment), `JSONL retained ${fragment}: ${saved}`);
@@ -239,7 +279,7 @@ test("redacts padded sensitive values in pure output and JSONL", () => {
   const command = "TOKEN=base64payload==";
   const pure = redactSecrets(command);
   const cwd = tempDir();
-  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
   assert.deepEqual([pure.includes("base64payload=="), saved.includes("base64payload==")], [false, false]);
 });
@@ -248,7 +288,7 @@ test("redacts nested sensitive assignments in pure output and JSONL", () => {
   const command = 'DATA="client_secret=private-value"';
   const pure = redactSecrets(command);
   const cwd = tempDir();
-  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
   assert.deepEqual([pure.includes("private-value"), saved.includes("private-value")], [false, false]);
 });
@@ -261,7 +301,7 @@ test("retains enclosing quotes while redacting nested quoted CLI assignments", (
   const cwd = tempDir();
   const command = commands.join(" && ");
   const pure = commands.map((value) => redactSecrets(value));
-  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
   const leaks = [
     ...pure.flatMap((value) => [value.includes("first"), value.includes("trailing-secret")]),
@@ -301,7 +341,7 @@ test("redacts mixed padded values and quoted delimiter combinations", () => {
 
   const cwd = tempDir();
   const command = commands.join(" && ");
-  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+  assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
   for (const fragment of secretFragments) {
     if (command.includes(fragment)) assert.ok(!saved.includes(fragment), `JSONL retained ${fragment}: ${saved}`);
@@ -318,7 +358,7 @@ test("continues scanning after an empty nested value closes its enclosing quote"
   const cwd = tempDir();
   const pure = cases.map(({ command }) => redactSecrets(command));
   for (const { command } of cases) {
-    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   }
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
   const leaks = cases.flatMap(({ secret }, index) => [
@@ -371,7 +411,7 @@ test("single-quoted backslashes do not hide following sensitive values", () => {
     for (const secret of secrets) {
       if (pure.includes(secret)) pureLeaks.push(`${secret}: ${pure}`);
     }
-    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   }
 
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8");
@@ -393,7 +433,7 @@ test("redacts nested CLI overlaps without leaking suffixes in pure output or JSO
   const cwd = tempDir();
   const pure = commands.map(({ command }) => redactSecrets(command));
   for (const { command } of commands) {
-    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   }
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8")
     .trimEnd()
@@ -429,7 +469,7 @@ test("unquoted scanners honor escaped delimiters, backslash parity, and later se
   const cwd = tempDir();
   const pure = commands.map(({ command }) => redactSecrets(command));
   for (const { command } of commands) {
-    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   }
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8")
     .trimEnd()
@@ -456,7 +496,7 @@ test("handles escaped quote openers and quote transitions inside unquoted values
   const cwd = tempDir();
   const pure = cases.map(redactSecrets);
   for (const command of cases) {
-    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   }
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8")
     .trimEnd()
@@ -508,7 +548,7 @@ test("quoted-start values redact concatenated quoted and bare segments", () => {
   const cwd = tempDir();
   const pure = cases.map(({ command }) => redactSecrets(command));
   for (const { command } of cases)
-    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
   const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8")
     .trimEnd()
     .split("\n")
@@ -576,7 +616,7 @@ test("redacts concatenated nested values without losing separators or benign tai
   for (const { command, expected, secrets } of cases) {
     const pure = redactSecrets(command);
     if (pure !== expected) failures.push(`pure output: ${JSON.stringify(pure)} !== ${JSON.stringify(expected)}`);
-    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved" }), { ok: true });
+    assert.deepEqual(recordHistory(cwd, { tool: "bash", command, decision: "approved", by: "user" }), { ok: true });
     const saved = readFileSync(join(cwd, HISTORY_RELATIVE_PATH), "utf8").trimEnd().split("\n").at(-1)!;
     const parsed = JSON.parse(saved) as { command: string };
     if (parsed.command !== expected)
@@ -592,7 +632,7 @@ test("redacts concatenated nested values without losing separators or benign tai
 test("append or mkdir failure returns a decision-neutral error", () => {
   const cwd = tempDir();
   writeFileSync(join(cwd, ".pi"), "not a directory");
-  const result = recordHistory(cwd, { tool: "bash", command: "safe", decision: "approved" });
+  const result = recordHistory(cwd, { tool: "bash", command: "safe", decision: "approved", by: "user" });
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(typeof result.error, "string");
 });
